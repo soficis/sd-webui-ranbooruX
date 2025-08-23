@@ -61,6 +61,33 @@ Pick random LoRAs from a folder and add them to the prompt:
 ## How to use (RanbooruX)
 See `usage.md` for examples.
 
+### Bundled processing scripts
+- `Comments` (now bundled): removes `#`, `//`, and `/* */` comments from prompts and negative prompts before other scripts run. It is shipped inside this extension (`scripts/comments.py`) so Forge/A1111 will load it automatically with RanbooruX enabled.
+
+### Bundled ControlNet and paths
+- `sd_forge_controlnet/` is bundled for compatibility. RanbooruX will try to use Forge’s built‑in ControlNet first, then this bundled copy if needed. During install, its requirements are auto‑installed.
+- You can explicitly point to a ControlNet install by setting one of these env vars before launch:
+  - `SD_FORGE_CONTROLNET_PATH` or `RANBOORUX_CN_PATH` → folder containing `lib_controlnet/external_code.py` (for example your Forge built‑in `extensions-builtin/sd_forge_controlnet`).
+
+#### Optional: enable full Img2Img + ControlNet on Forge
+If your Forge build does not pass the Img2Img source image to ControlNet Unit 0 by default, you can use the modified ControlNet script bundled with RanbooruX:
+
+1. Make a backup of your original file:
+   - `webui\extensions-builtin\sd_forge_controlnet\scripts\controlnet.py`
+2. Copy the bundled file over it:
+   - From `extensions\sd-webui-ranbooruX\sd_forge_controlnet\scripts\controlnet.py`
+   - To `webui\extensions-builtin\sd_forge_controlnet\scripts\controlnet.py`
+3. Restart the WebUI.
+
+Note: Overwriting is optional and only needed if your current Forge ControlNet does not pick up Img2Img inputs properly with RanbooruX. Keep your backup so you can restore the original at any time.
+
+### ControlNet behavior on Forge
+- Forge’s ControlNet does not expose the A1111 helper functions RanbooruX would use to update units programmatically.
+- As a result, RanbooruX uses the reliable fallback (p.script_args) to pass the image and weight to Unit 0 when you enable “Use Image for ControlNet”. This is expected and working.
+- You’ll see a concise log indicating which path was taken:
+  - External API path: `[R Before] ControlNet configured via external_code.`
+  - Fallback path: `[R Before] ControlNet using fallback p.script_args hack.`
+
 ## Changelog
 ### 1.8 (Fork)
 - Renamed to RanbooruX; cleaned UI

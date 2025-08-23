@@ -20,6 +20,9 @@ from modules.scripts import basedir
 
 # --- Constants and Paths ---
 EXTENSION_ROOT = basedir()
+# Ensure extension root is on sys.path for local package imports (e.g., sd_forge_controlnet)
+if EXTENSION_ROOT not in sys.path:
+    sys.path.append(EXTENSION_ROOT)
 USER_DATA_DIR = os.path.join(EXTENSION_ROOT, 'user')
 USER_SEARCH_DIR = os.path.join(USER_DATA_DIR, 'search')
 USER_REMOVE_DIR = os.path.join(USER_DATA_DIR, 'remove')
@@ -516,13 +519,61 @@ class Script(scripts.Script):
             'extensions.sd_forge_controlnet.lib_controlnet.external_code',
             'extensions.sd-webui-controlnet.scripts.external_code',
         ]
-        last_error = None
+        errors = []
         for mod in candidates:
             try:
                 return importlib.import_module(mod)
             except Exception as e:
-                last_error = e
-        raise last_error if last_error else ImportError('ControlNet external_code not found')
+                errors.append(f"{mod}: {e}")
+        # Environment-provided ControlNet path
+        try:
+            env_root = os.environ.get('SD_FORGE_CONTROLNET_PATH') or os.environ.get('RANBOORUX_CN_PATH')
+            if env_root:
+                env_path = os.path.join(env_root, 'lib_controlnet', 'external_code.py')
+                if os.path.isfile(env_path):
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location('sd_forge_controlnet.lib_controlnet.external_code', env_path)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)  # type: ignore
+                    return module
+                else:
+                    errors.append(f"env:{env_path}: not found")
+        except Exception as e:
+            errors.append(f"env_load: {e}")
+        # WebUI built-in extensions path (Forge)
+        try:
+            webui_root = None
+            try:
+                from modules import paths as webui_paths  # type: ignore
+                webui_root = getattr(webui_paths, 'script_path', None)
+            except Exception as e:
+                errors.append(f"modules.paths.script_path: {e}")
+            if webui_root:
+                builtin_path = os.path.join(webui_root, 'extensions-builtin', 'sd_forge_controlnet', 'lib_controlnet', 'external_code.py')
+                if os.path.isfile(builtin_path):
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location('sd_forge_controlnet.lib_controlnet.external_code', builtin_path)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)  # type: ignore
+                    return module
+                else:
+                    errors.append(f"builtin:{builtin_path}: not found")
+        except Exception as e:
+            errors.append(f"builtin_load: {e}")
+        # Filesystem fallback (directly load from this extension folder)
+        try:
+            ext_path = os.path.join(EXTENSION_ROOT, 'sd_forge_controlnet', 'lib_controlnet', 'external_code.py')
+            if os.path.isfile(ext_path):
+                import importlib.util
+                spec = importlib.util.spec_from_file_location('sd_forge_controlnet.lib_controlnet.external_code', ext_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)  # type: ignore
+                return module
+            else:
+                errors.append(f"file://{ext_path}: not found")
+        except Exception as e:
+            errors.append(f"file_fallback: {e}")
+        raise ImportError("Unable to import ControlNet external_code. Attempts: " + "; ".join(errors))
 
     def get_files(self, path):
         files = []
@@ -1005,24 +1056,24 @@ class Script(scripts.Script):
                 # Preferred: external_code API from ControlNet
                 try:
                     cn_module = self._load_cn_external_code()
-                    cn_units = cn_module.get_all_units_in_processing(p)
-                    if cn_units and len(cn_units) > 0:
-                        copied_unit = cn_units[0].__dict__.copy()
-                        copied_unit['enabled'] = True
-                        copied_unit['weight'] = float(self.img2img_denoising)
-                        img_for_cn = self.last_img[0].convert('RGB') if self.last_img[0].mode != 'RGB' else self.last_img[0]
-                        copied_unit['image']['image'] = np.array(img_for_cn)
-                        cn_module.update_cn_script_in_processing(p, [copied_unit] + cn_units[1:])
-                        print("[R Before] ControlNet Unit 0 updated via external_code.")
-                        cn_configured = True
-                    else:
-                        print("[R Before] No ControlNet units detected; falling back to p.script_args.")
-                except Exception as e:
-                    print(f"[R Before] external_code ControlNet update failed: {e}")
+                    if hasattr(cn_module, 'get_all_units_in_processing') and hasattr(cn_module, 'update_cn_script_in_processing'):
+                        cn_units = cn_module.get_all_units_in_processing(p)
+                        if cn_units and len(cn_units) > 0:
+                            copied_unit = cn_units[0].__dict__.copy()
+                            copied_unit['enabled'] = True
+                            copied_unit['weight'] = float(self.img2img_denoising)
+                            img_for_cn = self.last_img[0].convert('RGB') if self.last_img[0].mode != 'RGB' else self.last_img[0]
+                            copied_unit['image']['image'] = np.array(img_for_cn)
+                            cn_module.update_cn_script_in_processing(p, [copied_unit] + cn_units[1:])
+                            cn_configured = True
+                            print("[R Before] ControlNet configured via external_code.")
+                    # else: module loaded but does not expose update helpers; silently skip to fallback
+                except Exception:
+                    # Silently fallback if external_code path not supported in this build
+                    pass
 
                 # Fallback: p.script_args hack (fragile but effective)
                 if not cn_configured:
-                    print("[R Before] Using p.script_args hack for ControlNet Unit 0.")
                     cn_arg_start_guess = 0
                     num_controls_per_unit = 20
                     if num_controls_per_unit > 0:
@@ -1042,7 +1093,7 @@ class Script(scripts.Script):
                                     args_target_list[weight_idx] = float(self.img2img_denoising)
                                     args_target_list[image_idx] = cn_image_input
                                     p.script_args = tuple(args_target_list)
-                                    print("[R Before] p.script_args updated for ControlNet Unit 0.")
+                                    print("[R Before] ControlNet using fallback p.script_args hack.")
                                 except Exception as e:
                                     print(f"[R Before] Error setting CN via p.script_args: {e}")
                             else:

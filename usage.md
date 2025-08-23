@@ -51,3 +51,5 @@ By enabling `Use LoRAnado` you can add random LoRAs to the prompt. Configure the
 
 ## Notes
 - RanbooruX logs canonical post URLs for selected items (e.g., `https://danbooru.donmai.us/posts/<id>`).
+- The bundled `Comments` script strips prompt comments (`#`, `//`, `/* */`) automatically when the extension is enabled.
+- On Forge, ControlNet is wired via a fallback that sets Unit 0 through `p.script_args`. This is expected because Forge’s ControlNet does not provide the A1111 programmatic update helpers. A log line indicates whether external API or fallback was used.
