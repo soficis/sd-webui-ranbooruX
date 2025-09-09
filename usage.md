@@ -1,5 +1,7 @@
 # RanbooruX Examples
 
+> Note: This repository is a heavily refactored fork of the original Ranbooru. Img2Img and ControlNet functionality that is currently broken in the original Ranbooru has been fixed here and the UI has been updated. See `README.md` for full details.
+
 ## Basic Search
 To do a basic search you'll need to set the following parameters:
 

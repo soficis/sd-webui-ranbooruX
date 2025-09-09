@@ -3,6 +3,18 @@
 RanbooruX is an extension for the [automatic111 Stable Diffusion UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui) and Forge. It adds a panel that fetches tags (and optionally source images) from multiple boorus to quickly generate varied prompts and test models.
 ![Alt text](pics/image.png)
 
+## About this fork — short summary
+
+RanbooruX is an actively maintained, extensively refactored fork of the original Ranbooru with a focus on reliability and Forge/A1111 compatibility. Concise highlights:
+
+- Refactor & reorganization for maintainability and clearer code structure.
+- Img2Img pipeline fixes so source images are used reliably in img2img passes.
+- Robust ControlNet integration with an external-API path and a p.script_args fallback for Forge builds.
+- UI cleanup and improved prompt/control options.
+- Bundled helper scripts (e.g., `Comments`) and request caching via `requests-cache`.
+
+See `CHANGELOG.md` for the full, detailed list of changes and migration notes.
+
 ## Installation
 - Clone or copy this repo into your Stable Diffusion WebUI extensions directory (Forge or A1111 compatible).
 - Dependencies are installed automatically by `install.py` (or run `pip install -r requirements.txt`).
