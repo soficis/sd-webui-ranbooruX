@@ -1,20 +1,60 @@
 # RanbooruX
+
 ![Alt text](pics/ranbooru.png)
+
 RanbooruX is an extension for the [automatic111 Stable Diffusion UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui) and Forge. It adds a panel that fetches tags (and optionally source images) from multiple boorus to quickly generate varied prompts and test models.
-![Alt text](pics/image.png)
 
-## About this fork — short summary
+## About This Fork
+The primary purpose of this fork is to resolve core **img2img** and **ControlNet** integration issues present in the original Ranbooru repository. **RanbooruX** enables their seamless combination while incorporating extensive refactoring and custom Forge UI scripts to supplant the original ones, addressing critical bugs and performance errors.
 
-RanbooruX is an actively maintained, extensively refactored fork of the original Ranbooru with a focus on reliability and Forge/A1111 compatibility. Concise highlights:
+### Technical Enhancements
+RanbooruX is not just a bugfix; it's a complete architectural overhaul designed for stability, maintainability, and modern development practices.
 
-- Refactor & reorganization for maintainability and clearer code structure.
-- Img2Img pipeline fixes so source images are used reliably in img2img passes.
-- Robust ControlNet integration with an external-API path and a p.script_args fallback for Forge builds.
-- UI cleanup and improved prompt/control options.
-- Bundled helper scripts (e.g., `Comments`) and request caching via `requests-cache`.
+#### 1. Core Script Refactoring
+The original procedural `ranbooru.py` script was fully refactored into an Object-Oriented architecture.
+-   **API Abstraction**: A base `Booru` class now manages common API request logic, error handling, and caching. Each specific booru (e.g., `Gelbooru`, `Danbooru`) inherits from this class, drastically reducing code duplication and making it easier to add new boorus.
+-   **Robust Error Handling**: Network timeouts, HTTP errors, and invalid API responses are now gracefully handled with `try...except` blocks and a custom `BooruError` exception, preventing silent failures.
+-   **Improved Readability**: The code is organized into smaller, single-responsibility functions with consistent logging (`[R] ...`) for easier debugging.
 
-See `CHANGELOG.md` for the full, detailed list of changes and migration notes.
+*   **Robust Data Fetching in RanbooruX:**
+    ```python
+    class Booru():
+        # ...
+        def _fetch_data(self, query_url):
+            print(f"[R] Querying {self.booru_name}: {query_url}")
+            try:
+                res = requests.get(query_url, headers=self.headers, timeout=30)
+                res.raise_for_status()
+                # ...
+            except requests.exceptions.RequestException as e:
+                print(f"[R] Error fetching data from {self.booru_name}: {e}")
+                raise BooruError(f"HTTP Error fetching from {self.booru_name}: {e}") from e
+    ```
 
+#### 2. Stable ControlNet Integration for SD Forge
+RanbooruX features a stable, built-in integration with ControlNet that isolates it from breaking changes in the main ControlNet extension.
+-   **Bundled ControlNet Module**: A self-contained copy of the necessary ControlNet API files is included in the `sd_forge_controlnet` directory. This ensures that RanbooruX's core functionality remains stable even if the user's main ControlNet extension is updated or changed.
+-   **Structured API Interaction**: The integration uses a `ControlNetUnit` data class (`lib_controlnet/external_code.py`) as a structured payload to reliably send the fetched image and settings to a ControlNet unit.
+
+#### 3. Modernized Installation and Dependency Management
+The installation process was updated to follow modern Python best practices.
+-   **From Hardcoded to `requirements.txt`**: The original `install.py` performed a single, hardcoded dependency check. The new version reads dependencies from `requirements.txt`, allowing for version pinning and easier management of multiple packages for both the main extension and the bundled ControlNet module.
+
+*   **Modernized `install.py` in RanbooruX:**
+    ```python
+    import os
+    import launch
+    # ...
+    def _install_req(path, desc):
+        if os.path.exists(path):
+            try:
+                launch.run_pip(f"install -r \"{path}\"", desc)
+            # ...
+    _install_req(os.path.join(ext_root, "requirements.txt"), "RanbooruX requirements")
+    _install_req(os.path.join(ext_root, "sd_forge_controlnet", "requirements.txt"), "...")
+    ```
+
+For a full list of user-facing changes, see the [CHANGELOG.md](CHANGELOG.md).
 ## Installation
 - Clone or copy this repo into your Stable Diffusion WebUI extensions directory (Forge or A1111 compatible).
 - Dependencies are installed automatically by `install.py` (or run `pip install -r requirements.txt`).
@@ -42,7 +82,7 @@ Notes:
 - **Mature Rating**: This sets the mature rating of the booru. This is useful if you want to get only SFW or NSFW tags. It only works on supported boorus (right now it has been tested only on Gelbooru).
 - **Remove Bad Tags**: This remove tags that you usually don't need (watermarks,text,censor)
 - **Shuffle Tags**: This shuffle the tags before adding them to the text.
-- **Convert** "\_" to Spaces": This convert \_ to spaces in the tags.
+- **Convert** "_" to Spaces": This convert _ to spaces in the tags.
 - **Use the same prompt for all images**: This use the same prompt for all the generated images in the same batch. If not selected, each image will have a different prompt.
 - **Limit Tags**: Limit number of tags by percent or absolute maximum.
 - **Max Tags**: Cap the number of tags used.
@@ -70,9 +110,17 @@ Pick random LoRAs from a folder and add them to the prompt:
 - **Max LoRAs Weight**: The maximum weight of the LoRAs to use in the prompt.
 - **LoRAs Custom Weights**: Here you can specify the weight to use with the random LoRAs (separated by commas). If you leave it blank, the extension will use the min and max weights. Example: if you have 3 LoRAs you can write: 0.2,0.3,0.5.
 
-## How to use (RanbooruX)
-See `usage.md` for examples.
+### Advanced Features
+RanbooruX includes several advanced features for more granular control over prompt generation and batch processing.
 
+-   **Advanced Prompt Manipulation**: Fine-tune prompts with features like mixing tags from multiple posts, introducing controlled chaos by shuffling tags between positive and negative prompts, and using file-based tag collections for easy reuse.
+-   **LoRAnado**: Automatically select and apply LoRAs from a specified subfolder with customizable weights, making it easy to experiment with different model combinations.
+-   **Enhanced Batch Processing**: Ensure consistency across batches with options to use the same prompt, source image, and seed for all generated images.
+-   **Photopea Integration**: The bundled ControlNet module includes a direct integration with Photopea, allowing for in-browser editing of ControlNet input images without leaving the Stable Diffusion UI.
+
+For more details on these features, see the [usage.md](usage.md) file.
+## How to Use
+For step-by-step examples and detailed guides, please refer to [usage.md](usage.md).
 ### Bundled processing scripts
 - `Comments` (now bundled): removes `#`, `//`, and `/* */` comments from prompts and negative prompts before other scripts run. It is shipped inside this extension (`scripts/comments.py`) so Forge/A1111 will load it automatically with RanbooruX enabled.
 
@@ -100,35 +148,10 @@ Note: Overwriting is optional and only needed if your current Forge ControlNet d
   - External API path: `[R Before] ControlNet configured via external_code.`
   - Fallback path: `[R Before] ControlNet using fallback p.script_args hack.`
 
-## Changelog
-### 1.8 (Fork)
-- Renamed to RanbooruX; cleaned UI
-- ControlNet integration (external_code + automatic p.script_args fallback)
-- Requests caching via `requests-cache`
-- Updated background/color options and sorting
-
 ## Known Issues
 - The chaos mode and negative mode can return an error when using a batch size greater than 1 combined with a batch count greater than 1. Rerunning the batch usually fixes the issue.
 - "sd-dynamic-prompts" creates problems with the multiple prompts option. Disabling the extension is the only solution for now.
 - Right now to run the img2img the extension creates an img with 1 step before creating the actual image. I don't know how to fix this, if someone want to help me with this I'd be grateful.
 - Send to controlnet needs an dummy image to work.
-
-## Found an issue?  
-If you found an issue with the extension, please report it in the issues section of this repository.  
-Special thanks to [TheGameratorT](https://github.com/TheGameratorT), [SmashinFries](https://github.com/SmashinFries), and [w-e-w](https://github.com/w-e-w) for contributing.
-
-## Check out my other scripts
-- [Ranbooru for ComfyUI](https://github.com/Inzaniak/comfyui-ranbooru)
-- [Workflow](https://github.com/Inzaniak/sd-webui-workflow)
-
 ---
-## Made by Inzaniak
-![Alt text](pics/logo.png) 
-
-
-If you'd like to support my work feel free to check out my Patreon: https://www.patreon.com/Inzaniak
-
-Also check my other links:
-- **Personal Website**: https://inzaniak.github.io 
-- **Deviant Art**: https://www.deviantart.com/inzaniak
-- **CivitAI**: https://civitai.com/user/Inzaniak/models
+## Original Repo by Inzaniak

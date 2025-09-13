@@ -1,4 +1,25 @@
+# IDE settings
 .vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Build artifacts
+build/
+dist/
+
+# Temporary files
+*.tmp
+*.bak
+
+# Log files
+*.log
+
+# Roo
+.roomodes
+.rooroo/
+
+# Other
 deploy.ps1
-__pycache__
 user
