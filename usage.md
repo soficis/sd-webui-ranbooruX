@@ -78,6 +78,56 @@ RanbooruX offers several advanced modes to fine-tune and experiment with your pr
     -   **Limit Tags by %**: Reduces the total number of tags by a percentage.
     -   **Max tags**: Sets a hard limit on the total number of tags.
 
+### Tag Filtering and Removal
+RanbooruX includes advanced tag filtering capabilities to help you customize your prompts by removing unwanted tags.
+
+#### Artist Tag Removal
+- **Remove Artist tags from prompt**: When enabled, this feature automatically identifies and removes artist tags from the generated prompt
+- **How it works**: The system extracts artist information from booru post metadata and removes matching tags from the final prompt
+- **Supported boorus**: Works with all supported boorus that provide artist metadata (Danbooru, Gelbooru, etc.)
+- **Matching**: Uses intelligent matching that handles both underscore and space formats (e.g., "artist_name" and "artist name")
+
+#### Character Tag Removal
+- **Remove Character tags from prompt**: When enabled, this feature automatically identifies and removes character tags from the generated prompt
+- **How it works**: The system extracts character information from booru post metadata and removes matching tags from the final prompt
+- **Pattern recognition**: For boorus that don't provide categorized tags, the system uses pattern matching to identify character tags (e.g., tags containing parentheses like "character_(series)")
+- **Matching**: Uses normalized matching that handles case sensitivity and underscore/space variations
+
+**Example Usage:**
+1. Enable "Remove Artist tags from prompt" and "Remove Character tags from prompt"
+2. Search for posts with tags like "1girl, solo"
+3. The system will:
+   - Extract artist tags like "artist_name" from the post metadata
+   - Extract character tags like "character_(series)" from the post metadata
+   - Remove these tags from the final prompt before generation
+   - Result: A cleaner prompt focused on style and general tags rather than specific artists or characters
+
+**Benefits:**
+- Create more generic prompts for training or style studies
+- Avoid over-fitting to specific artists or characters
+- Generate variations without being tied to particular creators
+- Useful for creating base prompts that can be reused across different styles
+
+**Practical Examples:**
+
+*Before enabling tag removal:*
+```
+Original post tags: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name, score:150
+Final prompt: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name
+```
+
+*After enabling "Remove Artist tags" and "Remove Character tags":*
+```
+Original post tags: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name, score:150
+Final prompt: 1girl, solo, blue_eyes, blonde_hair
+```
+
+*Use case - Style study:*
+- Search for "1girl, solo, blue_eyes" on Danbooru
+- Enable both artist and character tag removal
+- Generate multiple images to study different artistic interpretations of the same basic concept
+- Result: Prompts focused on style elements rather than specific characters or artists
+
 ### LoRAnado: Automated LoRA Integration
 LoRAnado automatically selects and applies one or more LoRAs to your prompt.
 

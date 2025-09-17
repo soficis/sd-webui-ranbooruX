@@ -81,6 +81,8 @@ Notes:
 - **Tags to Remove (Post)**: This remove the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) from the result query. This is useful if you want to remove tags that are too generic, like "1girl" or "solo". You can also use * with any tag to remove every tags which contains the related word. e.g: *hair will remove every tag that contains the word "hair".
 - **Mature Rating**: This sets the mature rating of the booru. This is useful if you want to get only SFW or NSFW tags. It only works on supported boorus (right now it has been tested only on Gelbooru).
 - **Remove Bad Tags**: This remove tags that you usually don't need (watermarks,text,censor)
+- **Remove Artist tags from prompt**: Automatically removes artist tags (like artist names) from the generated prompt
+- **Remove Character tags from prompt**: Automatically removes character tags (like character names from series) from the generated prompt
 - **Shuffle Tags**: This shuffle the tags before adding them to the text.
 - **Convert** "_" to Spaces": This convert _ to spaces in the tags.
 - **Use the same prompt for all images**: This use the same prompt for all the generated images in the same batch. If not selected, each image will have a different prompt.

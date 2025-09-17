@@ -1,4 +1,5 @@
 from io import BytesIO
+import re
 import random
 import requests
 import modules.scripts as scripts
@@ -241,7 +242,47 @@ class Booru():
 
     def _standardize_post(self, post_data):
         post = {}
-        post['tags'] = post_data.get('tags', post_data.get('tag_string', ''))
+        # extract tags in a robust way; some APIs return categorized tags as dicts
+        raw_tags = post_data.get('tags', post_data.get('tag_string', ''))
+        # store categorized lists when possible
+        artist_tags = []
+        character_tags = []
+        if isinstance(post_data.get('tags'), dict):
+            tags_dict = post_data.get('tags')
+            # e621 style: tags dict with sublevels
+            if isinstance(tags_dict.get('artist'), list):
+                artist_tags = tags_dict.get('artist', [])
+            if isinstance(tags_dict.get('character'), list):
+                character_tags = tags_dict.get('character', [])
+            # some APIs provide tag_string_artist / tag_string_character
+        if 'tag_string_artist' in post_data:
+            try:
+                artist_tags = [t for t in re.split(r'[,\s]+', post_data.get('tag_string_artist', '').strip()) if t]
+            except Exception:
+                pass
+        if 'tag_string_character' in post_data:
+            try:
+                character_tags = [t for t in re.split(r'[,\s]+', post_data.get('tag_string_character', '').strip()) if t]
+            except Exception:
+                pass
+        
+        # For boorus that don't provide categorized tags, try to extract character tags from the main tag string
+        # This handles cases like Gelbooru/Danbooru where character tags are mixed with other tags
+        if not character_tags and isinstance(raw_tags, str):
+            all_tags = [t.strip() for t in re.split(r'[,\s]+', raw_tags) if t.strip()]
+            for tag in all_tags:
+                # Common patterns for character tags: contains parentheses (series name) or ends with specific patterns
+                if ('(' in tag and ')' in tag) or tag.endswith(r'_\(series\)') or tag.endswith(r'_\(character\)'):
+                    character_tags.append(tag)
+                # Also catch some common character name patterns (this is heuristic but should catch most)
+                elif any(series in tag.lower() for series in ['genshin_impact', 'touhou', 'fate_', 'azur_lane', 'kantai_collection', 'pokemon']):
+                    character_tags.append(tag)
+        
+        # print(f"[R Debug] Post {post_data.get('id', 'unknown')}: extracted {len(character_tags)} character tags: {character_tags}")
+        
+        post['tags'] = raw_tags
+        post['artist_tags'] = artist_tags
+        post['character_tags'] = character_tags
         post['score'] = post_data.get('score', 0)
         post['file_url'] = post_data.get('file_url')
         if post['file_url'] is None:
@@ -313,7 +354,10 @@ class Danbooru(Booru):
                 all_fetched_posts = fetched_data
             COUNT = len(all_fetched_posts)
             print(f"[R] Fetched {COUNT} posts from page {page}.")
-        return [self._standardize_post(post) for post in all_fetched_posts]
+        return [self._standardize_post(post) for post in all_fetched_posts if post]
+
+
+
 
 
 class XBooru(Booru):
@@ -605,7 +649,7 @@ class Script(scripts.Script):
             gr.Markdown("""## Post"""); post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
             gr.Markdown("""## Tags"""); tags = gr.Textbox(lines=1, label="Tags to Search (Pre)"); remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
             mature_rating = gr.Radio(list(RATINGS.get('gelbooru', RATING_TYPES['none'])), label="Mature Rating", value="All")
-            remove_bad_tags = gr.Checkbox(label="Remove common 'bad' tags", value=True); shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True); change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False); same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
+            remove_bad_tags = gr.Checkbox(label="Remove common 'bad' tags", value=True); remove_artist_tags = gr.Checkbox(label="Remove Artist tags from prompt", value=False); remove_character_tags = gr.Checkbox(label="Remove Character tags from prompt", value=False); shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True); change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False); same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
             fringe_benefits = gr.Checkbox(label="Gelbooru: Fringe Benefits", value=True, visible=True)
             limit_tags = gr.Slider(value=1.0, label="Limit tags by %", minimum=0.05, maximum=1.0, step=0.05); max_tags = gr.Slider(value=0, label="Max tags (0=disabled)", minimum=0, maximum=300, step=1)
             change_background = gr.Radio(["Don't Change", "Add Detail", "Force Simple", "Force Transparent/White"], label="Change Background", value="Don't Change")
@@ -636,7 +680,7 @@ class Script(scripts.Script):
             with gr.Box(): lora_min = gr.Slider(value=0.6, label="Min LoRAs Weight", minimum=-1.0, maximum=1.5, step=0.1); lora_max = gr.Slider(value=1.0, label="Max LoRAs Weight", minimum=-1.0, maximum=1.5, step=0.1); lora_custom_weights = gr.Textbox(lines=1, label="Custom Weights (optional)", placeholder="e.g., 0.8, 0.5, 1.0")
         search_refresh_btn.click(fn=self.refresh_ser, inputs=[], outputs=[choose_search_txt])
         remove_refresh_btn.click(fn=self.refresh_rem, inputs=[], outputs=[choose_remove_txt])
-        return [enabled, tags, booru, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, use_same_seed, use_cache]
+        return [enabled, tags, booru, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, use_same_seed, use_cache, remove_artist_tags, remove_character_tags]
 
     def check_orientation(self, img):
         if img is None:
@@ -730,7 +774,8 @@ class Script(scripts.Script):
 
     def _fetch_booru_posts(self, api, search_tags, mature_rating, max_pages, post_id):
         add_tags_list = []
-        if search_tags:
+        # Don't add search_tags to tags_query when using post_id - causes API confusion
+        if search_tags and not post_id:
             add_tags_list.extend([t.strip() for t in search_tags.split(',') if t.strip()])
         booru_name = api.booru_name.lower()
         if mature_rating != 'All' and booru_name in RATINGS and mature_rating in RATINGS[booru_name]:
@@ -739,7 +784,7 @@ class Script(scripts.Script):
                 add_tags_list.append(f"rating:{rating_tag}")
         add_tags_list.append('-animated')
         tags_query = f"&tags={'+'.join(add_tags_list)}" if add_tags_list else ""
-        print(f"[R] Query Tags: '{tags_query}'")
+        print(f"[R] Query Tags: '{tags_query}' (post_id={post_id})")
         try:
             all_posts = api.get_posts(tags_query=tags_query, max_pages=max_pages, post_id=post_id)
             if not all_posts:
@@ -821,24 +866,71 @@ class Script(scripts.Script):
         return fetched_images
 
     def _process_single_prompt(self, index, raw_prompt, base_positive, base_negative, initial_additions, bad_tags, settings):
-        (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru) = settings
+        (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, remove_artist_tags, remove_character_tags) = settings
         current_prompt = f"{initial_additions},{raw_prompt}" if initial_additions else raw_prompt
-        prompt_tags = [tag.strip() for tag in current_prompt.split(',') if tag.strip()]
+        prompt_tags = [tag.strip() for tag in re.split(r'[,\t\s]+', current_prompt) if tag.strip()]
+        # If removal flags are set, remove tags coming from selected post's artist/character lists
+        try:
+            post_meta = self._selected_posts[index] if hasattr(self, '_selected_posts') and index < len(self._selected_posts) else {}
+            artist_tags_meta = post_meta.get('artist_tags', []) if isinstance(post_meta, dict) else []
+            character_tags_meta = post_meta.get('character_tags', []) if isinstance(post_meta, dict) else []
+            # Debug: show what tags we extracted from post metadata
+            # print(f"[R Debug] Remove flags: artist={remove_artist_tags}, character={remove_character_tags}")
+            if remove_artist_tags and artist_tags_meta:
+                pass
+                # print(f"[R Debug] Artist tags from post {index}: {artist_tags_meta}")
+            if remove_character_tags and character_tags_meta:
+                pass
+                # print(f"[R Debug] Character tags from post {index}: {character_tags_meta}")
+            # normalize tags for comparison (underscores/spaces, lower)
+            norm = lambda s: s.replace('_', ' ').strip().lower()
+            artist_norm = set([norm(t) for t in artist_tags_meta if isinstance(t, str)])
+            char_norm = set([norm(t) for t in character_tags_meta if isinstance(t, str)])
+            # Also include the original forms (without underscore replacement) for matching
+            artist_norm.update([t.strip().lower() for t in artist_tags_meta if isinstance(t, str)])
+            char_norm.update([t.strip().lower() for t in character_tags_meta if isinstance(t, str)])
+            # print(f"[R Debug] Character normalized set: {char_norm}")
+            if remove_artist_tags or remove_character_tags:
+                # print(f"[R Debug] Original prompt tags: {prompt_tags}")
+                filtered_prompt_tags = []
+                removed_count = 0
+                for t in prompt_tags:
+                    t_norm = norm(t)
+                    t_orig = t.strip().lower()  # Also check original form without underscore conversion
+                    should_remove = False
+                    # print(f"[R Debug] Checking tag '{t}': normalized='{t_norm}', original='{t_orig}'")
+                    
+                    if remove_artist_tags and (t_norm in artist_norm or t_orig in artist_norm):
+                        # print(f"[R Debug] Removing artist tag: '{t}' (normalized: '{t_norm}', original: '{t_orig}')")
+                        removed_count += 1
+                        should_remove = True
+                    elif remove_character_tags and (t_norm in char_norm or t_orig in char_norm):
+                        # print(f"[R Debug] Removing character tag: '{t}' (normalized: '{t_norm}', original: '{t_orig}')")
+                        # print(f"[R Debug] Match found: t_norm in char_norm={t_norm in char_norm}, t_orig in char_norm={t_orig in char_norm}")
+                        removed_count += 1
+                        should_remove = True
+                    
+                    if not should_remove:
+                        filtered_prompt_tags.append(t)
+                
+                # print(f"[R Debug] Filtered prompt tags: {filtered_prompt_tags}")
+                # print(f"[R Debug] Removed {removed_count} artist/character tags from prompt {index}")
+                prompt_tags = filtered_prompt_tags
+        except Exception:
+            # fallback: ignore removal if anything goes wrong
+            pass
         wildcard_bad = {pat.replace('*', ''): ('s' if pat.endswith('*') else ('e' if pat.startswith('*') else 'c')) for pat in bad_tags if '*' in pat}
         non_wild_bad = bad_tags - set(wildcard_bad.keys()) if isinstance(bad_tags, set) else set(bad_tags) - set(wildcard_bad.keys())
         filtered_tags = []
         for tag in prompt_tags:
             is_bad = tag in non_wild_bad
-            match = False
             if not is_bad:
                 for pattern, mode in wildcard_bad.items():
                     if not pattern:
                         continue
                     if (mode == 's' and tag.startswith(pattern)) or (mode == 'e' and tag.endswith(pattern)) or (mode == 'c' and pattern in tag):
-                        match = True
+                        is_bad = True
                         break
-                if match:
-                    is_bad = True
             if not is_bad:
                 filtered_tags.append(tag)
         current_prompt = ','.join(filtered_tags)
@@ -950,20 +1042,28 @@ class Script(scripts.Script):
 
     def before_process(self, p: StableDiffusionProcessing, *args):
         try:
+            # Keep existing ordering stable for most outputs; the two new flags are expected at the end.
             (enabled, tags, booru, remove_bad_tags_ui, max_pages, change_dash, same_prompt,
              fringe_benefits, remove_tags_ui, use_img2img, denoising, use_last_img,
              change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount,
              chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, sorting_order, mature_rating,
              lora_folder, lora_amount, lora_min, lora_max, lora_enabled,
              lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt,
-             choose_search_txt, choose_remove_txt, _, _,
-             crop_center, use_deepbooru, type_deepbooru, use_same_seed, use_cache) = args
+             choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn,
+             crop_center, use_deepbooru, type_deepbooru, use_same_seed, use_cache,
+             remove_artist_tags_ui, remove_character_tags_ui) = args
         except Exception as e:
             print(f"[R Before] CRITICAL Error unpack args: {e}. Aborting.")
             traceback.print_exc()
             return
 
-        self.img2img_denoising = float(denoising)
+        # denoising may come through as an empty string from the UI in some contexts; parse defensively
+        try:
+            self.img2img_denoising = float(denoising)
+        except Exception:
+            # fall back to previous default and warn
+            self.img2img_denoising = float(getattr(self, 'img2img_denoising', 0.75))
+            print(f"[R Before] Warn: invalid denoising value '{denoising}', falling back to {self.img2img_denoising}")
 
         # Persist values needed for postprocess to avoid fragile unpacking there
         self._post_enabled = bool(enabled)
@@ -991,6 +1091,10 @@ class Script(scripts.Script):
             all_posts = self._fetch_booru_posts(api, search_tags, mature_rating, max_pages, post_id)
             num_images_needed = p.batch_size * p.n_iter
             selected_posts = self._select_posts(all_posts, sorting_order, num_images_needed, post_id, same_prompt)
+            # persist selected posts and removal flags so prompt processing can access them
+            self._selected_posts = selected_posts
+            self._remove_artist_tags = bool(remove_artist_tags_ui)
+            self._remove_character_tags = bool(remove_character_tags_ui)
 
             post_urls = []
             try:
@@ -1010,7 +1114,7 @@ class Script(scripts.Script):
             base_negative = getattr(p, 'negative_prompt', '') or ""
             final_prompts = []
             final_negative_prompts = [base_negative] * num_images_needed
-            prompt_processing_settings = (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru)
+            prompt_processing_settings = (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, self._remove_artist_tags, self._remove_character_tags)
             raw_prompts = [post.get('tags', '') for post in selected_posts]
 
             if mix_prompt and not post_id and not same_prompt:
