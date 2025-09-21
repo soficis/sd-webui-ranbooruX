@@ -67,13 +67,28 @@ This is the main part of the extension. It gets a random set of tags from boorus
 Here's an explanation of all the parameters:
 - **Booru**: The booru to get the tags from. Right now Gelbooru, Rule34, Safebooru, yande.re, konachan, aibooru, danbooru and xbooru are implemented. You can easily add more creating a class for the booru and adding it to the booru list in the script.
 
-### Supported boorus
+### Supported Boorus and API Details
 `gelbooru`, `danbooru`, `xbooru`, `rule34`, `safebooru`, `konachan`, `yande.re`, `aibooru`, `e621`.
 
-Notes:
-- Some APIs restrict post ID lookups: `konachan`, `yande.re`, and `e621` don’t support `Post ID` in this extension.
-- `danbooru` only supports a single tag in API search queries.
-- Some sites may require credentials or rate-limit unauthenticated requests. RanbooruX uses public endpoints; if access is restricted by the site, consider using alternative boorus.
+#### API Compatibility Matrix
+
+| Booru | Multi-Tag Search | Post ID Support | Rating System | Tag Categorization | Special Features |
+|-------|------------------|-----------------|---------------|-------------------|------------------|
+| **Danbooru** | ❌ Single tag only | ✅ Full | 4-tier custom | ✅ Structured | High-quality art |
+| **Gelbooru** | ✅ Complex queries | ✅ Full | 3-tier standard | Manual parsing | Fringe Benefits option |
+| **Safebooru** | ✅ Multi-tag | ✅ Full | None (SFW only) | Directory-based | SFW content focus |
+| **Rule34.xxx** | ✅ Multi-tag | ✅ Full | 3-tier standard | Flat strings | Adult content |
+| **Konachan** | ✅ Multi-tag | ❌ Not supported | 3-tier standard | ✅ Structured | High-quality curated |
+| **Yande.re** | ✅ Multi-tag | ❌ Not supported | 3-tier standard | ✅ Structured | High-quality curated |
+| **e621** | ✅ Complex queries | ❌ Not supported | Custom | ✅ Highly structured | Furry/anthro focus |
+| **AIBooru** | ✅ Multi-tag | ❌ Not supported | 3-tier standard | Flat strings | AI-generated focus |
+| **XBooru** | ✅ Multi-tag | ✅ Full | 3-tier standard | Directory-based | Alternative to Gelbooru |
+
+#### Important API Limitations
+- **Post ID Restrictions**: `konachan`, `yande.re`, and `e621` APIs don't support direct post ID lookups
+- **Danbooru Tag Limit**: Only single tags supported (e.g., "1girl" works, "1girl solo" fails)
+- **Rate Limiting**: All boorus implement rate limiting; RanbooruX uses intelligent caching to minimize API calls
+- **Authentication**: All endpoints are public; no authentication required but some may have stricter limits
 
 - **Max Pages**: Maximum pages considered when selecting random posts.
 - **Post ID**: Here you can specify the ID of the post to get the tags from. If you leave it blank, the extension will get a random post (or more than one) from the random page.

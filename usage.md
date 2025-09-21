@@ -143,12 +143,130 @@ LoRAnado automatically selects and applies one or more LoRAs to your prompt.
 -   **Use same image for batch**: Uses the same source image for `img2img` or `ControlNet` across the batch.
 -   **Use same seed for batch**: Uses a single seed for all images in the batch.
 
+### File-Based Tag Management
+RanbooruX supports external tag files for advanced prompt customization:
+
+#### Search Tag Files (`extensions/ranbooruX/user/search/`)
+-   **Format**: One tag combination per line (e.g., `artist_name, masterpiece`)
+-   **Random Selection**: When enabled, randomly selects one line from the chosen file
+-   **Integration**: Appends selected tags to your main search query
+-   **Use Case**: Create themed tag collections or A/B test different tag combinations
+
+#### Remove Tag Files (`extensions/ranbooruX/user/remove/`)
+-   **Format**: One tag pattern per line
+-   **Wildcard Support**: Use `*` for partial matches (e.g., `*hair` removes all hair-related tags)
+-   **Integration**: Extends the "Tags to Remove" functionality
+-   **Use Case**: Maintain consistent tag filtering across sessions
+
+#### File Structure Example
+```
+extensions/ranbooruX/user/
+├── search/
+│   ├── artistic.txt     → "artist_focus, intricate_details"
+│   ├── character.txt    → "character_focus, dynamic_pose"
+│   └── style.txt        → "digital_art, concept_art"
+└── remove/
+    ├── generic.txt      → "text, watermark, signature"
+    └── quality.txt      → "*logo, *username, low_quality"
+```
+
+#### Usage Example
+1. Enable "Use tags_search.txt"
+2. Select "artistic.txt" from dropdown
+3. Tags "1girl, solo" + file selection → Final query: "1girl, solo, artist_focus, intricate_details"
+
+### Advanced Tag Processing Architecture
+RanbooruX uses a sophisticated multi-stage tag processing pipeline:
+
+#### Stage 1: API Response Standardization
+-   **Multi-Format Parsing**: Handles different API response formats (dict vs string tags)
+-   **Intelligent Categorization**: Extracts artist/character tags from metadata
+-   **Fallback Pattern Matching**: Uses regex for boorus without categorized APIs
+
+#### Stage 2: Tag Filtering and Removal
+-   **Artist Tag Removal**: Extracts from `tag_string_artist` or `tags['artist']`
+-   **Character Tag Removal**: Uses pattern matching for `character_(series)` format
+-   **Normalization**: Handles underscore ↔ space conversion and case sensitivity
+-   **Wildcard Matching**: Supports `*` wildcards for partial tag removal
+
+#### Stage 3: Tag Enhancement and Chaos
+-   **Background/Color Injection**: Automatically adds/removes tags based on UI selections
+-   **Chaos Modes**: "Shuffle All" or "Shuffle Negative" with percentage control
+-   **Tag Mixing**: Combines tags from multiple posts with random selection
+-   **Deduplication**: Removes duplicate tags while preserving order
+
+#### Technical Implementation Details
+```python
+# Artist tag extraction example
+artist_tags = []
+if 'tag_string_artist' in post_data:
+    artist_tags = [t.strip() for t in re.split(r'[,\s]+', post_data['tag_string_artist']) if t.strip()]
+
+# Character tag pattern matching
+character_patterns = [
+    r'.*\(.*\).*',  # Contains parentheses (character_series)
+    r'.*_.*series.*',  # Underscore series format
+    r'.*genshin_impact.*',  # Known series patterns
+    r'.*touhou.*',
+    r'.*fate_.*'
+]
+```
+
 ### Image Caching and Refresh
 RanbooruX automatically caches fetched images and posts to improve performance and consistency when generating multiple images with the same settings.
 
 -   **Automatic Caching**: Images are automatically cached when first fetched and reused for subsequent generations with identical search parameters.
 -   **Force Fresh Images**: Add `!refresh` to your search tags to force fetch new images instead of reusing cached ones.
 -   **Cache Behavior**: The cache is keyed by booru, tags, post ID, rating, and sorting order. Any change to these parameters will trigger a fresh fetch.
+-   **Cache Persistence**: Cached data persists between generations but is automatically cleared when the WebUI session ends.
+
+#### Cache Key Generation
+The cache uses a composite key: `{booru}_{tags}_{post_id}_{mature_rating}_{sorting_order}`. This ensures that:
+- Changing any search parameter invalidates the cache
+- Different sorting methods use different cached results
+- Post ID overrides always bypass cache
+
+#### Force Refresh Usage
+```
+Examples:
+'1girl, solo'                    → Uses cache if available
+'1girl, solo,!refresh'          → Forces fresh fetch, removes !refresh from actual query
+'1girl, solo, blonde_hair'      → New cache entry (different tags)
+```
+
+### Advanced Sorting Options
+RanbooruX provides three sorting methods with different selection algorithms:
+
+-   **Random**: Pure random selection from available posts.
+-   **Score Descending**: Weighted random selection favoring higher-scored posts using exponential decay.
+-   **Score Ascending**: Weighted random selection favoring lower-scored posts.
+
+#### Weighted Random Algorithm
+For score-based sorting, RanbooruX uses a mathematical weighting system:
+- Posts are ranked by score (higher = better for Descending, lower = better for Ascending)
+- Weights follow an exponential distribution to prefer top-ranked posts
+- Formula: `weight[i] = exp(-k * rank[i])` where k controls preference strength
+
+### Background and Color Transformations
+RanbooruX can automatically modify image backgrounds and colors by injecting/removing tags:
+
+#### Background Options
+-   **Don't Change**: No background modifications
+-   **Add Detail**: Adds tags like "outdoors", "indoors", "detailed_background"
+-   **Force Simple**: Adds "simple_background" and removes detailed background tags
+-   **Force Transparent/White**: Adds "transparent_background" or "white_background"
+
+#### Color Options
+-   **Don't Change**: No color modifications
+-   **Force Color**: Removes black & white tags ("monochrome", "greyscale", "limited_palette")
+-   **Force Monochrome**: Adds random B&W tag and removes color-related tags
+
+#### Technical Implementation
+Background and color transformations work by:
+1. Analyzing your tag selection
+2. Automatically adding appropriate tags to your query
+3. Removing conflicting tags from the final prompt
+4. Using intelligent tag mapping for consistent results
 
 ### Photopea Integration for In-Browser Editing
 The bundled ControlNet module includes a direct integration with Photopea, a powerful online image editor.
@@ -159,10 +277,173 @@ The bundled ControlNet module includes a direct integration with Photopea, a pow
 3.  An editor will open in a modal. Use its tools to modify your image.
 4.  Click **"Accept"**. The edited image is sent back to the ControlNet unit.
 
+## Technical Architecture Details
+
+### Booru API Behavior and Compatibility
+
+RanbooruX supports multiple booru APIs with different capabilities and limitations:
+
+#### Danbooru (`danbooru.donmai.us`)
+-   **Tag Query**: Single tag only (e.g., "1girl" works, "1girl solo" fails)
+-   **Post ID Support**: ✅ Full support with direct post lookup
+-   **Rating System**: Custom 4-tier system (All, Safe, Sensitive, Questionable, Explicit)
+-   **Tag Format**: Structured JSON with categorized tags (artist, character, general)
+-   **Rate Limiting**: Moderate; uses request caching to minimize API calls
+
+#### Gelbooru (`gelbooru.com`)
+-   **Tag Query**: ✅ Multi-tag support with complex queries
+-   **Post ID Support**: ✅ Full support
+-   **Rating System**: Standard 3-tier (Safe, Questionable, Explicit)
+-   **Special Feature**: "Fringe Benefits" - enables access to additional content categories
+-   **Tag Format**: Flat tag strings with manual categorization
+
+#### Safebooru (`safebooru.org`)
+-   **Tag Query**: ✅ Multi-tag support
+-   **Post ID Support**: ✅ Full support
+-   **Rating System**: None (Safe content only)
+-   **Tag Format**: Flat strings with directory-based file URLs
+-   **Use Case**: SFW content generation
+
+#### Rule34.xxx (`rule34.xxx`)
+-   **Tag Query**: ✅ Multi-tag support
+-   **Post ID Support**: ✅ Full support
+-   **Rating System**: Standard 3-tier
+-   **Tag Format**: Flat strings
+-   **Content Warning**: Primarily adult content
+
+#### Konachan/Yande.re (`konachan.com`, `yande.re`)
+-   **Tag Query**: ✅ Multi-tag support
+-   **Post ID Support**: ❌ Not supported (API limitation)
+-   **Rating System**: Standard 3-tier
+-   **Tag Format**: Structured JSON with categorized tags
+-   **Quality Focus**: High-quality art collections
+
+#### e621 (`e621.net`)
+-   **Tag Query**: ✅ Multi-tag support with complex queries
+-   **Post ID Support**: ❌ Not supported
+-   **Rating System**: Custom system
+-   **Tag Format**: Highly structured with species/artist/character categorization
+-   **Content Focus**: Furry/anthro content
+
+### ControlNet Integration Architecture
+
+RanbooruX uses a sophisticated dual-path ControlNet integration system:
+
+#### Primary Path (External API)
+```python
+# Attempts to use ControlNet's official external_code API
+cn_module = self._load_cn_external_code()
+cn_units = cn_module.get_all_units_in_processing(p)
+if cn_units and hasattr(cn_module, 'update_cn_script_in_processing'):
+    # Direct unit manipulation
+    cn_module.update_cn_script_in_processing(p, modified_units)
+```
+
+#### Fallback Path (Script Args)
+```python
+# Forge compatibility - manipulates p.script_args directly
+args_target_list[enabled_idx] = True        # Enable unit
+args_target_list[weight_idx] = denoising    # Set weight
+args_target_list[image_idx] = image_data    # Set image
+p.script_args = tuple(args_target_list)
+```
+
+#### Path Selection Logic
+1. **Try External API**: Preferred for A1111 and compatible forks
+2. **Fallback to Script Args**: Automatic fallback for Forge and similar
+3. **Logging**: Clear indication of which path was used in console
+
+### Image Processing Pipeline
+
+RanbooruX processes images through multiple stages:
+
+#### 1. Fetch and Validation
+-   **URL Filtering**: Blocks external sites (Pixiv, Twitter) that don't provide direct access
+-   **Format Detection**: Validates image extensions (.jpg, .png, .gif, .webp)
+-   **Error Handling**: Graceful fallback for failed downloads
+
+#### 2. Preprocessing for Img2Img
+-   **Resize Algorithm**: Center crop with aspect ratio preservation
+-   **Format Conversion**: Automatic RGB conversion
+-   **Batch Handling**: Individual processing to avoid memory issues
+
+#### 3. Postprocessing
+-   **Individual Rendering**: Each image processed separately to prevent batch size conflicts
+-   **Result Aggregation**: Combines individual results into final output
+-   **Seed Management**: Incremental seeds for variety in batch processing
+
+## Troubleshooting Guide
+
+### Common Issues and Solutions
+
+#### "Extension not loading" / SyntaxError
+**Symptoms**: Extension fails to load with syntax errors
+**Solutions**:
+1. Check Python version compatibility (tested on 3.10+)
+2. Verify all dependencies installed: `pip install -r requirements.txt`
+3. Check for conflicting extensions
+4. Review console logs for specific error messages
+
+#### "No images found" / Empty Results
+**Symptoms**: API returns no posts matching criteria
+**Solutions**:
+1. **Danbooru**: Use single tags only (remove spaces/commas)
+2. **Check Ratings**: Ensure rating filter matches available content
+3. **Verify Tags**: Test tags directly on booru website
+4. **Page Limits**: Try lower "Max Pages" value (some boorus have stricter limits)
+
+#### ControlNet Not Working
+**Symptoms**: Images not sent to ControlNet despite enabling option
+**Solutions**:
+1. **Check Logs**: Look for "ControlNet configured" or "fallback" messages
+2. **Unit 0**: Ensure ControlNet Unit 0 is enabled in UI
+3. **Forge Users**: This is expected behavior - uses fallback method
+4. **Image Format**: Ensure images are RGB format
+
+#### Memory Issues / Out of Memory
+**Symptoms**: Generation fails with CUDA out of memory errors
+**Solutions**:
+1. **Reduce Batch Size**: Lower batch count in main UI
+2. **Disable Cache**: Turn off API caching to reduce memory usage
+3. **Image Size**: Use smaller target resolutions
+4. **Restart WebUI**: Clear accumulated memory
+
+#### Cached Images Not Updating
+**Symptoms**: `!refresh` not working or old images still appearing
+**Solutions**:
+1. **Tag Cleaning**: Ensure `!refresh` is properly formatted with comma separation
+2. **Cache Key**: Verify that search parameters actually changed
+3. **Clear Cache**: Restart WebUI to clear all cached data
+4. **Check Logs**: Look for "Forcing new image fetch" confirmation
+
+#### Tag Removal Not Working
+**Symptoms**: Artist/character tags still appearing in prompts
+**Solutions**:
+1. **Case Sensitivity**: Tags are normalized (underscore ↔ space)
+2. **API Format**: Some boorus don't provide categorized tags - uses pattern matching
+3. **Debug Mode**: Check console logs for tag extraction details
+4. **Manual Removal**: Use "Tags to Remove" as fallback
+
+#### Performance Issues
+**Symptoms**: Slow API responses or generation delays
+**Solutions**:
+1. **Enable Caching**: Turn on "Cache API requests" for faster repeated queries
+2. **Reduce Pages**: Lower "Max Pages" to speed up searches
+3. **Network Issues**: Check internet connection and booru site status
+4. **Concurrent Requests**: Avoid multiple simultaneous generations
+
+### Debug Information Collection
+
+When reporting issues, include:
+1. **Console Logs**: Full RanbooruX output (look for `[R]` prefixed messages)
+2. **Settings Used**: Booru, tags, all enabled options
+3. **WebUI Version**: Forge/A1111 version and commit hash
+4. **Error Traces**: Complete Python traceback if available
+
 ## Important Notes
 - **Logging**: RanbooruX logs canonical post URLs for all selected items (e.g., `https://danbooru.donmai.us/posts/<id>`) for easy reference.
 - **Comment Stripping**: The bundled `Comments` script automatically strips prompt comments (`#`, `//`, `/* */`) before generation. Note: While this script is bundled with RanbooruX, it may not be necessary for all users depending on their workflow and other extensions.
-- **Forge & ControlNet**: On Forge, ControlNet is integrated via a fallback that sets Unit 0 through `p.script_args`. This is expected behavior, as Forge’s ControlNet does not expose the same programmatic helpers as A1111. A log line will indicate which integration path was used.
+- **Forge & ControlNet**: On Forge, ControlNet is integrated via a fallback that sets Unit 0 through `p.script_args`. This is expected behavior, as Forge's ControlNet does not expose the same programmatic helpers as A1111. A log line will indicate which integration path was used.
 
 ## Technical Details
 RanbooruX includes significant under-the-hood improvements for stability and performance.

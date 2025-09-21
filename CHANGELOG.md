@@ -4,6 +4,35 @@ This document outlines the principal changes in **RanbooruX**, a feature-rich, s
 
 ---
 
+## v1.1.0 - Stability and Performance Improvements
+
+This release focuses on critical stability fixes, performance optimizations, and new user-friendly features to enhance the overall RanbooruX experience.
+
+### ✨ New Features
+- **Intelligent Image Caching**: Added automatic caching of fetched images and posts to improve performance and consistency. Images are reused for subsequent generations with identical search parameters, reducing API calls and generation time.
+- **Force Refresh Feature**: Added `!refresh` tag support - append `!refresh` to your search tags (e.g., `1girl, solo, short_hair,!refresh`) to force fetch new images instead of using cached ones.
+- **Enhanced URL Filtering**: Improved image URL validation to prevent failed fetches from external sites like Pixiv and Twitter that don't provide direct image access.
+- **Comprehensive Documentation**: Updated usage guides with detailed explanations of new features, caching behavior, and troubleshooting tips.
+
+### 🐛 Critical Bug Fixes
+- **Fixed PerturbedAttentionGuidance Division by Zero**: Resolved crash caused by setting steps to 1 in Img2Img processing. Now uses minimum 2 steps to avoid division errors in Forge extensions.
+- **Fixed Batch Processing Errors**: Completely rewrote Img2Img postprocessing to handle multiple images individually instead of attempting batch processing, resolving "bad number of images passed" runtime errors.
+- **Fixed Single Image Generation**: Resolved IndexError crashes when generating single images with cached data from previous multi-image batches.
+- **Fixed Variable Scoping Issues**: Fixed `UnboundLocalError` where `num_images_needed` variable was only defined in certain code paths, causing crashes when reusing cached images.
+- **Fixed Syntax Errors**: Resolved missing parentheses that prevented the extension from loading in Forge.
+
+### 🛠️ Performance & Reliability
+- **Optimized Memory Usage**: Improved image processing pipeline to reduce memory overhead during batch operations.
+- **Enhanced Error Handling**: Better error messages and graceful degradation when image processing fails.
+- **Cache Management**: Automatic cache invalidation when search parameters change (booru, tags, post ID, rating, sorting order).
+
+### 📚 Documentation Updates
+- **Image Caching Section**: Added comprehensive documentation explaining automatic caching behavior and manual refresh options.
+- **Troubleshooting Notes**: Added notes about bundled `comments.py` script not being required for all users.
+- **Usage Examples**: Enhanced examples showing `!refresh` usage in different workflows.
+
+---
+
 ## v1.0.0 - Initial RanbooruX Release
 
 This inaugural release marks the official fork of Ranbooru, introducing a comprehensive architectural overhaul, new features, and critical bug fixes for a more stable and powerful experience.
@@ -34,7 +63,7 @@ This inaugural release marks the official fork of Ranbooru, introducing a compre
 ---
 
 ## Overview
-RanbooruX began as an extensive refactor of Ranbooru, with a primary focus on fixing critical `img2img` and `ControlNet` integration bugs. It has since evolved to include a reorganized codebase, a cleaner UI, and compatibility enhancements for both **Forge** and **AUTOMATIC1111** WebUI environments.
+RanbooruX began as an extensive refactor of Ranbooru, with a primary focus on fixing critical `img2img` and `ControlNet` integration bugs. Since its initial release, RanbooruX has evolved significantly with major stability improvements, including intelligent image caching, comprehensive error handling, and performance optimizations. The extension now provides a robust, production-ready experience for both **Forge** and **AUTOMATIC1111** WebUI environments.
 
 ---
 
@@ -46,6 +75,7 @@ The codebase was restructured to improve clarity, maintainability, and ease of f
 ### 2. Img2Img Fixes
 - **Stabilized Pipeline**: The original Ranbooru `img2img` flow, which required a dummy one-step seed image, has been completely repaired. RanbooruX now reliably uses the source image without generating unnecessary placeholders.
 - **Enhanced Controls**: Added UI options to control denoising strength and reuse the last fetched image as a source for batch runs.
+- **Batch Processing Overhaul**: Completely rewrote the postprocessing pipeline to handle multiple images individually, eliminating "bad number of images passed" runtime errors.
 
 ### 3. ControlNet Integration
 - **Robust Integration Path**: RanbooruX now uses a robust integration path that prefers Forge/A1111 external API helpers when available and automatically falls back to a `p.script_args`-based method when they are not. This ensures maximum compatibility.
@@ -56,15 +86,33 @@ The codebase was restructured to improve clarity, maintainability, and ease of f
 - Controls for mixing prompts, chaos/negative modes, background/color forcing, and LoRAnado were consolidated for a more intuitive user experience.
 
 ### 5. Bundled Helper Scripts
-- Common helper scripts like `Comments` (for prompt comment stripping) are now bundled directly within the `scripts/` directory, ensuring they load reliably whenever RanbooruX is enabled.
+- Common helper scripts like `Comments` (for prompt comment stripping) are now bundled directly within the `scripts/` directory, ensuring they load reliably whenever RanbooruX is enabled. Note: While bundled, these scripts may not be required for all users depending on their workflow.
 
-### 6. Performance
+### 6. Performance & Stability Improvements
 - **Request Caching**: Integrated `requests-cache` to reduce redundant API calls to booru sites, which minimizes rate-limiting issues and speeds up repeated queries.
+- **Intelligent Image Caching**: Added automatic caching of fetched images and posts with smart cache invalidation based on search parameters.
+- **Force Refresh Feature**: Added `!refresh` tag support to manually invalidate cache and force fresh image fetches.
+- **Enhanced Error Handling**: Comprehensive error handling for variable scoping issues, division by zero errors, and batch size mismatches.
+- **URL Filtering**: Improved image URL validation to prevent failed fetches from external sites that don't provide direct access.
+
+### 7. Compatibility Fixes
+- **Forge Extension Compatibility**: Fixed PerturbedAttentionGuidance division by zero errors by using minimum 2 steps instead of 1.
+- **Single Image Generation**: Resolved IndexError crashes when generating single images with cached data.
+- **Syntax Error Fixes**: Resolved missing parentheses and other syntax issues that prevented extension loading.
 
 ---
 
 ## Migration Notes
-If you are migrating from the original Ranbooru and rely on `img2img` or `ControlNet` features, RanbooruX is designed as a drop-in replacement. Review the optional ControlNet overwrite steps in the [README.md](README.md) if your Forge build does not correctly pass `img2img` inputs to ControlNet Unit 0.
+If you are migrating from the original Ranbooru and rely on `img2img` or `ControlNet` features, RanbooruX is designed as a drop-in replacement. Review the optional ControlNet overwrite steps in the [README.md](README.md) if your Forge build does not correctly pass `img2img` inputs to ControlNet Unit 0 by default.
+
+### Upgrading from v1.0.0 to v1.1.0
+Existing RanbooruX v1.0.0 users will automatically benefit from all stability improvements and new features upon updating. No configuration changes are required, but you may notice:
+- Faster subsequent generations due to automatic image caching
+- More reliable batch processing for multiple images
+- Improved error handling with clearer error messages
+- New `!refresh` option for forcing fresh image fetches
+
+The extension is backward compatible and all existing workflows will continue to work as expected.
 
 ---
 
