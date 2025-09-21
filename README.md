@@ -77,7 +77,7 @@ Notes:
 
 - **Max Pages**: Maximum pages considered when selecting random posts.
 - **Post ID**: Here you can specify the ID of the post to get the tags from. If you leave it blank, the extension will get a random post (or more than one) from the random page.
-- **Tags to Search (Pre)**: This add the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) to the search query. This is useful if you want to get tags from a specific category, like "1girl" or "solo".
+- **Tags to Search (Pre)**: This add the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) to the search query. This is useful if you want to get tags from a specific category, like "1girl" or "solo". Add `!refresh` to force fetch new images instead of reusing cached ones (e.g., `1girl,solo,short_hair,!refresh`).
 - **Tags to Remove (Post)**: This remove the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) from the result query. This is useful if you want to remove tags that are too generic, like "1girl" or "solo". You can also use * with any tag to remove every tags which contains the related word. e.g: *hair will remove every tag that contains the word "hair".
 - **Mature Rating**: This sets the mature rating of the booru. This is useful if you want to get only SFW or NSFW tags. It only works on supported boorus (right now it has been tested only on Gelbooru).
 - **Remove Bad Tags**: This remove tags that you usually don't need (watermarks,text,censor)
@@ -118,13 +118,14 @@ RanbooruX includes several advanced features for more granular control over prom
 -   **Advanced Prompt Manipulation**: Fine-tune prompts with features like mixing tags from multiple posts, introducing controlled chaos by shuffling tags between positive and negative prompts, and using file-based tag collections for easy reuse.
 -   **LoRAnado**: Automatically select and apply LoRAs from a specified subfolder with customizable weights, making it easy to experiment with different model combinations.
 -   **Enhanced Batch Processing**: Ensure consistency across batches with options to use the same prompt, source image, and seed for all generated images.
+-   **Image Caching and Refresh**: RanbooruX automatically caches fetched images and posts to improve performance. Add `!refresh` to your search tags to force fetch new images instead of reusing cached ones. The cache is automatically invalidated when search parameters change.
 -   **Photopea Integration**: The bundled ControlNet module includes a direct integration with Photopea, allowing for in-browser editing of ControlNet input images without leaving the Stable Diffusion UI.
 
 For more details on these features, see the [usage.md](usage.md) file.
 ## How to Use
 For step-by-step examples and detailed guides, please refer to [usage.md](usage.md).
 ### Bundled processing scripts
-- `Comments` (now bundled): removes `#`, `//`, and `/* */` comments from prompts and negative prompts before other scripts run. It is shipped inside this extension (`scripts/comments.py`) so Forge/A1111 will load it automatically with RanbooruX enabled.
+- `Comments` (now bundled): removes `#`, `//`, and `/* */` comments from prompts and negative prompts before other scripts run. It is shipped inside this extension (`scripts/comments.py`) so Forge/A1111 will load it automatically with RanbooruX enabled. Note: While bundled with RanbooruX, this script may not be necessary for all users depending on their workflow and other extensions.
 
 ### Bundled ControlNet and paths
 - `sd_forge_controlnet/` is bundled for compatibility. RanbooruX will try to use Forge’s built‑in ControlNet first, then this bundled copy if needed. During install, its requirements are auto‑installed.

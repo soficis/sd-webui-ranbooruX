@@ -240,6 +240,34 @@ class Booru():
             print(f"[R] Error processing response from {self.booru_name}: {e}")
             raise BooruError(f"Error processing response from {self.booru_name}: {e}") from e
 
+    def _is_direct_image_url(self, url):
+        """Check if URL is a direct image URL (not from external sites like Pixiv/Twitter)"""
+        if not url or not isinstance(url, str):
+            return False
+        
+        # Skip external sites that don't provide direct image access
+        external_sites = [
+            'pixiv.net', 'pximg.net', 'twitter.com', 'x.com', 't.co',
+            'deviantart.com', 'artstation.com', 'instagram.com',
+            'facebook.com', 'patreon.com', 'fanbox.cc'
+        ]
+        
+        url_lower = url.lower()
+        for site in external_sites:
+            if site in url_lower:
+                return False
+        
+        # Check if URL ends with common image extensions
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff']
+        if any(url_lower.endswith(ext) for ext in image_extensions):
+            return True
+            
+        # Check if URL contains image-serving patterns
+        if any(pattern in url_lower for pattern in ['/images/', '/img/', '/media/', '/files/']):
+            return True
+            
+        return False
+
     def _standardize_post(self, post_data):
         post = {}
         # extract tags in a robust way; some APIs return categorized tags as dicts
@@ -288,7 +316,12 @@ class Booru():
         if post['file_url'] is None:
             post['file_url'] = post_data.get('large_file_url')
         if post['file_url'] is None:
-            post['file_url'] = post_data.get('source')
+            # Check if source is a direct image URL before using it
+            source_url = post_data.get('source')
+            if source_url and self._is_direct_image_url(source_url):
+                post['file_url'] = source_url
+            else:
+                post['file_url'] = None
         post['id'] = post_data.get('id')
         post['rating'] = post_data.get('rating')
         post['booru_name'] = self.booru_name
@@ -647,7 +680,7 @@ class Script(scripts.Script):
             booru = gr.Dropdown(booru_list, label="Booru", value="gelbooru")
             max_pages = gr.Slider(label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1)
             gr.Markdown("""## Post"""); post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
-            gr.Markdown("""## Tags"""); tags = gr.Textbox(lines=1, label="Tags to Search (Pre)"); remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
+            gr.Markdown("""## Tags"""); tags = gr.Textbox(lines=1, label="Tags to Search (Pre)", info="Add '!refresh' to force fetch new images"); remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
             mature_rating = gr.Radio(list(RATINGS.get('gelbooru', RATING_TYPES['none'])), label="Mature Rating", value="All")
             remove_bad_tags = gr.Checkbox(label="Remove common 'bad' tags", value=True); remove_artist_tags = gr.Checkbox(label="Remove Artist tags from prompt", value=False); remove_character_tags = gr.Checkbox(label="Remove Character tags from prompt", value=False); shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True); change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False); same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
             fringe_benefits = gr.Checkbox(label="Gelbooru: Fringe Benefits", value=True, visible=True)
@@ -855,10 +888,16 @@ class Script(scripts.Script):
                     pil_image = Image.open(img_data).convert("RGB")
                     img_to_append = pil_image
                     fetched_count += 1
+                    print(f"[R] Successfully fetched image {i+1}: {pil_image.size}")
+                elif img_url:
+                    if any(site in img_url.lower() for site in ['pixiv.net', 'pximg.net', 'twitter.com', 'x.com']):
+                        print(f"[R] Skipped external site URL {i+1}: {img_url[:50]} (not a direct image)")
+                    else:
+                        print(f"[R] Invalid URL protocol {i+1}: {img_url[:50]}")
                 else:
-                    print(f"[R] Warn: Invalid URL {i}: '{img_url}'")
+                    print(f"[R] No URL available for image {i+1}")
             except Exception as e:
-                print(f"[R] Error fetch/proc {i}: {e}")
+                print(f"[R] Error fetching image {i+1}: {e}")
             fetched_images.append(img_to_append)
         print(f"[R] Fetched {fetched_count} images.")
         if None in fetched_images:
@@ -1021,14 +1060,16 @@ class Script(scripts.Script):
 
     def _prepare_img2img_pass(self, p, use_img2img, use_ip):
         self.run_img2img_pass = False
-        if use_img2img and not use_ip:
-            print("[R] Prep Img2Img pass (steps=1).")
+        if use_img2img:
+            # Use minimum 2 steps to avoid division by zero in Forge extensions
+            initial_steps = max(2, min(5, p.steps))
+            print(f"[R] Prep Img2Img pass (steps={initial_steps}) - ControlNet {'enabled' if use_ip else 'disabled'}.")
             self.real_steps = p.steps
-            p.steps = 1
+            p.steps = initial_steps
             self.run_img2img_pass = True
 
     def _cleanup_after_run(self, use_cache):
-        self.last_img = []
+        # Don't clear self.last_img or cached data - keep them for reuse
         self.real_steps = 0
         self.run_img2img_pass = False
         if not use_cache and hasattr(self, 'cache_installed_by_us') and self.cache_installed_by_us and requests_cache.patcher.is_installed():
@@ -1077,37 +1118,94 @@ class Script(scripts.Script):
 
         if lora_enabled:
             p = self._apply_loranado(p, lora_enabled, lora_folder, lora_amount, lora_min, lora_max, lora_custom_weights, lora_lock_prev)
+        
         if not enabled:
+            print("[R] RanbooruX is DISABLED - skipping image fetch")
             return
 
-        print("[R Before] Starting...")
+        # Clear notification that extension is active
+        print("[R Before] ⚠️  RanbooruX IS ENABLED AND RUNNING ⚠️")
+        print(f"[R Before] Search tags: '{tags}' | Booru: {booru} | Img2Img: {use_img2img} | ControlNet: {use_ip}")
+        
+        # Check if we should reuse existing images or fetch new ones
+        # Special handling: if tags contain "!refresh", force fetch new images
+        force_refresh = "!refresh" in (tags or "")
+        if force_refresh:
+            original_tags = tags
+            tags = tags.replace("!refresh", "").replace(",,", ",").strip(",")
+            print(f"[R Before] Detected !refresh command - forcing new image fetch")
+            print(f"[R Before] Original tags: '{original_tags}' -> Cleaned: '{tags}'")
+        
+        current_search_key = f"{booru}_{tags}_{post_id}_{mature_rating}_{sorting_order}"
+        should_fetch_new = (
+            force_refresh or
+            not hasattr(self, '_last_search_key') or
+            self._last_search_key != current_search_key or
+            not hasattr(self, '_cached_posts') or
+            not self._cached_posts or
+            not hasattr(self, 'last_img') or
+            not self.last_img
+        )
+        
+        if should_fetch_new:
+            if force_refresh:
+                print("[R Before] Fetching new images (!refresh command used)")
+            else:
+                print("[R Before] Fetching new images (search parameters changed or no cached images)")
+        else:
+            print(f"[R Before] Reusing cached images ({len(self.last_img)} images) from previous search")
+            print("[R Before] 💡 TIP: Add '!refresh' to your tags to force fetch new images")
+        
         self.original_prompt = p.prompt if isinstance(p.prompt, str) else (p.prompt[0] if isinstance(p.prompt, list) and p.prompt else "")
-        self.last_img = []
+        
+        if not should_fetch_new:
+            # Skip the fetching process but continue with cached images
+            selected_posts = self._cached_posts
+            print(f"[R Before] Using {len(selected_posts)} cached posts")
+        else:
+            self.last_img = []
 
         try:
             self.cache_installed_by_us = self._setup_cache(use_cache)
-            search_tags, bad_tags, initial_additions = self._prepare_tags(tags, remove_tags_ui, use_remove_txt, choose_remove_txt, change_background, change_color, use_search_txt, choose_search_txt, remove_bad_tags_ui)
-            api = self._get_booru_api(booru, fringe_benefits)
-            all_posts = self._fetch_booru_posts(api, search_tags, mature_rating, max_pages, post_id)
+            
+            # Always calculate num_images_needed - needed for both new and cached images
             num_images_needed = p.batch_size * p.n_iter
-            selected_posts = self._select_posts(all_posts, sorting_order, num_images_needed, post_id, same_prompt)
+            
+            if should_fetch_new:
+                search_tags, bad_tags, initial_additions = self._prepare_tags(tags, remove_tags_ui, use_remove_txt, choose_remove_txt, change_background, change_color, use_search_txt, choose_search_txt, remove_bad_tags_ui)
+                api = self._get_booru_api(booru, fringe_benefits)
+                all_posts = self._fetch_booru_posts(api, search_tags, mature_rating, max_pages, post_id)
+                selected_posts = self._select_posts(all_posts, sorting_order, num_images_needed, post_id, same_prompt)
+                
+                # Cache the results for future use
+                self._cached_posts = selected_posts
+                self._last_search_key = current_search_key
+                self._cached_search_tags = search_tags
+                self._cached_bad_tags = bad_tags
+                self._cached_initial_additions = initial_additions
+                
+                post_urls = []
+                try:
+                    for idx, post in enumerate(selected_posts):
+                        post_url = get_original_post_url(post)
+                        if post_url:
+                            post_urls.append(post_url)
+                            print(f"[R] Original post {idx+1}/{len(selected_posts)}: {post_url}")
+                except Exception as e:
+                    print(f"[R] Warn: Failed to compute original post URLs: {e}")
+
+                if use_img2img or use_deepbooru or use_ip:
+                    self.last_img = self._fetch_images(selected_posts, use_last_img, booru, fringe_benefits)
+            else:
+                # Use cached values
+                search_tags = getattr(self, '_cached_search_tags', '')
+                bad_tags = getattr(self, '_cached_bad_tags', set())
+                initial_additions = getattr(self, '_cached_initial_additions', '')
+            
             # persist selected posts and removal flags so prompt processing can access them
             self._selected_posts = selected_posts
             self._remove_artist_tags = bool(remove_artist_tags_ui)
             self._remove_character_tags = bool(remove_character_tags_ui)
-
-            post_urls = []
-            try:
-                for idx, post in enumerate(selected_posts):
-                    post_url = get_original_post_url(post)
-                    if post_url:
-                        post_urls.append(post_url)
-                        print(f"[R] Original post {idx+1}/{len(selected_posts)}: {post_url}")
-            except Exception as e:
-                print(f"[R] Warn: Failed to compute original post URLs: {e}")
-
-            if use_img2img or use_deepbooru or use_ip:
-                self.last_img = self._fetch_images(selected_posts, use_last_img, booru, fringe_benefits)
 
             # Preview UI removed by request
 
@@ -1115,7 +1213,26 @@ class Script(scripts.Script):
             final_prompts = []
             final_negative_prompts = [base_negative] * num_images_needed
             prompt_processing_settings = (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, self._remove_artist_tags, self._remove_character_tags)
-            raw_prompts = [post.get('tags', '') for post in selected_posts]
+            
+            # Ensure we only use the number of posts that match the current generation request
+            posts_to_use = selected_posts[:num_images_needed] if len(selected_posts) > num_images_needed else selected_posts
+            # If we need more images than available posts, repeat the last post
+            while len(posts_to_use) < num_images_needed:
+                posts_to_use.append(posts_to_use[-1] if posts_to_use else selected_posts[0])
+            
+            # Also align cached images with current generation request
+            if not should_fetch_new and hasattr(self, 'last_img') and self.last_img:
+                # Adjust cached images to match current request
+                if len(self.last_img) > num_images_needed:
+                    self.last_img = self.last_img[:num_images_needed]
+                elif len(self.last_img) < num_images_needed:
+                    # Repeat images to fill the requirement
+                    while len(self.last_img) < num_images_needed:
+                        self.last_img.append(self.last_img[-1] if self.last_img else None)
+                print(f"[R] Aligned cached images: {len(self.last_img)} images for {num_images_needed} requested")
+            
+            raw_prompts = [post.get('tags', '') for post in posts_to_use]
+            print(f"[R] Using {len(posts_to_use)} posts for {num_images_needed} images (from {len(selected_posts)} cached)")
 
             if mix_prompt and not post_id and not same_prompt:
                 print(f"[R] Mixing tags from {mix_amount} posts...")
@@ -1270,21 +1387,54 @@ class Script(scripts.Script):
             if not isinstance(final_negative_prompts, list) or len(final_negative_prompts) != num_imgs:
                 final_negative_prompts = ([final_negative_prompts] * num_imgs) if not isinstance(final_negative_prompts, list) else (final_negative_prompts * (num_imgs // len(final_negative_prompts)) + final_negative_prompts[:num_imgs % len(final_negative_prompts)])
             img2img_width, img2img_height = prepared_images[0].size
-            p_img2img = StableDiffusionProcessingImg2Img(
-                sd_model=shared.sd_model, outpath_samples=shared.opts.outdir_samples or shared.opts.outdir_img2img_samples,
-                outpath_grids=shared.opts.outdir_grids or shared.opts.outdir_img2img_grids, prompt=final_prompts, negative_prompt=final_negative_prompts,
-                seed=processed.seed, subseed=processed.subseed, sampler_name=p.sampler_name, scheduler=getattr(p, 'scheduler', None),
-                batch_size=p.batch_size, n_iter=p.n_iter, steps=self.real_steps, cfg_scale=p.cfg_scale,
-                width=img2img_width, height=img2img_height, init_images=prepared_images, denoising_strength=self.img2img_denoising,
-            )
+            # Process images in batches that match WebUI expectations
+            # Use batch_size=1 to ensure compatibility with all configurations
+            print(f"[R] Processing {len(prepared_images)} images individually to ensure compatibility")
+            
+            # Limit to first batch_size * n_iter images if we have too many
+            max_images = p.batch_size * p.n_iter
+            if len(prepared_images) > max_images:
+                prepared_images = prepared_images[:max_images]
+                final_prompts = final_prompts[:max_images] if isinstance(final_prompts, list) else [final_prompts] * max_images
+                final_negative_prompts = final_negative_prompts[:max_images] if isinstance(final_negative_prompts, list) else [final_negative_prompts] * max_images
+                print(f"[R] Limited to {max_images} images for processing")
+            
             print(f"[R] Running Img2Img ({len(prepared_images)} images) steps={self.real_steps}, Denoise={self.img2img_denoising}")
-            img2img_processed = process_images(p_img2img)
-            processed.images = img2img_processed.images
-            processed.prompt = img2img_processed.prompt
-            processed.negative_prompt = img2img_processed.negative_prompt
-            processed.infotexts = img2img_processed.infotexts
-            processed.seed = img2img_processed.seed
-            processed.subseed = img2img_processed.subseed
+            
+            # Process images individually to avoid batch size issues
+            all_img2img_results = []
+            all_infotexts = []
+            last_seed = processed.seed
+            last_subseed = processed.subseed
+            
+            for i, img in enumerate(prepared_images):
+                current_prompt = final_prompts[i] if i < len(final_prompts) else final_prompts[0]
+                current_negative = final_negative_prompts[i] if i < len(final_negative_prompts) else final_negative_prompts[0]
+                
+                p_img2img = StableDiffusionProcessingImg2Img(
+                    sd_model=shared.sd_model, outpath_samples=shared.opts.outdir_samples or shared.opts.outdir_img2img_samples,
+                    outpath_grids=shared.opts.outdir_grids or shared.opts.outdir_img2img_grids, 
+                    prompt=current_prompt, negative_prompt=current_negative,
+                    seed=processed.seed + i, subseed=processed.subseed + i, 
+                    sampler_name=p.sampler_name, scheduler=getattr(p, 'scheduler', None),
+                    batch_size=1, n_iter=1, steps=self.real_steps, cfg_scale=p.cfg_scale,
+                    width=img2img_width, height=img2img_height, init_images=[img], denoising_strength=self.img2img_denoising,
+                )
+                
+                print(f"[R] Processing image {i+1}/{len(prepared_images)} individually")
+                single_result = process_images(p_img2img)
+                all_img2img_results.extend(single_result.images)
+                all_infotexts.extend(single_result.infotexts)
+                last_seed = single_result.seed
+                last_subseed = single_result.subseed
+            
+            # Update processed results with all individual results
+            processed.images = all_img2img_results
+            processed.prompt = final_prompts if len(final_prompts) > 1 else (final_prompts[0] if final_prompts else processed.prompt)
+            processed.negative_prompt = final_negative_prompts if len(final_negative_prompts) > 1 else (final_negative_prompts[0] if final_negative_prompts else processed.negative_prompt)
+            processed.infotexts = all_infotexts
+            processed.seed = last_seed
+            processed.subseed = last_subseed
             processed.width = img2img_width
             processed.height = img2img_height
             print("[R Post] Img2Img finished.")

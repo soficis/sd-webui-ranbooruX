@@ -11,6 +11,7 @@ This workflow fetches tags from a selected booru to generate a text prompt.
 1.  **Select Booru**: Choose a source from the `Booru` dropdown (e.g., `danbooru`).
 2.  **Add Search Tags**: In `Tags to Search (Pre)`, enter tags to filter posts, separated by commas.
     -   *Example*: `1girl, solo, short_hair`
+    -   **Force Fresh Search**: Add `!refresh` to your tags to force fetch new images instead of reusing cached ones (e.g., `1girl, solo, short_hair,!refresh`)
 3.  **Configure Options (Optional)**:
     -   Adjust `Max Pages` to control the size of the random post pool.
     -   Use `Tags to Remove (Post)` to filter out unwanted tags from the final prompt.
@@ -32,7 +33,7 @@ graph TD
 This workflow uses both the tags and the source image from a booru post, feeding them into an `img2img` pass while conditioning the generation with ControlNet.
 
 **Steps:**
-1.  **Select Booru and Tags**: As with the basic search, choose a booru and provide search tags.
+1.  **Select Booru and Tags**: As with the basic search, choose a booru and provide search tags. Use `!refresh` to force fetch new images (e.g., `1girl, solo, short_hair,!refresh`).
 2.  **Enable `img2img`**: Check the `Use img2img` box.
 3.  **Enable ControlNet**: Check the `Send to ControlNet` box.
 4.  **Configure Parameters**:
@@ -142,6 +143,13 @@ LoRAnado automatically selects and applies one or more LoRAs to your prompt.
 -   **Use same image for batch**: Uses the same source image for `img2img` or `ControlNet` across the batch.
 -   **Use same seed for batch**: Uses a single seed for all images in the batch.
 
+### Image Caching and Refresh
+RanbooruX automatically caches fetched images and posts to improve performance and consistency when generating multiple images with the same settings.
+
+-   **Automatic Caching**: Images are automatically cached when first fetched and reused for subsequent generations with identical search parameters.
+-   **Force Fresh Images**: Add `!refresh` to your search tags to force fetch new images instead of reusing cached ones.
+-   **Cache Behavior**: The cache is keyed by booru, tags, post ID, rating, and sorting order. Any change to these parameters will trigger a fresh fetch.
+
 ### Photopea Integration for In-Browser Editing
 The bundled ControlNet module includes a direct integration with Photopea, a powerful online image editor.
 
@@ -153,7 +161,7 @@ The bundled ControlNet module includes a direct integration with Photopea, a pow
 
 ## Important Notes
 - **Logging**: RanbooruX logs canonical post URLs for all selected items (e.g., `https://danbooru.donmai.us/posts/<id>`) for easy reference.
-- **Comment Stripping**: The bundled `Comments` script automatically strips prompt comments (`#`, `//`, `/* */`) before generation.
+- **Comment Stripping**: The bundled `Comments` script automatically strips prompt comments (`#`, `//`, `/* */`) before generation. Note: While this script is bundled with RanbooruX, it may not be necessary for all users depending on their workflow and other extensions.
 - **Forge & ControlNet**: On Forge, ControlNet is integrated via a fallback that sets Unit 0 through `p.script_args`. This is expected behavior, as Forge’s ControlNet does not expose the same programmatic helpers as A1111. A log line will indicate which integration path was used.
 
 ## Technical Details
