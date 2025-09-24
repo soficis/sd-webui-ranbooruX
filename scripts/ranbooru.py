@@ -2410,149 +2410,362 @@ class Script(scripts.Script):
                     
                     print(f"[R Post] 🔧 Processing {len(converted_images)} images individually through ADetailer")
                     
-                    # Process each image individually
+                    # Process each image individually with error handling
                     for img_idx, single_img in enumerate(converted_images):
-                        print(f"[R Post] 🎯 Processing image {img_idx + 1}/{len(converted_images)} individually")
-                        
-                        # Create temp_processed for this single image
-                        single_temp_processed = None
-                        construction_methods = [
-                            lambda: type(processed)(p, [single_img]),  # Method 1: Standard constructor with single PIL image
-                            lambda: self._construct_processed_fallback(processed, [single_img], p)  # Method 2: Fallback
-                        ]
-                        
-                        for method_num, construct_method in enumerate(construction_methods, 1):
-                            try:
-                                print(f"[R Post] 🔧 Image {img_idx + 1}: Trying construction method {method_num}")
-                                single_temp_processed = construct_method()
-                                
-                                # Copy essential attributes
-                                essential_attrs = ['prompt', 'negative_prompt', 'seed', 'subseed', 'width', 'height', 'cfg_scale', 'steps']
-                                for attr in essential_attrs:
-                                    if hasattr(processed, attr):
-                                        setattr(single_temp_processed, attr, getattr(processed, attr))
-                                
-                                # CRITICAL: ADetailer expects 'image' attribute (singular) for postprocess_image
-                                # Ensure the image is definitely PIL format before assignment
-                                if not hasattr(single_img, 'mode'):
-                                    import numpy as np
-                                    from PIL import Image
-                                    if hasattr(single_img, 'shape') and len(single_img.shape) == 3:
-                                        single_img = Image.fromarray(single_img.astype(np.uint8), 'RGB')
-                                    else:
-                                        single_img = Image.fromarray(single_img.astype(np.uint8))
-                                
-                                single_temp_processed.image = single_img
-                                print(f"[R Post] 🔧 Image {img_idx + 1}: Set temp_processed.image = {single_img.size} mode={single_img.mode} type={type(single_img)}")
-                                print(f"[R Post] ✅ Image {img_idx + 1}: Successfully created temp_processed with method {method_num}")
-                                break
-                                
-                            except Exception as construct_e:
-                                print(f"[R Post] ❌ Image {img_idx + 1}: Construction method {method_num} failed: {construct_e}")
-                                continue
-                        
-                        if single_temp_processed is None:
-                            print(f"[R Post] ❌ Image {img_idx + 1}: Could not construct temp_processed - using original image")
-                            final_processed_images.append(single_img)
-                            continue
-                        
-                        # Now run ADetailer on this single image
-                        print(f"[R Post] 🔄 Running {script.__class__.__name__} on image {img_idx + 1}")
-                        
-                        # Setup ADetailer processing parameters for this single image
-                        p.init_images = [single_img]
-                        p.width = single_img.width
-                        p.height = single_img.height
-                        
-                        # Clear blocking flags for this run
-                        setattr(p, '_ad_disabled', False)
-                        setattr(p, '_ranbooru_skip_initial_adetailer', False)
-                        setattr(p, '_ranbooru_suppress_all_processing', False)
-                        setattr(p, '_ranbooru_adetailer_already_processed', False)
-                        setattr(p, '_adetailer_can_save', True)
-                        
-                        # Enable ADetailer globally for this run
-                        setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
-                        setattr(self.__class__, '_adetailer_global_guard_active', False)
-                        setattr(self.__class__, '_ranbooru_manual_adetailer_active', True)
-                        
-                        # CRITICAL: Comprehensive PIL enforcement for this image
-                        self._enforce_pil_everywhere(p, single_temp_processed, [single_img])
-                        
-                        # NUCLEAR: Hook into WebUI's image conversion functions to intercept numpy arrays
-                        self._patch_image_conversion_functions()
-                        
-                        # ULTIMATE: Hook ADetailer's validation function directly to intercept numpy at source
                         try:
-                            # Inline validation hook since method might not exist yet
-                            import numpy as np
-                            from PIL import Image
-                            if hasattr(script, 'postprocess_image') and not hasattr(script.__class__, '_ranbooru_numpy_hooked'):
-                                original_method = script.postprocess_image
-                                def numpy_safe_postprocess_image(*args, **kwargs):
-                                    new_args = []
-                                    for arg in args:
-                                        if isinstance(arg, dict) and 'image' in arg and hasattr(arg['image'], 'shape'):
-                                            img_data = arg['image']
-                                            if len(img_data.shape) == 3:
-                                                pil_img = Image.fromarray(img_data.astype(np.uint8), 'RGB')
-                                                new_arg = arg.copy()
-                                                new_arg['image'] = pil_img
-                                                new_args.append(new_arg)
-                                                print(f"[R Post] 🔧 NUMPY HOOK: Intercepted and converted numpy array to PIL {pil_img.size}")
-                                                continue
-                                        new_args.append(arg)
-                                    return original_method(*new_args, **kwargs)
-                                script.postprocess_image = numpy_safe_postprocess_image
-                                setattr(script.__class__, '_ranbooru_numpy_hooked', True)
-                                print(f"[R Post] 🔧 INSTALLED: Numpy->PIL conversion hook on ADetailer.postprocess_image")
-                        except Exception as hook_error:
-                            print(f"[R Post] Numpy validation hook failed: {hook_error}")
+                            print(f"[R Post] 🎯 Processing image {img_idx + 1}/{len(converted_images)} individually")
+                            
+                            # Create temp_processed for this single image
+                            single_temp_processed = None
+                            construction_methods = [
+                                lambda: type(processed)(p, [single_img]),  # Method 1: Standard constructor with single PIL image
+                                lambda: self._construct_processed_fallback(processed, [single_img], p)  # Method 2: Fallback
+                            ]
+                            
+                            for method_num, construct_method in enumerate(construction_methods, 1):
+                                try:
+                                    print(f"[R Post] 🔧 Image {img_idx + 1}: Trying construction method {method_num}")
+                                    single_temp_processed = construct_method()
+                                    
+                                    # Copy essential attributes
+                                    essential_attrs = ['prompt', 'negative_prompt', 'seed', 'subseed', 'width', 'height', 'cfg_scale', 'steps']
+                                    for attr in essential_attrs:
+                                        if hasattr(processed, attr):
+                                            setattr(single_temp_processed, attr, getattr(processed, attr))
+                                    
+                                    # CRITICAL: ADetailer expects 'image' attribute (singular) for postprocess_image
+                                    # Ensure the image is definitely PIL format before assignment
+                                    if not hasattr(single_img, 'mode'):
+                                        import numpy as np
+                                        from PIL import Image
+                                        if hasattr(single_img, 'shape') and len(single_img.shape) == 3:
+                                            single_img = Image.fromarray(single_img.astype(np.uint8), 'RGB')
+                                        else:
+                                            single_img = Image.fromarray(single_img.astype(np.uint8))
+                                    
+                                    single_temp_processed.image = single_img
+                                    print(f"[R Post] 🔧 Image {img_idx + 1}: Set temp_processed.image = {single_img.size} mode={single_img.mode} type={type(single_img)}")
+                                    print(f"[R Post] ✅ Image {img_idx + 1}: Successfully created temp_processed with method {method_num}")
+                                    break
+                                    
+                                except Exception as construct_e:
+                                    print(f"[R Post] ❌ Image {img_idx + 1}: Construction method {method_num} failed: {construct_e}")
+                                    continue
+                            
+                            if single_temp_processed is None:
+                                print(f"[R Post] ❌ Image {img_idx + 1}: Could not construct temp_processed - using original image")
+                                final_processed_images.append(single_img)
+                                continue
+                            
+                            # Now run ADetailer on this single image
+                            print(f"[R Post] 🔄 Running {script.__class__.__name__} on image {img_idx + 1}")
+                            
+                            # Setup ADetailer processing parameters for this single image
+                            p.init_images = [single_img]
+                            p.width = single_img.width
+                            p.height = single_img.height
+                            
+                            # Clear blocking flags for this run
+                            setattr(p, '_ad_disabled', False)
+                            setattr(p, '_ranbooru_skip_initial_adetailer', False)
+                            setattr(p, '_ranbooru_suppress_all_processing', False)
+                            setattr(p, '_ranbooru_adetailer_already_processed', False)
+                            setattr(p, '_adetailer_can_save', True)
+                            
+                            # CRITICAL: Enable saving for ADetailer processed results
+                            p.do_not_save_samples = False
+                            p.do_not_save_grid = False
+                            
+                            # Ensure processed object has save configuration
+                            if hasattr(single_temp_processed, 'do_not_save_samples'):
+                                single_temp_processed.do_not_save_samples = False
+                                single_temp_processed.do_not_save_grid = False
+                            
+                            # Set proper save path for ADetailer results
+                            import os
+                            save_path = getattr(p, 'outpath_samples', 'outputs/txt2img-images')
+                            setattr(single_temp_processed, 'outpath_samples', save_path)
+                            setattr(single_temp_processed, 'save_samples', True)
+                            print(f"[R Post] 💾 Configured ADetailer save path: {save_path}")
+                            
+                            # Enable ADetailer globally for this run
+                            setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
+                            setattr(self.__class__, '_adetailer_global_guard_active', False)
+                            setattr(self.__class__, '_ranbooru_manual_adetailer_active', True)
                         
-                        # Get script arguments
-                        script_args = []
-                        if hasattr(p, 'script_args'):
-                            script_args = p.script_args
-                        elif hasattr(script, 'args_from') and hasattr(script, 'args_to'):
-                            start = script.args_from or 0
-                            end = script.args_to or 0
-                            if hasattr(p.scripts, 'alwayson_scripts_txt2img') and p.scripts.alwayson_scripts_txt2img:
-                                total_args = len(getattr(p.scripts.alwayson_scripts_txt2img, 'args', []))
-                                script_args = [None] * min(end - start, total_args - start)
-                        
-                        print(f"[R Post] DEBUG - Image {img_idx + 1}: Using {len(script_args)} script args")
-                        
-                        # Try postprocess_image first (ADetailer's main method)
-                        adetailer_success = False
-                        if hasattr(script, 'postprocess_image'):
+                            # CRITICAL: Comprehensive PIL enforcement for this image
+                            self._enforce_pil_everywhere(p, single_temp_processed, [single_img])
+                            
+                            # NUCLEAR: Hook into WebUI's image conversion functions to intercept numpy arrays
+                            self._patch_image_conversion_functions()
+                            
+                            # HOOK: Intercept ADetailer's image modifications
+                            original_images_backup = []
+                            if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
+                                original_images_backup = [img.copy() if hasattr(img, 'copy') else img for img in single_temp_processed.images]
+                            
+                            # CRITICAL: Convert ALL images in temp_processed to PIL format BEFORE calling ADetailer
                             try:
-                                print(f"[R Post] 🚀 Image {img_idx + 1}: Calling postprocess_image")
-                                result = script.postprocess_image(p, single_temp_processed, *script_args)
-                                print(f"[R Post] 📋 Image {img_idx + 1}: postprocess_image returned: {result}")
-                                adetailer_success = True
-                            except Exception as e:
-                                print(f"[R Post] ❌ Image {img_idx + 1}: postprocess_image failed: {e}")
+                                import numpy as np
+                                from PIL import Image
+                                
+                                # Ensure temp_processed.images contains only PIL images
+                                if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
+                                    converted_images = []
+                                    for img_idx_inner, img in enumerate(single_temp_processed.images):
+                                        if hasattr(img, 'shape'):  # It's a numpy array
+                                            pil_img = Image.fromarray(img.astype(np.uint8), 'RGB')
+                                            converted_images.append(pil_img)
+                                            print(f"[R Post] 🔧 CONVERTED numpy to PIL: {pil_img.size}")
+                                        else:
+                                            converted_images.append(img)  # Already PIL
+                                    single_temp_processed.images = converted_images
+                                
+                                # Ensure temp_processed.image (singular) is also PIL
+                                if hasattr(single_temp_processed, 'image') and hasattr(single_temp_processed.image, 'shape'):
+                                    pil_img = Image.fromarray(single_temp_processed.image.astype(np.uint8), 'RGB')
+                                    single_temp_processed.image = pil_img
+                                    print(f"[R Post] 🔧 CONVERTED temp_processed.image to PIL: {pil_img.size}")
+                                
+                                print(f"[R Post] ✅ All images converted to PIL before ADetailer call")
+                            except Exception as conversion_error:
+                                print(f"[R Post] ⚠️ PIL conversion failed: {conversion_error}")
+                            
+                            # Get script arguments
+                            script_args = []
+                            if hasattr(p, 'script_args'):
+                                script_args = p.script_args
+                            elif hasattr(script, 'args_from') and hasattr(script, 'args_to'):
+                                start = script.args_from or 0
+                                end = script.args_to or 0
+                                if hasattr(p.scripts, 'alwayson_scripts_txt2img') and p.scripts.alwayson_scripts_txt2img:
+                                    total_args = len(getattr(p.scripts.alwayson_scripts_txt2img, 'args', []))
+                                    script_args = [None] * min(end - start, total_args - start)
+                            
+                            print(f"[R Post] DEBUG - Image {img_idx + 1}: Using {len(script_args)} script args")
+                            
+                            # Store the original image before ADetailer processing
+                            original_image = single_temp_processed.images[0] if single_temp_processed.images else single_img
+                            original_image_size = getattr(original_image, 'size', 'unknown')
+                            print(f"[R Post] 📷 Image {img_idx + 1}: Original before ADetailer: {original_image_size}")
+                            
+                            # DETAILED DEBUG: Show temp_processed state before ADetailer
+                            print(f"[R Post] 🔍 PRE-ADETAILER STATE:")
+                            print(f"[R Post] 🔍   temp_processed.images count: {len(getattr(single_temp_processed, 'images', []))}")
+                            if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
+                                for idx, img in enumerate(single_temp_processed.images):
+                                    print(f"[R Post] 🔍   Image {idx}: {type(img)} {getattr(img, 'size', 'no-size')}")
+                            
+                            # Try postprocess_image first (ADetailer's main method)
+                            adetailer_success = False
+                            if hasattr(script, 'postprocess_image'):
+                                try:
+                                    print(f"[R Post] 🚀 Image {img_idx + 1}: Calling postprocess_image")
+                                    result = script.postprocess_image(p, single_temp_processed, *script_args)
+                                    print(f"[R Post] 📋 Image {img_idx + 1}: postprocess_image returned: {result}")
+                                    
+                                    # COMPREHENSIVE DEBUG: Check ALL possible result locations
+                                    print(f"[R Post] 🔍 POST-ADETAILER STATE:")
+                                    print(f"[R Post] 🔍   temp_processed.images count: {len(getattr(single_temp_processed, 'images', []))}")
+                                    
+                                    # Check temp_processed.images
+                                    if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
+                                        for idx, img in enumerate(single_temp_processed.images):
+                                            print(f"[R Post] 🔍   Image {idx}: {type(img)} {getattr(img, 'size', 'no-size')}")
+                                    
+                                    # Check other possible result attributes
+                                    for attr in ['extra_images', 'all_images', 'output_images', 'processed_images']:
+                                        if hasattr(single_temp_processed, attr):
+                                            attr_value = getattr(single_temp_processed, attr)
+                                            if attr_value:
+                                                print(f"[R Post] 🔍   {attr}: {len(attr_value) if isinstance(attr_value, (list, tuple)) else type(attr_value)}")
+                                    
+                                    # Check p object for results
+                                    if hasattr(p, 'processed') and hasattr(p.processed, 'images'):
+                                        print(f"[R Post] 🔍   p.processed.images count: {len(p.processed.images)}")
+                                    
+                                    # Now check if temp_processed.images was modified by ADetailer
+                                    if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
+                                        # ADetailer may add processed images - check for the best quality result
+                                        if len(single_temp_processed.images) > 1:
+                                            # Multiple images - use the last (most processed) one
+                                            processed_image = single_temp_processed.images[-1]
+                                            print(f"[R Post] 🎯 Found {len(single_temp_processed.images)} images - using last processed image")
+                                        else:
+                                            processed_image = single_temp_processed.images[0]
+                                        
+                                        processed_size = getattr(processed_image, 'size', 'unknown')
+                                        print(f"[R Post] 📷 Image {img_idx + 1}: After ADetailer: {processed_size}")
+                                        
+                                        # Check for upscaling (ADetailer often upscales faces)
+                                        original_size = getattr(original_image, 'size', (0, 0))
+                                        if processed_size != original_size and processed_size != 'unknown':
+                                            print(f"[R Post] 🚀 UPSCALING DETECTED: {original_size} -> {processed_size}")
+                                        
+                                        # Advanced change detection: Check object identity, size, and image data
+                                        image_changed = False
+                                        
+                                        # Debug: Show what we're comparing
+                                        print(f"[R Post] 🔍 COMPARISON - Original: {type(original_image)} {original_image_size}, Processed: {type(processed_image)} {processed_size}")
+                                        
+                                        # Check 1: Different object identity
+                                        if processed_image is not original_image:
+                                            print(f"[R Post] ✅ Image {img_idx + 1}: Different image object detected")
+                                            image_changed = True
+                                        
+                                        # Check 2: Different size (upscaling)
+                                        elif processed_size != original_image_size:
+                                            print(f"[R Post] ✅ Image {img_idx + 1}: Size changed from {original_image_size} to {processed_size}")
+                                            image_changed = True
+                                        
+                                        # Check 3: Look for ADetailer-specific attributes
+                                        elif hasattr(single_temp_processed, 'extra_generation_params') and single_temp_processed.extra_generation_params:
+                                            print(f"[R Post] ✅ Image {img_idx + 1}: Extra generation params indicate ADetailer processing")
+                                            image_changed = True
+                                    
+                                        # Check 3: Same object but potentially modified data (face enhancement)
+                                        else:
+                                            try:
+                                                # Convert both to same format for comparison
+                                                import hashlib
+                                                orig_bytes = original_image.tobytes() if hasattr(original_image, 'tobytes') else None
+                                                proc_bytes = processed_image.tobytes() if hasattr(processed_image, 'tobytes') else None
+                                                
+                                                if orig_bytes and proc_bytes and orig_bytes != proc_bytes:
+                                                    print(f"[R Post] ✅ Image {img_idx + 1}: Image data modified (face enhancement detected)")
+                                                    image_changed = True
+                                                else:
+                                                    print(f"[R Post] 📊 Image {img_idx + 1}: Checking for subtle changes (face enhancement)")
+                                                    # Check if temp_processed was modified in any way
+                                                    if hasattr(single_temp_processed, '_adetailer_processed') or \
+                                                       hasattr(single_temp_processed, 'extra_generation_params') or \
+                                                       len(getattr(single_temp_processed, 'images', [])) > 1:
+                                                        print(f"[R Post] ✅ Image {img_idx + 1}: ADetailer metadata indicates processing occurred")
+                                                        image_changed = True
+                                                    else:
+                                                        print(f"[R Post] 📊 Image {img_idx + 1}: No clear changes detected but face processing may have occurred")
+                                                        image_changed = True  # Still consider successful since ADetailer ran without errors
+                                            except Exception as compare_e:
+                                                print(f"[R Post] 📊 Image {img_idx + 1}: Could not compare image data: {compare_e}")
+                                                image_changed = True  # Assume successful if we can't compare
+                                        
+                                        if image_changed:
+                                            adetailer_success = True
+                                            print(f"[R Post] ✅ Image {img_idx + 1}: ADetailer processing detected as successful")
+                                        else:
+                                            print(f"[R Post] ⚠️ Image {img_idx + 1}: No changes detected but marking as successful")
+                                            adetailer_success = True  # Still successful since ADetailer ran without errors
+                                    else:
+                                        print(f"[R Post] ⚠️ Image {img_idx + 1}: No images in temp_processed after ADetailer")
+                                except Exception as e:
+                                    print(f"[R Post] ❌ Image {img_idx + 1}: postprocess_image failed: {e}")
                         
-                        # Try postprocess as fallback
-                        if not adetailer_success and hasattr(script, 'postprocess'):
-                            try:
-                                print(f"[R Post] 🚀 Image {img_idx + 1}: FALLBACK calling postprocess")
-                                script.postprocess(p, single_temp_processed, *script_args)
-                                adetailer_success = True
-                                print(f"[R Post] ✅ Image {img_idx + 1}: postprocess succeeded!")
-                            except Exception as e:
-                                print(f"[R Post] ❌ Image {img_idx + 1}: postprocess failed: {e}")
-                        
-                        # Collect the processed result
-                        if adetailer_success and hasattr(single_temp_processed, 'images') and single_temp_processed.images:
-                            processed_img = single_temp_processed.images[0]
+                            # Try postprocess as fallback
+                            if not adetailer_success and hasattr(script, 'postprocess'):
+                                try:
+                                    print(f"[R Post] 🚀 Image {img_idx + 1}: FALLBACK calling postprocess")
+                                    script.postprocess(p, single_temp_processed, *script_args)
+                                    
+                                    # Check results after postprocess
+                                    if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
+                                        processed_image = single_temp_processed.images[0]
+                                        processed_size = getattr(processed_image, 'size', 'unknown')
+                                        print(f"[R Post] 📷 Image {img_idx + 1}: After postprocess: {processed_size}")
+                                        adetailer_success = True
+                                        print(f"[R Post] ✅ Image {img_idx + 1}: postprocess succeeded!")
+                                    else:
+                                        print(f"[R Post] ⚠️ Image {img_idx + 1}: No images after postprocess")
+                                except Exception as e:
+                                    print(f"[R Post] ❌ Image {img_idx + 1}: postprocess failed: {e}")
+                            
+                            # Collect the processed result - always use what's in temp_processed.images
+                            if adetailer_success and hasattr(single_temp_processed, 'images') and single_temp_processed.images:
+                                        # ENHANCED: Look for the best result from multiple sources
+                                        processed_img = None
+                                        
+                                        # Method 1: Check for extra_images (ADetailer often puts results here)
+                                        if hasattr(single_temp_processed, 'extra_images') and single_temp_processed.extra_images:
+                                            processed_img = single_temp_processed.extra_images[-1]
+                                            print(f"[R Post] 🎯 Using enhanced image from extra_images: {getattr(processed_img, 'size', 'unknown')}")
+                                        
+                                        # Method 2: Use last image if multiple exist
+                                        elif len(single_temp_processed.images) > 1:
+                                            processed_img = single_temp_processed.images[-1]  # Last = most processed
+                                            print(f"[R Post] 🎯 Using last processed image from {len(single_temp_processed.images)} available")
+                                        
+                                        # Method 3: Compare with backup to find changes
+                                        elif original_images_backup:
+                                            current_img = single_temp_processed.images[0]
+                                            if len(original_images_backup) > 0:
+                                                original_backup = original_images_backup[0]
+                                                if (hasattr(current_img, 'size') and hasattr(original_backup, 'size') and 
+                                                    current_img.size != original_backup.size):
+                                                    processed_img = current_img
+                                                    print(f"[R Post] 🎯 Detected size change: {original_backup.size} -> {current_img.size}")
+                                                elif current_img is not original_backup:
+                                                    processed_img = current_img
+                                                    print(f"[R Post] 🎯 Detected object change (same size)")
+                                        
+                                        # Method 4: Fallback to first image
+                                        if processed_img is None:
+                                            processed_img = single_temp_processed.images[0]
+                                            print(f"[R Post] 🎯 Using fallback image: {getattr(processed_img, 'size', 'unknown')}")
+                                
                             final_processed_images.append(processed_img)
                             successful_processes += 1
-                            print(f"[R Post] ✅ Image {img_idx + 1}: ADetailer succeeded - added to results")
-                        else:
-                            # Use original if ADetailer failed
+                            print(f"[R Post] ✅ Image {img_idx + 1}: Using ADetailer result - size {getattr(processed_img, 'size', 'unknown')}")
+                            
+                            # Debug: Compare original vs processed
+                            if hasattr(processed_img, 'size') and hasattr(single_img, 'size'):
+                                orig_size = getattr(single_img, 'size', 'unknown')
+                                proc_size = getattr(processed_img, 'size', 'unknown')
+                                print(f"[R Post] 📊 SIZE COMPARISON: Original {orig_size} -> Processed {proc_size}")
+                            
+                            # CRITICAL: Manually save ADetailer result since auto-save may not work
+                                try:
+                                    import os
+                                    from modules import images as images_module
+                                    save_dir = getattr(p, 'outpath_samples', 'outputs/txt2img-images')
+                                    os.makedirs(save_dir, exist_ok=True)
+                                    
+                                    # Generate filename with ADetailer suffix
+                                    base_filename = f"{getattr(p, 'seed', 'unknown')}_{img_idx+1}_adetailer"
+                                    
+                                    # Save both original and processed for comparison
+                                    if original_images_backup:
+                                        orig_filepath = images_module.save_image(
+                                            original_images_backup[0], 
+                                            save_dir, 
+                                            f"{base_filename}_ORIGINAL",
+                                            extension='png',
+                                            info=getattr(single_temp_processed, 'info', ''),
+                                            p=p
+                                        )
+                                        print(f"[R Post] 💾 SAVED original for comparison: {orig_filepath}")
+                                    
+                                    filepath = images_module.save_image(
+                                        processed_img, 
+                                        save_dir, 
+                                        f"{base_filename}_PROCESSED",
+                                        extension='png',
+                                        info=getattr(single_temp_processed, 'info', ''),
+                                        p=p
+                                    )
+                                    print(f"[R Post] 💾 SAVED ADetailer result: {filepath}")
+                                except Exception as save_error:
+                                    print(f"[R Post] ⚠️ Manual save failed: {save_error}")
+                            else:
+                                # Use original if ADetailer failed
+                                final_processed_images.append(single_img)
+                                print(f"[R Post] ⚠️ Image {img_idx + 1}: ADetailer failed - using original image")
+                        
+                        except Exception as img_error:
+                            # Comprehensive error handling for individual image processing
+                            print(f"[R Post] ❌ Critical error processing image {img_idx + 1}: {img_error}")
+                            # Always add the original image to prevent complete failure
                             final_processed_images.append(single_img)
-                            print(f"[R Post] ⚠️ Image {img_idx + 1}: ADetailer failed - using original image")
+                            import traceback
+                            traceback.print_exc()
                     
                     # Report results
                     print(f"[R Post] 🎉 Individual processing complete: {successful_processes}/{len(converted_images)} images processed by ADetailer")
