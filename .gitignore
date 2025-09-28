@@ -23,3 +23,5 @@ dist/
 # Other
 deploy.ps1
 user
+ranbooru.before_revert.py
+cleancode.md
