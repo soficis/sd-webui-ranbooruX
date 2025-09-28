@@ -1,6 +1,6 @@
 # RanbooruX
 
-![Alt text](pics/ran#### 2. Stable ControlNet Integration for SD Forge
+![Alt text](pics/ranbooru.png) Stable ControlNet Integration for SD Forge
 RanbooruX features a stable, built-in integration with ControlNet that isolates it from breaking changes in the main ControlNet extension.
 
 -   **Modified ControlNet Script**: A modified `controlnet.py` is included in the `scripts/` folder to ensure compatibility with RanbooruX's img2img integration.
