@@ -1,4 +1,4 @@
-from io import BytesIO
+﻿from io import BytesIO
 import re
 import random
 import requests
@@ -11,6 +11,7 @@ import requests_cache
 import importlib
 import sys
 import traceback
+from datetime import datetime
 
 from modules.processing import process_images, StableDiffusionProcessingImg2Img, StableDiffusionProcessing
 from modules import shared
@@ -27,8 +28,12 @@ if EXTENSION_ROOT not in sys.path:
 USER_DATA_DIR = os.path.join(EXTENSION_ROOT, 'user')
 USER_SEARCH_DIR = os.path.join(USER_DATA_DIR, 'search')
 USER_REMOVE_DIR = os.path.join(USER_DATA_DIR, 'remove')
+LOG_DIR = os.path.join(USER_DATA_DIR, 'logs')
+COOKIES_DIR = os.path.join(USER_DATA_DIR, 'cookies')
 os.makedirs(USER_SEARCH_DIR, exist_ok=True)
 os.makedirs(USER_REMOVE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(COOKIES_DIR, exist_ok=True)
 
 # Ensure default files exist
 for filename in ['tags_search.txt', 'tags_remove.txt']:
@@ -57,6 +62,7 @@ RATING_TYPES = {
 RATINGS = {
     "e621": RATING_TYPES['full'],
     "danbooru": RATING_TYPES['single'],
+    "scatbooru": RATING_TYPES['single'],
     "aibooru": RATING_TYPES['full'],
     "yande.re": RATING_TYPES['full'],
     "konachan": RATING_TYPES['full'],
@@ -70,6 +76,27 @@ RATINGS = {
 def get_available_ratings(booru):
     choices = list(RATINGS.get(booru, RATING_TYPES['none']).keys())
     return gr.Radio.update(choices=choices, value="All")
+
+
+def _get_scatbooru_cookie():
+    env_cookie = os.environ.get('RANBOORUX_SCATBOORU_COOKIE')
+    if isinstance(env_cookie, str) and env_cookie.strip():
+        return env_cookie.strip()
+
+    cookie_path = os.path.join(COOKIES_DIR, 'scatbooru.cookie')
+    if os.path.isfile(cookie_path):
+        try:
+            with open(cookie_path, 'r', encoding='utf-8') as cookie_file:
+                cookie_value = cookie_file.read().strip()
+                if cookie_value:
+                    return cookie_value
+        except Exception as exc:
+            print(f"[R] Warn: Failed to read scatbooru.cookie: {exc}")
+    return None
+
+
+def has_scatbooru_access():
+    return _get_scatbooru_cookie() is not None
 
 
 def show_fringe_benefits(booru):
@@ -275,6 +302,7 @@ class Booru():
         # store categorized lists when possible
         artist_tags = []
         character_tags = []
+        copyright_tags = []
         if isinstance(post_data.get('tags'), dict):
             tags_dict = post_data.get('tags')
             # e621 style: tags dict with sublevels
@@ -282,6 +310,8 @@ class Booru():
                 artist_tags = tags_dict.get('artist', [])
             if isinstance(tags_dict.get('character'), list):
                 character_tags = tags_dict.get('character', [])
+            if isinstance(tags_dict.get('copyright'), list):
+                copyright_tags = tags_dict.get('copyright', [])
             # some APIs provide tag_string_artist / tag_string_character
         if 'tag_string_artist' in post_data:
             try:
@@ -291,6 +321,11 @@ class Booru():
         if 'tag_string_character' in post_data:
             try:
                 character_tags = [t for t in re.split(r'[,\s]+', post_data.get('tag_string_character', '').strip()) if t]
+            except Exception:
+                pass
+        if 'tag_string_copyright' in post_data:
+            try:
+                copyright_tags = [t for t in re.split(r'[,\s]+', post_data.get('tag_string_copyright', '').strip()) if t]
             except Exception:
                 pass
         
@@ -311,6 +346,7 @@ class Booru():
         post['tags'] = raw_tags
         post['artist_tags'] = artist_tags
         post['character_tags'] = character_tags
+        post['copyright_tags'] = copyright_tags
         post['score'] = post_data.get('score', 0)
         post['file_url'] = post_data.get('file_url')
         if post['file_url'] is None:
@@ -387,6 +423,51 @@ class Danbooru(Booru):
                 all_fetched_posts = fetched_data
             COUNT = len(all_fetched_posts)
             print(f"[R] Fetched {COUNT} posts from page {page}.")
+        return [self._standardize_post(post) for post in all_fetched_posts if post]
+
+
+class Scatbooru(Booru):
+    def __init__(self):
+        super().__init__('Scatbooru', f'https://scatbooru.com/posts.json?limit={POST_AMOUNT}')
+
+    def _fetch_data(self, query_url):
+        headers = self.headers.copy()
+        session_cookie = _get_scatbooru_cookie()
+        if session_cookie:
+            headers['Cookie'] = session_cookie
+        try:
+            resp = requests.get(query_url, headers=headers, timeout=30)
+            if resp.status_code == 429:
+                raise BooruError('Scatbooru rate limited the request. Provide RANBOORUX_SCATBOORU_COOKIE or place the cookie in user/cookies/scatbooru.cookie, then slow down requests.')
+            content_type = resp.headers.get('content-type', '')
+            if 'application/json' in content_type:
+                return resp.json()
+            # HTML normally indicates that the Cloudflare/anti-bot check blocked the request
+            raise BooruError('Scatbooru returned HTML instead of JSON. Provide a valid session cookie via RANBOORUX_SCATBOORU_COOKIE or user/cookies/scatbooru.cookie.')
+        except BooruError:
+            raise
+        except Exception as exc:
+            raise BooruError(f'Scatbooru fetch error: {exc}') from exc
+
+    def get_posts(self, tags_query="", max_pages=10, post_id=None):
+        global COUNT
+        COUNT = 0
+        all_fetched_posts = []
+        if post_id:
+            query_url = f"https://scatbooru.com/posts/{post_id}.json"
+            fetched_data = self._fetch_data(query_url)
+            if isinstance(fetched_data, dict) and 'id' in fetched_data:
+                all_fetched_posts = [fetched_data]
+            COUNT = len(all_fetched_posts)
+            print(f"[R] Fetched {COUNT} Scatbooru post(s) for ID {post_id}.")
+        else:
+            page = random.randint(1, max_pages)
+            query_url = f"{self.base_api_url}&page={page}{tags_query}"
+            fetched_data = self._fetch_data(query_url)
+            if isinstance(fetched_data, list):
+                all_fetched_posts = fetched_data
+            COUNT = len(all_fetched_posts)
+            print(f"[R] Fetched {COUNT} posts from Scatbooru (page {page}).")
         return [self._standardize_post(post) for post in all_fetched_posts if post]
 
 
@@ -589,30 +670,117 @@ class Script(scripts.Script):
     run_img2img_pass = False
     img2img_denoising = 0.75
     cache_installed_by_us = False
+    _adetailer_support_enabled = False
+    _post_adetailer_enabled = False
+    _CLOTHING_KEYWORDS = {
+        'dress', 'shirt', 'skirt', 'skorts', 'pants', 'jeans', 'shorts', 'jacket', 'coat', 'sweater', 'hoodie',
+        'kimono', 'robe', 'uniform', 'school uniform', 'sailor uniform', 'bikini', 'swimsuit', 'lingerie', 'underwear',
+        'panties', 'bra', 'corset', 'thighhighs', 'stockings', 'socks', 'gloves', 'mittens', 'scarf', 'cape', 'apron',
+        'armor', 'bustier', 'bodysuit', 'leotard', 'gown', 'tuxedo', 'suit', 'vest', 'necktie', 'bowtie', 'hat', 'cap',
+        'headband', 'hairband', 'headdress', 'veil', 'crown', 'helmet', 'sandals', 'boots', 'shoes', 'heels', 'sneakers',
+        'flip flops', 'garter', 'garter belt', 'pantyhose', 'stocking', 'cloak', 'cardigan', 'sleeves', 'armband',
+        'choker', 'ribbon', 'bow', 'shawl', 'loincloth', 'loin cloth', 'tabard', 'capelet', 'poncho', 'overalls', 'tank top',
+        't-shirt', 'tee shirt', 'pajamas', 'nightgown'
+    }
+    _TEXTUAL_TAGS = {
+        'text', 'english text', 'japanese text', 'chinese text', 'korean text', 'translated', 'translation', 'commentary',
+        'artist commentary', 'author commentary', 'publisher commentary', 'copyright text', 'speech bubble', 'speech bubbles',
+        'dialogue', 'dialog', 'sound effect', 'sound effects', 'comic text', 'comic panel', 'subtitle', 'subtitles', 'caption',
+        'captions', 'floating text', 'text focus', 'text overlay', 'text background', 'watermark', 'watermark text', 'signature',
+        'sign', 'tagme', 'written text', 'scribble', 'handwritten text', 'handwriting', 'text box', 'thought bubble', 'thought balloon',
+        'logo', 'logo text', 'notice', 'speech bubble text'
+    }
+    _SUBJECT_TAGS = {
+        'solo', 'duo', 'trio', 'quartet', 'group', 'gang', 'crowd', 'couple', 'threesome', 'foursome', 'orgy',
+        '1girl', '2girls', '3girls', '4girls', '1boy', '2boys', '3boys', '4boys', '1other', '2others', '3others', '4others',
+        'multiple girls', 'multiple boys', 'multiple people', 'multiple others', 'solo focus', 'female focus', 'male focus',
+        'mixed group', '1female', '1male', '2females', '2males', '3females', '3males', '1person', '2people', '3people', '4people'
+    }
+    def _is_clothing_tag(self, tag: str) -> bool:
+        normalized = self._normalize_tag(tag)
+        if not normalized:
+            return False
+        if normalized.startswith('no ') or normalized.startswith('without ') or ' without ' in normalized or normalized.startswith('nude'):
+            return False
+        for keyword in self._CLOTHING_KEYWORDS:
+            if keyword in normalized:
+                return True
+        if normalized.endswith(' uniform') or normalized.endswith(' outfit') or normalized.endswith(' costume'):
+            return True
+        return False
 
-    # --- Image sanitation helpers (ensure PIL) ---
-    def _ensure_pil_image(self, img):
+    def _is_textual_tag(self, tag: str) -> bool:
+        normalized = self._normalize_tag(tag)
+        if not normalized:
+            return False
+        if normalized in self._TEXTUAL_TAGS:
+            return True
+        if ' text' in normalized or normalized.endswith(' text') or normalized.startswith('text '):
+            return True
+        if 'commentary' in normalized or 'speech bubble' in normalized or 'dialog' in normalized or 'subtitle' in normalized or 'caption' in normalized:
+            return True
+        if normalized.startswith('translated ') or normalized.startswith('translation '):
+            return True
+        return False
+
+    def _is_subject_tag(self, tag: str) -> bool:
+        normalized = self._normalize_tag(tag)
+        return normalized in self._SUBJECT_TAGS
+
+    def _extract_subject_tags(self, text: str) -> set:
+        if not text or not isinstance(text, str):
+            return set()
+        tags = [t.strip() for t in re.split(r'[\s,]+', text) if t.strip()]
+        return {self._normalize_tag(t) for t in tags if self._is_subject_tag(t)}
+
+    def _log_generation_reference(self, p):
+        if not getattr(self, '_log_prompt_sources', False):
+            return
         try:
-            if img is None:
-                return None
-            # Already PIL image
-            if hasattr(img, 'mode') and hasattr(img, 'size') and hasattr(img, 'convert'):
-                # Normalize mode to RGB for downstream consumers
-                return img if getattr(img, 'mode', 'RGB') == 'RGB' else img.convert('RGB')
-            # Numpy array -> PIL
-            if hasattr(img, 'shape'):
-                import numpy as _np
-                from PIL import Image as _PILImage
-                arr = img
-                try:
-                    if len(arr.shape) == 3 and arr.shape[2] == 3:
-                        return _PILImage.fromarray(arr.astype(_np.uint8), 'RGB')
-                    return _PILImage.fromarray(arr.astype(_np.uint8))
-                except Exception:
-                    return None
-            return img
-        except Exception:
-            return None
+            prompts = list(getattr(self, '_final_prompts_snapshot', []))
+            if not prompts:
+                prompt_attr = getattr(p, 'prompt', '')
+                if isinstance(prompt_attr, list):
+                    prompts = list(prompt_attr)
+                elif isinstance(prompt_attr, str):
+                    prompts = [prompt_attr]
+            prompts = [pr for pr in prompts if isinstance(pr, str) and pr.strip()]
+            if not prompts:
+                return
+            seeds = list(getattr(p, 'all_seeds', []) or [])
+            posts = list(getattr(self, '_posts_used_for_generation', []))
+            post_urls = list(getattr(self, '_last_post_urls', [])) if hasattr(self, '_last_post_urls') else []
+            os.makedirs(LOG_DIR, exist_ok=True)
+            log_path = os.path.join(LOG_DIR, 'prompt_sources.txt')
+            booru = getattr(self, '_current_booru_name', 'unknown')
+            base_prompt = getattr(self, 'original_prompt', getattr(p, 'prompt', ''))
+            negative_prompt = getattr(p, 'negative_prompt', '')
+            with open(log_path, 'a', encoding='utf-8') as log_file:
+                log_file.write('---\n')
+                log_file.write(f"{datetime.now().isoformat()} | booru={booru} | reuse_cached={getattr(self, '_reuse_cached_posts', False)}\n")
+                log_file.write(f"base_prompt={base_prompt}\n")
+                if isinstance(negative_prompt, str) and negative_prompt:
+                    log_file.write(f"negative_prompt={negative_prompt}\n")
+                for idx, prompt in enumerate(prompts):
+                    seed = seeds[idx] if idx < len(seeds) else getattr(p, 'seed', None)
+                    log_file.write(f"[{idx+1}] seed={seed}\n")
+                    log_file.write(f"prompt={prompt}\n")
+                    post = posts[idx] if idx < len(posts) else None
+                    source_url = post_urls[idx] if idx < len(post_urls) else None
+                    if not source_url and post:
+                        source_url = get_original_post_url(post)
+                    if not source_url and post and post.get('file_url'):
+                        source_url = post.get('file_url')
+                    if source_url:
+                        log_file.write(f"source={source_url}\n")
+                    if post and post.get('id') is not None:
+                        log_file.write(f"post_id={post.get('id')}\n")
+                    log_file.write('\n')
+            self._posts_used_for_generation = []
+            self._final_prompts_snapshot = []
+            self._final_negative_prompts_snapshot = []
+        except Exception as exc:
+            print(f"[R Log] Failed to log prompt sources: {exc}")
 
     def _ensure_pil_images_in_processed(self, processed_obj):
         try:
@@ -724,12 +892,23 @@ class Script(scripts.Script):
     def ui(self, is_img2img):
         with InputAccordion(False, label="RanbooruX", elem_id=self.elem_id("ra_enable")) as enabled:
             booru_list = ["gelbooru", "danbooru", "xbooru", "rule34", "safebooru", "konachan", 'yande.re', 'aibooru', 'e621']
+            if has_scatbooru_access():
+                booru_list.insert(2, "scatbooru")
             booru = gr.Dropdown(booru_list, label="Booru", value="gelbooru")
             max_pages = gr.Slider(label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1)
             gr.Markdown("""## Post"""); post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
-            gr.Markdown("""## Tags"""); tags = gr.Textbox(lines=1, label="Tags to Search (Pre)", info="Add '!refresh' to force fetch new images"); remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
+            gr.Markdown("""## Tags"""); tags = gr.Textbox(lines=1, label="Tags to Search (Pre)"); remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
             mature_rating = gr.Radio(list(RATINGS.get('gelbooru', RATING_TYPES['none'])), label="Mature Rating", value="All")
-            remove_bad_tags = gr.Checkbox(label="Remove common 'bad' tags", value=True); remove_artist_tags = gr.Checkbox(label="Remove Artist tags from prompt", value=False); remove_character_tags = gr.Checkbox(label="Remove Character tags from prompt", value=False); shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True); change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False); same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
+            remove_bad_tags = gr.Checkbox(label="Remove common 'bad' tags", value=True)
+            gr.Markdown("**Note:** Tag removal is not perfect and is a work in progress.")
+            remove_artist_tags = gr.Checkbox(label="Remove Artist tags from prompt", value=False)
+            remove_character_tags = gr.Checkbox(label="Remove Character tags from prompt", value=False)
+            remove_clothing_tags = gr.Checkbox(label="Remove clothing tags from prompt", value=False)
+            remove_text_tags = gr.Checkbox(label="Remove tag/text/commentary metadata from prompt", value=True)
+            restrict_subject_tags = gr.Checkbox(label="Keep only subject tags from base prompt", value=False, info="Prevents extra subject counts (e.g., 2girls) from being added when you specify 1girl/solo.")
+            shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
+            change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
+            same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
             fringe_benefits = gr.Checkbox(label="Gelbooru: Fringe Benefits", value=True, visible=True)
             limit_tags = gr.Slider(value=1.0, label="Limit tags by %", minimum=0.05, maximum=1.0, step=0.05); max_tags = gr.Slider(value=0, label="Max tags (0=disabled)", minimum=0, maximum=300, step=1)
             change_background = gr.Radio(["Don't Change", "Add Detail", "Force Simple", "Force Transparent/White"], label="Change Background", value="Don't Change")
@@ -741,10 +920,23 @@ class Script(scripts.Script):
             gr.Markdown("""\n---\n""")
             with gr.Group():
                 with gr.Accordion("Img2Img / ControlNet", open=False):
-                    use_img2img = gr.Checkbox(label="Use Image for Img2Img", value=False); use_ip = gr.Checkbox(label="Use Image for ControlNet (Unit 0)", value=False)
+                    use_img2img = gr.Checkbox(label="Use Image for Img2Img", value=False)
+                    use_ip = gr.Checkbox(label="Use Image for ControlNet (Unit 0)", value=False)
                     denoising = gr.Slider(value=0.75, label="Img2Img Denoising / CN Weight", minimum=0.0, maximum=1.0, step=0.05)
-                    use_last_img = gr.Checkbox(label="Use same image for batch", value=False); crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
-                    use_deepbooru = gr.Checkbox(label="Use Deepbooru on image", value=False); type_deepbooru = gr.Radio(["Add Before", "Add After", "Replace"], label="DB Tags Position", value="Add Before")
+                    use_last_img = gr.Checkbox(label="Use same image for batch", value=False)
+                    crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
+                    use_deepbooru = gr.Checkbox(label="Use Deepbooru on image", value=False)
+                    type_deepbooru = gr.Radio(["Add Before", "Add After", "Replace"], label="DB Tags Position", value="Add Before")
+                    enable_adetailer_support = gr.Checkbox(
+                        label="Enable RanbooruX ADetailer support",
+                        value=False,
+                        info="Run RanbooruX's manual ADetailer integration after img2img when enabled."
+                    )
+                    reuse_cached_posts = gr.Checkbox(
+                        label="Reuse cached booru posts",
+                        value=False,
+                        info="Leave disabled to fetch fresh images every generation. Enable when you want RanbooruX to reuse the previously cached posts."
+                    )
             with gr.Group():
                 with gr.Accordion("File Tags", open=False):
                     use_search_txt = gr.Checkbox(label="Add line from Search File", value=False); choose_search_txt = gr.Dropdown(self.get_files(USER_SEARCH_DIR), label="Choose Search File", value="", info=f"in '{USER_SEARCH_DIR}'")
@@ -754,13 +946,13 @@ class Script(scripts.Script):
                 with gr.Accordion("Extra Prompt Modes", open=False):
                     with gr.Box(): mix_prompt = gr.Checkbox(label="Mix tags from multiple posts", value=False); mix_amount = gr.Slider(value=2, label="Posts to mix", minimum=2, maximum=10, step=1)
                     with gr.Box(): chaos_mode = gr.Radio(["None", "Shuffle All", "Shuffle Negative"], label="Tag Shuffling (Chaos)", value="None"); chaos_amount = gr.Slider(value=0.5, label="Chaos Amount %", minimum=0.1, maximum=1.0, step=0.05)
-                    with gr.Box(): use_same_seed = gr.Checkbox(label="Use same seed for batch", value=False); use_cache = gr.Checkbox(label="Cache Booru API requests", value=True)
+                    with gr.Box(): use_same_seed = gr.Checkbox(label="Use same seed for batch", value=False); use_cache = gr.Checkbox(label="Cache Booru API requests", value=True); log_prompt_sources = gr.Checkbox(label="Log image sources/prompts to txt", value=False, info="When enabled, RanbooruX appends a log entry mapping seeds and prompts to the source posts.")
         with InputAccordion(False, label="LoRAnado", elem_id=self.elem_id("lo_enable")) as lora_enabled:
             with gr.Box(): lora_lock_prev = gr.Checkbox(label="Lock previous LoRAs", value=False); lora_folder = gr.Textbox(lines=1, label="LoRAs Subfolder", placeholder="e.g., 'Characters' or empty"); lora_amount = gr.Slider(value=1, label="LoRAs Amount", minimum=1, maximum=10, step=1)
             with gr.Box(): lora_min = gr.Slider(value=0.6, label="Min LoRAs Weight", minimum=-1.0, maximum=1.5, step=0.1); lora_max = gr.Slider(value=1.0, label="Max LoRAs Weight", minimum=-1.0, maximum=1.5, step=0.1); lora_custom_weights = gr.Textbox(lines=1, label="Custom Weights (optional)", placeholder="e.g., 0.8, 0.5, 1.0")
         search_refresh_btn.click(fn=self.refresh_ser, inputs=[], outputs=[choose_search_txt])
         remove_refresh_btn.click(fn=self.refresh_rem, inputs=[], outputs=[choose_remove_txt])
-        return [enabled, tags, booru, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, use_same_seed, use_cache, remove_artist_tags, remove_character_tags]
+        return [enabled, tags, booru, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags]
 
     def check_orientation(self, img):
         if img is None:
@@ -895,6 +1087,10 @@ class Script(scripts.Script):
             'aibooru': AIBooru(),
             'e621': e621(),
         }
+        if has_scatbooru_access():
+            booru_apis['scatbooru'] = Scatbooru()
+        if booru_name == 'scatbooru' and not has_scatbooru_access():
+            raise ValueError('Scatbooru requires a valid session cookie. Set RANBOORUX_SCATBOORU_COOKIE or create user/cookies/scatbooru.cookie with the session value.')
         if booru_name not in booru_apis:
             raise ValueError(f"Booru '{booru_name}' not implemented.")
         return booru_apis.get(booru_name)
@@ -999,7 +1195,7 @@ class Script(scripts.Script):
         return fetched_images
 
     def _process_single_prompt(self, index, raw_prompt, base_positive, base_negative, initial_additions, bad_tags, settings):
-        (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, remove_artist_tags, remove_character_tags) = settings
+        (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags) = settings
         current_prompt = f"{initial_additions},{raw_prompt}" if initial_additions else raw_prompt
         prompt_tags = [tag.strip() for tag in re.split(r'[,\t\s]+', current_prompt) if tag.strip()]
         # If removal flags are set, remove tags coming from selected post's artist/character lists
@@ -1016,39 +1212,65 @@ class Script(scripts.Script):
                 pass
                 # print(f"[R Debug] Character tags from post {index}: {character_tags_meta}")
             # normalize tags for comparison (underscores/spaces, lower)
-            norm = lambda s: s.replace('_', ' ').strip().lower()
-            artist_norm = set([norm(t) for t in artist_tags_meta if isinstance(t, str)])
-            char_norm = set([norm(t) for t in character_tags_meta if isinstance(t, str)])
-            # Also include the original forms (without underscore replacement) for matching
-            artist_norm.update([t.strip().lower() for t in artist_tags_meta if isinstance(t, str)])
-            char_norm.update([t.strip().lower() for t in character_tags_meta if isinstance(t, str)])
-            # print(f"[R Debug] Character normalized set: {char_norm}")
-            if remove_artist_tags or remove_character_tags:
-                # print(f"[R Debug] Original prompt tags: {prompt_tags}")
-                filtered_prompt_tags = []
-                removed_count = 0
-                for t in prompt_tags:
-                    t_norm = norm(t)
-                    t_orig = t.strip().lower()  # Also check original form without underscore conversion
-                    should_remove = False
-                    # print(f"[R Debug] Checking tag '{t}': normalized='{t_norm}', original='{t_orig}'")
-                    
-                    if remove_artist_tags and (t_norm in artist_norm or t_orig in artist_norm):
-                        # print(f"[R Debug] Removing artist tag: '{t}' (normalized: '{t_norm}', original: '{t_orig}')")
-                        removed_count += 1
-                        should_remove = True
-                    elif remove_character_tags and (t_norm in char_norm or t_orig in char_norm):
-                        # print(f"[R Debug] Removing character tag: '{t}' (normalized: '{t_norm}', original: '{t_orig}')")
-                        # print(f"[R Debug] Match found: t_norm in char_norm={t_norm in char_norm}, t_orig in char_norm={t_orig in char_norm}")
-                        removed_count += 1
-                        should_remove = True
-                    
-                    if not should_remove:
-                        filtered_prompt_tags.append(t)
-                
-                # print(f"[R Debug] Filtered prompt tags: {filtered_prompt_tags}")
-                # print(f"[R Debug] Removed {removed_count} artist/character tags from prompt {index}")
-                prompt_tags = filtered_prompt_tags
+            norm = self._normalize_tag
+            artist_norm = {norm(t) for t in artist_tags_meta if isinstance(t, str)}
+            char_norm = {norm(t) for t in character_tags_meta if isinstance(t, str)}
+            if isinstance(post_meta, dict):
+                copyright_tags_meta = post_meta.get('copyright_tags') or []
+                if remove_character_tags and copyright_tags_meta:
+                    char_norm.update({norm(t) for t in copyright_tags_meta if isinstance(t, str)})
+                    char_norm.update({(t or '').strip().lower() for t in copyright_tags_meta if isinstance(t, str)})
+            artist_norm.update({(t or '').strip().lower() for t in artist_tags_meta if isinstance(t, str)})
+            char_norm.update({(t or '').strip().lower() for t in character_tags_meta if isinstance(t, str)})
+            general_tags = []
+            if isinstance(post_meta, dict):
+                raw_all_tags = post_meta.get('tags') or ''
+                if isinstance(raw_all_tags, str):
+                    general_tags = [t.strip() for t in re.split(r'[\s,]+', raw_all_tags) if t.strip()]
+            if remove_character_tags and general_tags:
+                for tag in general_tags:
+                    tag_norm = norm(tag)
+                    if ('(' in tag and ')' in tag and not tag.strip().startswith('(')) or any(tag_norm.endswith(suffix) for suffix in (' series', ' franchise', ' character', ' characters')):
+                        char_norm.add(tag_norm)
+                        char_norm.add(tag.strip().lower())
+            if remove_artist_tags and general_tags:
+                for tag in general_tags:
+                    tag_norm = norm(tag)
+                    if tag_norm.startswith('artist:') or tag_norm.endswith(' artist') or ' drawn by' in tag_norm:
+                        artist_norm.add(tag_norm)
+                        artist_norm.add(tag.strip().lower())
+            allowed_subjects = set()
+            if restrict_subject_tags:
+                allowed_subjects.update(self._extract_subject_tags(base_positive))
+                allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                allowed_subjects.update(self._extract_subject_tags(getattr(self, 'original_prompt', '')))
+            filtered_prompt_tags = []
+            primary_subject = None
+            for t in prompt_tags:
+                t_norm = norm(t)
+                t_orig = (t or '').strip().lower()
+                should_remove = False
+                if remove_artist_tags and (t_norm in artist_norm or t_orig in artist_norm or t_norm.endswith(' artist')):
+                    should_remove = True
+                elif remove_character_tags and (t_norm in char_norm or t_orig in char_norm or ('(' in t and ')' in t and not t.strip().startswith('(')) or t_norm.endswith(' series') or t_norm.endswith(' franchise')):
+                    should_remove = True
+                if not should_remove and remove_clothing_tags and self._is_clothing_tag(t):
+                    should_remove = True
+                if not should_remove and remove_text_tags and self._is_textual_tag(t):
+                    should_remove = True
+                if not should_remove and restrict_subject_tags and self._is_subject_tag(t):
+                    subject_norm = t_norm
+                    if allowed_subjects:
+                        if subject_norm not in allowed_subjects:
+                            should_remove = True
+                    else:
+                        if primary_subject is None:
+                            primary_subject = subject_norm
+                        elif subject_norm != primary_subject:
+                            should_remove = True
+                if not should_remove:
+                    filtered_prompt_tags.append(t)
+            prompt_tags = filtered_prompt_tags
         except Exception:
             # fallback: ignore removal if anything goes wrong
             pass
@@ -1397,7 +1619,7 @@ class Script(scripts.Script):
             # Store the processing key for cleanup
             self._current_processing_key = processing_key
 
-            # Keep existing ordering stable for most outputs; the two new flags are expected at the end.
+            # Keep existing ordering stable for most outputs; new toggles are appended toward the end.
             (enabled, tags, booru, remove_bad_tags_ui, max_pages, change_dash, same_prompt,
              fringe_benefits, remove_tags_ui, use_img2img, denoising, use_last_img,
              change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount,
@@ -1405,8 +1627,8 @@ class Script(scripts.Script):
              lora_folder, lora_amount, lora_min, lora_max, lora_enabled,
              lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt,
              choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn,
-             crop_center, use_deepbooru, type_deepbooru, use_same_seed, use_cache,
-             remove_artist_tags_ui, remove_character_tags_ui) = args
+             crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources_ui,
+             remove_artist_tags_ui, remove_character_tags_ui, remove_clothing_tags_ui, remove_text_tags_ui, restrict_subject_tags_ui) = args
         except Exception as e:
             print(f"[R Before] CRITICAL Error unpack args: {e}. Aborting.")
             traceback.print_exc()
@@ -1429,6 +1651,17 @@ class Script(scripts.Script):
         self._post_use_deepbooru = bool(use_deepbooru)
         self._post_type_deepbooru = type_deepbooru
         self._post_use_cache = bool(use_cache)
+        self._reuse_cached_posts = bool(reuse_cached_posts)
+        self._adetailer_support_enabled = bool(enable_adetailer_support)
+        self._post_adetailer_enabled = self._adetailer_support_enabled
+        self._log_prompt_sources = bool(log_prompt_sources_ui)
+
+        self._current_booru_name = booru
+        if not self._reuse_cached_posts:
+            self._last_post_urls = []
+        self._posts_used_for_generation = []
+        self._final_prompts_snapshot = []
+        self._final_negative_prompts_snapshot = []
 
         if lora_enabled:
             p = self._apply_loranado(p, lora_enabled, lora_folder, lora_amount, lora_min, lora_max, lora_custom_weights, lora_lock_prev)
@@ -1463,8 +1696,12 @@ class Script(scripts.Script):
         if not hasattr(p, 'subseeds'):
             p.subseeds = p.all_subseeds.copy()
         
+        self._reset_adetailer_state_for_run(p)
+
         if not enabled:
             print("[R] RanbooruX is DISABLED - skipping image fetch")
+            self._adetailer_support_enabled = False
+            self._post_adetailer_enabled = False
             # Clear processing guards even when disabled
             if hasattr(self, '_current_processing_key'):
                 processing_key = self._current_processing_key
@@ -1474,37 +1711,19 @@ class Script(scripts.Script):
                 setattr(self.__class__, '_ranbooru_global_processing', False)
             return
 
-        # CRITICAL: Reset ADetailer blocking flags for each new generation in batch
-        print("[R Before] 🔄 Resetting ADetailer blocking flags for new generation")
-        setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
-        setattr(self.__class__, '_adetailer_global_guard_active', False)
-        setattr(self.__class__, '_adetailer_pipeline_blocked', False)
-        setattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
-        # Also reset manual ADetailer completion flag for this processing object
-        if hasattr(p, '_ranbooru_manual_adetailer_complete'):
-            try:
-                delattr(p, '_ranbooru_manual_adetailer_complete')
-            except Exception:
-                setattr(p, '_ranbooru_manual_adetailer_complete', False)
-        
-        # Also clear any instance-level flags on the processing object
-        if hasattr(p, '_ad_disabled'):
-            delattr(p, '_ad_disabled')
-        if hasattr(p, '_ranbooru_skip_initial_adetailer'):
-            delattr(p, '_ranbooru_skip_initial_adetailer')
-        if hasattr(p, '_ranbooru_suppress_all_processing'):
-            delattr(p, '_ranbooru_suppress_all_processing')
-        if hasattr(p, '_ranbooru_adetailer_already_processed'):
-            delattr(p, '_ranbooru_adetailer_already_processed')
-        
-        # CRITICAL: Reset ScriptRunner guards to ensure ADetailer is found in subsequent generations
-        self._reset_script_runner_guards()
+        if self._is_adetailer_enabled():
+            print("[R Before] Resetting ADetailer blocking flags for new generation")
+            self._reset_script_runner_guards()
+        else:
+            print("[R Before] Manual ADetailer support disabled - leaving ADetailer scripts untouched")
 
         # Clear notification that extension is active
         print("[R Before] ⚠️  RanbooruX IS ENABLED AND RUNNING ⚠️")
         print(f"[R Before] Search tags: '{tags}' | Booru: {booru} | Img2Img: {use_img2img} | ControlNet: {use_ip}")
         
         # Check if we should reuse existing images or fetch new ones
+        reuse_cached_posts = bool(getattr(self, '_reuse_cached_posts', False))
+
         # Special handling: if tags contain "!refresh", force fetch new images
         force_refresh = "!refresh" in (tags or "")
         if force_refresh:
@@ -1512,26 +1731,36 @@ class Script(scripts.Script):
             tags = tags.replace("!refresh", "").replace(",,", ",").strip(",")
             print(f"[R Before] Detected !refresh command - forcing new image fetch")
             print(f"[R Before] Original tags: '{original_tags}' -> Cleaned: '{tags}'")
-        
+
         current_search_key = f"{booru}_{tags}_{post_id}_{mature_rating}_{sorting_order}"
-        should_fetch_new = (
-            force_refresh or
-            not hasattr(self, '_last_search_key') or
-            self._last_search_key != current_search_key or
-            not hasattr(self, '_cached_posts') or
-            not self._cached_posts or
-            not hasattr(self, 'last_img') or
-            not self.last_img
-        )
+        if not reuse_cached_posts:
+            should_fetch_new = True
+        else:
+            should_fetch_new = (
+                force_refresh or
+                not hasattr(self, '_last_search_key') or
+                self._last_search_key != current_search_key or
+                not hasattr(self, '_cached_posts') or
+                not self._cached_posts or
+                not hasattr(self, 'last_img') or
+                not self.last_img
+            )
         
+        if not reuse_cached_posts:
+            self._cached_posts = []
+            self._cached_search_tags = ''
+            self._cached_bad_tags = set()
+            self._cached_initial_additions = ''
+
         if should_fetch_new:
             if force_refresh:
                 print("[R Before] Fetching new images (!refresh command used)")
             else:
-                print("[R Before] Fetching new images (search parameters changed or no cached images)")
+                print("[R Before] Fetching new images (search parameters changed or caching disabled)")
         else:
-            print(f"[R Before] Reusing cached images ({len(self.last_img)} images) from previous search")
-            print("[R Before] 💡 TIP: Add '!refresh' to your tags to force fetch new images")
+            if reuse_cached_posts:
+                print(f"[R Before] Reusing cached images ({len(self.last_img)} images) from previous search")
+                print("[R Before] 💡 TIP: Add '!refresh' to your tags to force fetch new images")
         
         self.original_prompt = p.prompt if isinstance(p.prompt, str) else (p.prompt[0] if isinstance(p.prompt, list) and p.prompt else "")
         
@@ -1570,6 +1799,7 @@ class Script(scripts.Script):
                             print(f"[R] Original post {idx+1}/{len(selected_posts)}: {post_url}")
                 except Exception as e:
                     print(f"[R] Warn: Failed to compute original post URLs: {e}")
+                self._last_post_urls = post_urls
 
                 if use_img2img or use_deepbooru or use_ip:
                     self.last_img = self._fetch_images(selected_posts, use_last_img, booru, fringe_benefits)
@@ -1583,19 +1813,23 @@ class Script(scripts.Script):
             self._selected_posts = selected_posts
             self._remove_artist_tags = bool(remove_artist_tags_ui)
             self._remove_character_tags = bool(remove_character_tags_ui)
+            self._remove_clothing_tags = bool(remove_clothing_tags_ui)
+            self._remove_text_tags = bool(remove_text_tags_ui)
+            self._restrict_subject_tags = bool(restrict_subject_tags_ui)
 
             # Preview UI removed by request
 
             base_negative = getattr(p, 'negative_prompt', '') or ""
             final_prompts = []
             final_negative_prompts = [base_negative] * num_images_needed
-            prompt_processing_settings = (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, self._remove_artist_tags, self._remove_character_tags)
+            prompt_processing_settings = (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, self._remove_artist_tags, self._remove_character_tags, self._remove_clothing_tags, self._remove_text_tags, self._restrict_subject_tags)
             
             # Ensure we only use the number of posts that match the current generation request
             posts_to_use = selected_posts[:num_images_needed] if len(selected_posts) > num_images_needed else selected_posts
             # If we need more images than available posts, repeat the last post
             while len(posts_to_use) < num_images_needed:
                 posts_to_use.append(posts_to_use[-1] if posts_to_use else selected_posts[0])
+            self._posts_used_for_generation = list(posts_to_use)
             
             # Also align cached images with current generation request
             if not should_fetch_new and hasattr(self, 'last_img') and self.last_img:
@@ -1643,6 +1877,8 @@ class Script(scripts.Script):
             else:
                 p.prompt = valid_final_prompts
                 p.negative_prompt = final_negative_prompts
+            self._final_prompts_snapshot = list(valid_final_prompts)
+            self._final_negative_prompts_snapshot = list(final_negative_prompts)
             # Debug print removed per user request
 
             if use_same_seed:
@@ -1710,6 +1946,26 @@ class Script(scripts.Script):
 
         print("[Ranbooru BeforeProcess] Finished.")
 
+    def _reset_adetailer_state_for_run(self, p):
+        """Clear RanbooruX-managed ADetailer flags before a generation begins."""
+        setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
+        setattr(self.__class__, '_adetailer_global_guard_active', False)
+        setattr(self.__class__, '_adetailer_pipeline_blocked', False)
+        setattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
+        cleanup_attrs = (
+            '_ranbooru_manual_adetailer_complete',
+            '_ad_disabled',
+            '_ranbooru_skip_initial_adetailer',
+            '_ranbooru_suppress_all_processing',
+            '_ranbooru_adetailer_already_processed',
+        )
+        for attr in cleanup_attrs:
+            if hasattr(p, attr):
+                try:
+                    delattr(p, attr)
+                except Exception:
+                    setattr(p, attr, False)
+
     def postprocess(self, p: StableDiffusionProcessing, processed, *args):
         try:
             # If this generation already finalized, avoid looping
@@ -1731,6 +1987,7 @@ class Script(scripts.Script):
             use_deepbooru = getattr(self, '_post_use_deepbooru', False)
             type_deepbooru = getattr(self, '_post_type_deepbooru', 'Add Before')
             use_cache = getattr(self, '_post_use_cache', True)
+            use_adetailer = getattr(self, '_post_adetailer_enabled', False) and self._is_adetailer_enabled()
             
             # Validate essential objects
             if not processed or not hasattr(processed, 'images'):
@@ -1761,12 +2018,14 @@ class Script(scripts.Script):
             except Exception:
                 pass
 
-            # EARLY PROTECTION: Restore ADetailer scripts that were temporarily disabled during initial pass
-            self._restore_early_adetailer_protection()
-            
-            # CRITICAL: Prepare ADetailer for img2img so it can process the final results
-            self._prepare_adetailer_for_img2img(p)
-            
+            if use_adetailer:
+                # EARLY PROTECTION: Restore ADetailer scripts that were temporarily disabled during initial pass
+                self._restore_early_adetailer_protection()
+                # CRITICAL: Prepare ADetailer for img2img so it can process the final results
+                self._prepare_adetailer_for_img2img(p)
+            else:
+                print('[R Post] Manual ADetailer support disabled; skipping ADetailer preparation steps')
+
             print('[R Post] Starting separate Img2Img run...')
             valid_images = [img for img in self.last_img if img is not None]
             if not valid_images:
@@ -1938,47 +2197,40 @@ class Script(scripts.Script):
             # CRITICAL: Force global state update to ensure other extensions see the changes
             self._force_global_processed_update(p, processed, all_img2img_results)
             
-            # FINAL AGGRESSIVE FIX: Directly patch ADetailer to force it to use our results
-            self._patch_adetailer_directly(processed, all_img2img_results)
-            
-            # FOCUS: Try to run ADetailer manually on our img2img results - this is the main approach now
-            print("[R Post] 🎯 Attempting to run ADetailer on img2img results...")
-            
-            # Ensure processing object is aligned to our img2img result for ADetailer
-            self._prepare_processing_for_manual_adetailer(p, processed, all_img2img_results)
-            
-            # Unblock ADetailer guard before manual run
-            try:
-                self._set_adetailer_block(False)
-                setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
-                setattr(p, '_ranbooru_skip_initial_adetailer', False)
-                print("[R Post] 🔓 Unblocked ADetailer guard for manual run")
-            except Exception:
-                pass
-            
-            # Install and enable preview guard to block wrong previews
-            try:
-                final_dims = all_img2img_results[0].size if all_img2img_results and hasattr(all_img2img_results[0], 'size') else None
-                self._install_preview_guard()
-                self._set_preview_guard(True, final_dims)
-            except Exception:
-                pass
-            
-            adetailer_ran_successfully = self._run_adetailer_on_img2img(p, processed, all_img2img_results)
-            
-            if adetailer_ran_successfully:
-                print("[R Post] 🎯 SUCCESS: ADetailer processed img2img results")
-                # Update our results with the ADetailer-processed versions
-                all_img2img_results = processed.images.copy()
-                # Mark completion to avoid re-running within this generation
+            adetailer_ran_successfully = False
+            if use_adetailer:
+                # FINAL AGGRESSIVE FIX: Directly patch ADetailer to force it to use our results
+                self._patch_adetailer_directly(processed, all_img2img_results)
+                print("[R Post] Attempting manual ADetailer run on img2img results...")
+                # Ensure processing object is aligned to our img2img result for ADetailer
+                self._prepare_processing_for_manual_adetailer(p, processed, all_img2img_results)
                 try:
-                    setattr(p, '_ranbooru_manual_adetailer_complete', True)
+                    self._set_adetailer_block(False)
+                    setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
+                    setattr(p, '_ranbooru_skip_initial_adetailer', False)
+                    print("[R Post] Unblocked ADetailer guard for manual run")
                 except Exception:
                     pass
+                try:
+                    final_dims = all_img2img_results[0].size if all_img2img_results and hasattr(all_img2img_results[0], 'size') else None
+                    self._install_preview_guard()
+                    self._set_preview_guard(True, final_dims)
+                except Exception:
+                    pass
+                adetailer_ran_successfully = self._run_adetailer_on_img2img(p, processed, all_img2img_results)
+                if adetailer_ran_successfully:
+                    print("[R Post] SUCCESS: ADetailer processed img2img results")
+                    all_img2img_results = processed.images.copy()
+                    try:
+                        setattr(p, '_ranbooru_manual_adetailer_complete', True)
+                    except Exception:
+                        pass
+                else:
+                    print("[R Post] WARN: ADetailer manual run failed - img2img results will be unprocessed by ADetailer")
             else:
-                print("[R Post] ⚠️  ADetailer manual run failed - img2img results will be unprocessed by ADetailer")
-                # Still use img2img results, just without ADetailer processing
-            
+                adetailer_ran_successfully = False
+                print("[R Post] Manual ADetailer support disabled; skipping manual ADetailer execution")
+
             # Mark processing as complete for other extensions and UI
             setattr(self, '_ranbooru_processing_complete', True)
             if hasattr(self, '_ranbooru_intermediate_results'):
@@ -2027,6 +2279,8 @@ class Script(scripts.Script):
                 print("[R Post] Fallback failed")
                 
         finally:
+            if getattr(self, '_log_prompt_sources', False):
+                self._log_generation_reference(p)
             # Always cleanup regardless of success or failure
             self._cleanup_after_run(use_cache)
             
@@ -2287,6 +2541,10 @@ class Script(scripts.Script):
         except Exception as e:
             print(f"[R Post] Error installing ADetailer global guard: {e}")
     
+    def _is_adetailer_enabled(self):
+        return getattr(self, '_adetailer_support_enabled', False)
+
+
     def _set_adetailer_block(self, should_block: bool):
         """Toggle the global guard on patched ADetailer classes"""
         try:
@@ -2426,6 +2684,9 @@ class Script(scripts.Script):
     
     def _run_adetailer_on_img2img(self, p, processed, img2img_results):
         """Manually run ADetailer on our img2img results - EACH IMAGE in batch"""
+        if not self._is_adetailer_enabled():
+            print("[R Manual ADetailer] Support disabled - skipping manual run request")
+            return False
         try:
             # Remove generation-based limiting - ADetailer should process ALL images in batch
             print(f"[R Post] 🎯 Starting manual ADetailer execution on {len(img2img_results)} img2img results")
@@ -3636,6 +3897,8 @@ class Script(scripts.Script):
     
     def _prepare_adetailer_for_img2img(self, p):
         """Prepare ADetailer to run on img2img results"""
+        if not self._is_adetailer_enabled():
+            return
         try:
             print("[R] ✅ Preparing ADetailer to run on img2img results")
             
@@ -3822,8 +4085,9 @@ class Script(scripts.Script):
                 # Mark that we need to intercept results
                 setattr(self, '_intercept_results', True)
                 
-                # EARLY PROTECTION: Disable ADetailer during initial pass
-                self._early_adetailer_protection(p)
+                if self._is_adetailer_enabled():
+                    # EARLY PROTECTION: Disable ADetailer during initial pass
+                    self._early_adetailer_protection(p)
                 
                 # Set early block flag if we're about to process with img2img
                 if hasattr(self, '_ranbooru_manual_adetailer_complete'):
@@ -3835,6 +4099,8 @@ class Script(scripts.Script):
     
     def _early_adetailer_protection(self, p):
         """Complete ADetailer blocking during initial pass - remove scripts entirely"""
+        if not self._is_adetailer_enabled():
+            return
         try:
             print("[R Process] 🛡️  Early ADetailer protection activated")
             
@@ -4078,6 +4344,8 @@ class Script(scripts.Script):
 
     def _prepare_processing_for_manual_adetailer(self, p, processed, img2img_results):
         """Ensure p has correct images, sizes, prompts, and save paths before running ADetailer manually"""
+        if not self._is_adetailer_enabled():
+            return
         try:
             if not img2img_results:
                 return

@@ -1,6 +1,6 @@
 # RanbooruX Usage Guide
 
-> **Note**: This guide covers the `adetailer` branch -- a work-in-progress build that layers automatic ADetailer processing on top of RanbooruX's rebuilt Img2Img and ControlNet workflows. For project context, see the main [README.md](README.md).
+> **Note**: This guide covers the `adetailer` branch -- a work-in-progress build that can layer optional manual ADetailer processing on top of RanbooruX's rebuilt Img2Img and ControlNet workflows. Toggle the new RanbooruX "Enable ADetailer support" checkbox whenever you want the extra pass. For project context, see the main [README.md](README.md).
 
 ## Core Workflows
 
@@ -8,17 +8,18 @@
 This workflow fetches tags from a selected booru to generate a text prompt.
 
 **Steps:**
-1.  **Select Booru**: Choose a source from the `Booru` dropdown (e.g., `danbooru`).
-2.  **Add Search Tags**: In `Tags to Search (Pre)`, enter tags to filter posts, separated by commas.
-    -   *Example*: `1girl, solo, short_hair`
-    -   **Force Fresh Search**: Add `!refresh` to your tags to force fetch new images instead of reusing cached ones (e.g., `1girl, solo, short_hair,!refresh`)
-3.  **Configure Options (Optional)**:
-    -   Adjust `Max Pages` to control the size of the random post pool.
-    -   Use `Tags to Remove (Post)` to filter out unwanted tags from the final prompt.
-    -   Enable `Use the same prompt for all images` for batch consistency.
-4.  **Generate**: Click the main "Generate" button in the WebUI. RanbooruX will fetch a random post matching your tags, extract its tags, and use them as the prompt.
+
+1. **Select Booru**: Choose a source from the `Booru` dropdown (e.g., `danbooru`).
+2. **Add Search Tags**: In `Tags to Search (Pre)`, enter tags to filter posts, separated by commas.
+   - *Example*: `1girl, solo, short_hair`
+3. **Configure Options (Optional)**:
+   - Adjust `Max Pages` to control the size of the random post pool.
+   - Use `Tags to Remove (Post)` to filter out unwanted tags from the final prompt.
+   - Enable `Use the same prompt for all images` for batch consistency.
+4. **Generate**: Click the main "Generate" button in the WebUI. RanbooruX will fetch a random post matching your tags, extract its tags, and use them as the prompt.
 
 **Workflow Diagram:**
+
 ```mermaid
 graph TD
     A[Start] --> B{Select Booru & Tags};
@@ -30,33 +31,40 @@ graph TD
 ```
 
 ### 2. Img2Img + ControlNet + ADetailer Workflow
-This workflow pulls both the tags and source image from a booru post, feeds them into an Img2Img pass with ControlNet conditioning, and finally pushes the result through ADetailer.
+
+This workflow pulls both the tags and source image from a booru post, feeds them into an Img2Img pass with ControlNet conditioning, and (when the RanbooruX ADetailer toggle is enabled) pushes the result through ADetailer.
 
 **Before you start:**
--   Open the ADetailer tab in the WebUI and enable the detector(s) you want (e.g., `face_yolov8n.pt`). This branch invokes the same settings you configure there.
--   Optional but recommended: set "Inpaint only masked" and padding values suited to your subject. RanbooruX passes the entire processed image to ADetailer, so your usual presets apply.
+
+- Open the ADetailer tab in the WebUI and enable the detector(s) you want (e.g., `face_yolov8n.pt`). This branch invokes the same settings you configure there.
+- Optional but recommended: set "Inpaint only masked" and padding values suited to your subject. RanbooruX passes the entire processed image to ADetailer, so your usual presets apply.
 
 **Steps:**
-1.  **Select Booru and Tags**: As with the basic search, choose a booru and provide search tags. Use `!refresh` to force fetch new images (e.g., `1girl, solo, short_hair,!refresh`).
-2.  **Enable Img2Img**: Check the `Use img2img` box. RanbooruX will stage a lightweight txt2img warm-up pass and then launch the proper Img2Img job using the fetched source image.
-3.  **Enable ControlNet**: Check the `Send to ControlNet` box. RanbooruX will automatically push the fetched image into ControlNet Unit 0 using the fallback path when necessary.
-4.  **Tune RanbooruX Img2Img Settings**: Set `Denoising Strength`, `Steps`, and any RanbooruX overrides (same prompt/image/seed for batch) as desired.
-5.  **Verify ControlNet Unit**: In the main UI, ensure Unit 0 is enabled and the right model and weight are selected. RanbooruX will sync the source preview once generation starts.
-6.  **Generate**: Click "Generate". Watch the console for `[R Post]` lines confirming ADetailer activation and `[R Post] ... _adetailer_PROCESSED` save paths.
+
+1. **Select Booru and Tags**: As with the basic search, choose a booru and provide search tags.
+2. **Enable Img2Img**: Check the `Use img2img` box. RanbooruX will stage a lightweight txt2img warm-up pass and then launch the proper Img2Img job using the fetched source image.
+3. **Enable ControlNet**: Check the `Send to ControlNet` box. RanbooruX will automatically push the fetched image into ControlNet Unit 0 using the fallback path when necessary.
+4. **Enable RanbooruX ADetailer Support (Optional)**: Toggle `Enable RanbooruX ADetailer support` inside the RanbooruX panel when you want the extension to run the manual ADetailer pass. Leave it unchecked to keep the downstream pipeline untouched.
+5. **Tune RanbooruX Img2Img Settings**: Set `Denoising Strength`, `Steps`, and any RanbooruX overrides (same prompt/image/seed for batch) as desired.
+6. **Verify ControlNet Unit**: In the main UI, ensure Unit 0 is enabled and the right model and weight are selected. RanbooruX will sync the source preview once generation starts.
+7. **Generate**: Click "Generate". Watch the console for `[R Post]` lines confirming ADetailer activation and `[R Post] ... _adetailer_PROCESSED` save paths.
 
 #### Multi-Image Batch Tips
--   RanbooruX runs each image in the batch sequentially through Img2Img and then ADetailer. Expect longer render times compared with vanilla batches.
--   To reuse the same ControlNet conditioning for every frame, enable `Use same image for batch` and `Use same prompt for batch` inside the RanbooruX panel.
--   If you need each image to fetch a new post, leave those options disabled; RanbooruX will still route every result through ADetailer one by one.
--   Keep an eye on VRAM usage when combining large ControlNet models with high-resolution batches. Lower `Denoising Strength` or resolution if you encounter OOM errors.
+
+- When ADetailer support is enabled, RanbooruX runs each image in the batch sequentially through Img2Img and then ADetailer. Expect longer render times compared with vanilla batches.
+- To reuse the same ControlNet conditioning for every frame, enable `Use same image for batch` and `Use same prompt for batch` inside the RanbooruX panel.
+- If you need each image to fetch a new post, leave those options disabled; with the ADetailer toggle enabled RanbooruX will still route every result through ADetailer one by one.
+- Keep an eye on VRAM usage when combining large ControlNet models with high-resolution batches. Lower `Denoising Strength` or resolution if you encounter OOM errors.
 
 #### Result Files
--   Every run creates paired files in `outputs/img2img-images/<date>/`.
--   `*_adetailer_ORIGINAL-####.png` is the plain Img2Img output saved for reference (with matching `.txt` metadata).
--   `*_adetailer_PROCESSED-####.png` is the ADetailer-refined image that the UI also displays, again with matching metadata.
--   The log will note `FINAL FIX: Patching ADetailer directly` and `SUCCESS: ADetailer processed img2img results` when the pipeline finishes.
+
+- When ADetailer support is enabled, RanbooruX creates paired files in `outputs/img2img-images/<date>/`.
+- `*_adetailer_ORIGINAL-####.png` is the plain Img2Img output saved for reference (with matching `.txt` metadata).
+- `*_adetailer_PROCESSED-####.png` is the ADetailer-refined image that the UI also displays, again with matching metadata.
+- The log will note `FINAL FIX: Patching ADetailer directly` and `SUCCESS: ADetailer processed img2img results` when the pipeline finishes. If you leave the new toggle off, expect only the base Img2Img outputs.
 
 **Workflow Diagram:**
+
 ```mermaid
 graph TD
     A[Start] --> B{Select Booru & Tags};
@@ -69,55 +77,80 @@ graph TD
 ```
 
 ### 3. Using a Specific Post ID
+
 If you already know the post you want to use, you can target it directly.
 
 **Steps:**
-1.  **Select Booru**: Choose the correct booru for the post.
-2.  **Enter Post ID**: In the `Post ID` field, enter the numeric ID.
-    -   *Example*: For a post at `https://danbooru.donmai.us/posts/123456`, the ID is `123456`.
-3.  **Generate**: Click "Generate". The extension will fetch tags (and the image, if `img2img` is enabled) from that specific post.
+
+1. **Select Booru**: Choose the correct booru for the post.
+2. **Enter Post ID**: In the `Post ID` field, enter the numeric ID.
+   - *Example*: For a post at `https://danbooru.donmai.us/posts/123456`, the ID is `123456`.
+3. **Generate**: Click "Generate". The extension will fetch tags (and the image, if `img2img` is enabled) from that specific post.
 
 ### 4. Quick Checklist: Img2Img + ControlNet + ADetailer
+
 Use this whenever you tweak your workflow:
--   ADetailer tab enabled with the detectors you expect.
--   `Use img2img` and `Send to ControlNet` ticked in RanbooruX.
--   ControlNet Unit 0 enabled with your chosen model.
--   Console logs show `[R Post]` lines for the Img2Img pass followed by ADetailer saves.
--   Output folder contains matching `_ORIGINAL` and `_PROCESSED` files.
+
+- ADetailer tab enabled with the detectors you expect.
+- `Enable RanbooruX ADetailer support` checked inside the RanbooruX panel when you want the manual pass.
+- `Use img2img` and `Send to ControlNet` ticked in RanbooruX.
+- ControlNet Unit 0 enabled with your chosen model.
+- Console logs show `[R Post]` lines for the Img2Img pass followed by ADetailer saves.
+- Output folder contains matching `_ORIGINAL` and `_PROCESSED` files.
 
 ## Advanced Features and Workflows
 
 ### Advanced Prompt Manipulation
+
 RanbooruX offers several advanced modes to fine-tune and experiment with your prompts, giving you greater control over the final output.
 
--   **Mixing Prompts**: When enabled, this feature constructs a single prompt by combining tags from multiple random posts. The **Mix Amount** slider determines how many posts are used.
--   **Tag Shuffling (Chaos)**: This feature introduces controlled randomness by shuffling tags between your positive and negative prompts.
-    -   **Shuffle All**: Shuffles tags from both positive and negative prompts.
-    -   **Shuffle Negative**: Only shuffles tags in the negative prompt.
-    -   **Chaos Amount**: A percentage that controls the intensity of the shuffle.
--   **File-Based Tag Management**:
-    -   **Add line from Search File**: Appends a random line from a `.txt` file in `user/search` to your query.
-    -   **Add tags from Remove File**: Extends the "Tags to Remove" list with tags from a `.txt` file in `user/remove`.
--   **Tag Limiting**:
-    -   **Limit Tags by %**: Reduces the total number of tags by a percentage.
-    -   **Max tags**: Sets a hard limit on the total number of tags.
+- **Mixing Prompts**: When enabled, this feature constructs a single prompt by combining tags from multiple random posts. The **Mix Amount** slider determines how many posts are used.
+- **Tag Shuffling (Chaos)**: This feature introduces controlled randomness by shuffling tags between your positive and negative prompts.
+  - **Shuffle All**: Shuffles tags from both positive and negative prompts.
+  - **Shuffle Negative**: Only shuffles tags in the negative prompt.
+  - **Chaos Amount**: A percentage that controls the intensity of the shuffle.
+- **File-Based Tag Management**:
+  - **Add line from Search File**: Appends a random line from a `.txt` file in `user/search` to your query.
+  - **Add tags from Remove File**: Extends the "Tags to Remove" list with tags from a `.txt` file in `user/remove`.
+- **Tag Limiting**:
+  - **Limit Tags by %**: Reduces the total number of tags by a percentage.
+  - **Max tags**: Sets a hard limit on the total number of tags.
 
 ### Tag Filtering and Removal
+
 RanbooruX includes advanced tag filtering capabilities to help you customize your prompts by removing unwanted tags.
 
 #### Artist Tag Removal
+
 - **Remove Artist tags from prompt**: When enabled, this feature automatically identifies and removes artist tags from the generated prompt
 - **How it works**: The system extracts artist information from booru post metadata and removes matching tags from the final prompt
 - **Supported boorus**: Works with all supported boorus that provide artist metadata (Danbooru, Gelbooru, etc.)
 - **Matching**: Uses intelligent matching that handles both underscore and space formats (e.g., "artist_name" and "artist name")
 
+#### Clothing Tag Removal
+
+- **Remove clothing tags from prompt**: Filters apparel-related tags (uniforms, dresses, accessories, etc.) without stripping "no clothes" or similar states.
+- **How it works**: RanbooruX matches against an expanded clothing keyword list and removes those tags after artist/character filtering runs.
+
+#### Text & Commentary Removal
+
+- **Remove tag/text/commentary metadata from prompt**: Strips out tags like `text`, `speech bubble`, `commentary`, and watermarks that often clutter prompts.
+- **How it works**: Matches against a curated list of textual/meta tags (including `tagme`) and also removes patterns that include "text"/"commentary" substrings.
+
+#### Preserve Requested Subject Tags
+
+- **Keep only subject tags from base prompt**: When enabled, RanbooruX removes conflicting subject counts (e.g., `2girls`, `group`) unless they appear in your base prompt or initial additions.
+- **How it works**: The script captures subject tags (`1girl`, `solo`, `1boy`, etc.) from your original prompt and prevents extra tags from the booru metadata from slipping back in.
+
 #### Character Tag Removal
+
 - **Remove Character tags from prompt**: When enabled, this feature automatically identifies and removes character tags from the generated prompt
 - **How it works**: The system extracts character information from booru post metadata and removes matching tags from the final prompt
 - **Pattern recognition**: For boorus that don't provide categorized tags, the system uses pattern matching to identify character tags (e.g., tags containing parentheses like "character_(series)")
 - **Matching**: Uses normalized matching that handles case sensitivity and underscore/space variations
 
 **Example Usage:**
+
 1. Enable "Remove Artist tags from prompt" and "Remove Character tags from prompt"
 2. Search for posts with tags like "1girl, solo"
 3. The system will:
@@ -127,6 +160,7 @@ RanbooruX includes advanced tag filtering capabilities to help you customize you
    - Result: A cleaner prompt focused on style and general tags rather than specific artists or characters
 
 **Benefits:**
+
 - Create more generic prompts for training or style studies
 - Avoid over-fitting to specific artists or characters
 - Generate variations without being tied to particular creators
@@ -135,18 +169,33 @@ RanbooruX includes advanced tag filtering capabilities to help you customize you
 **Practical Examples:**
 
 *Before enabling tag removal:*
+
+```text
+Original post tags: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name, score:150
+Final prompt: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name
+```
+
+*After enabling "Remove Artist tags" and "Remove Character tags":*
+
+```text
+Original post tags: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name, score:150
+Final prompt: 1girl, solo, blue_eyes, blonde_hair
+```
+
 ```
 Original post tags: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name, score:150
 Final prompt: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name
 ```
 
 *After enabling "Remove Artist tags" and "Remove Character tags":*
+
 ```
 Original post tags: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name, score:150
 Final prompt: 1girl, solo, blue_eyes, blonde_hair
 ```
 
 *Use case - Style study:*
+
 - Search for "1girl, solo, blue_eyes" on Danbooru
 - Enable both artist and character tag removal
 - Generate multiple images to study different artistic interpretations of the same basic concept
@@ -239,7 +288,6 @@ character_patterns = [
 RanbooruX automatically caches fetched images and posts to improve performance and consistency when generating multiple images with the same settings.
 
 -   **Automatic Caching**: Images are automatically cached when first fetched and reused for subsequent generations with identical search parameters.
--   **Force Fresh Images**: Add `!refresh` to your search tags to force fetch new images instead of reusing cached ones.
 -   **Cache Behavior**: The cache is keyed by booru, tags, post ID, rating, and sorting order. Any change to these parameters will trigger a fresh fetch.
 -   **Cache Persistence**: Cached data persists between generations but is automatically cleared when the WebUI session ends.
 
@@ -248,14 +296,6 @@ The cache uses a composite key: `{booru}_{tags}_{post_id}_{mature_rating}_{sorti
 - Changing any search parameter invalidates the cache
 - Different sorting methods use different cached results
 - Post ID overrides always bypass cache
-
-#### Force Refresh Usage
-```
-Examples:
-'1girl, solo'                    → Uses cache if available
-'1girl, solo,!refresh'          → Forces fresh fetch, removes !refresh from actual query
-'1girl, solo, blonde_hair'      → New cache entry (different tags)
-```
 
 ### Advanced Sorting Options
 RanbooruX provides three sorting methods with different selection algorithms:
@@ -423,6 +463,10 @@ RanbooruX processes images through multiple stages:
 3. **Forge Users**: This is expected behavior - uses fallback method
 4. **Image Format**: Ensure images are RGB format
 
+#### Console Reports "Manual ADetailer support disabled"
+- **Symptoms**: Console logs show `[R Post] Manual ADetailer support disabled; skipping manual ADetailer execution` and no `_adetailer_` files are written.
+- **Fix**: Enable `Enable RanbooruX ADetailer support` in the Img2Img / ControlNet accordion and rerun the generation.
+
 #### ADetailer Metadata Present but Image Is Unchanged
 **Symptoms**: `_adetailer_PROCESSED` file looks identical to `_ORIGINAL`
 **Solutions**:
@@ -478,6 +522,12 @@ When reporting issues, include:
 3. **WebUI Version**: Forge/A1111 version and commit hash
 4. **Error Traces**: Complete Python traceback if available
 
+### Logging & Reference Tracking
+
+- Enable "Log image sources/prompts to txt" to append a record to `user/logs/prompt_sources.txt`.
+- Each generation entry includes the timestamp, booru, prompt(s), seed(s), and the originating post URL when available.
+- Leave it disabled if you prefer not to persist this metadata.
+
 ## Important Notes
 - **Logging**: RanbooruX logs canonical post URLs for all selected items (e.g., `https://danbooru.donmai.us/posts/<id>`) for easy reference.
 - **Comment Stripping**: The bundled `Comments` script automatically strips prompt comments (`#`, `//`, `/* */`) before generation. Note: While this script is bundled with RanbooruX, it may not be necessary for all users depending on their workflow and other extensions.
@@ -491,3 +541,6 @@ RanbooruX includes significant under-the-hood improvements for stability and per
 -   **Robust API Calls**: All communication with booru APIs is wrapped in error handling and caching logic to improve reliability and speed.
 
 For a more detailed technical breakdown, please see the **Technical Enhancements** section in the main [README.md](README.md).
+
+
+

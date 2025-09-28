@@ -1,22 +1,24 @@
 # RanbooruX
 
-![Alt text](pics/image.png. Stable ControlNet Integration for SD Forge
-RanbooruX features a stable, built-in integration with ControlNet that isolates it from breaking changes in the main ControlNet extension.
-
--   **Modified ControlNet Script**: A modified `controlnet.py` is included in the `scripts/` folder to ensure compatibility with RanbooruX's img2img integration.
--   **Structured API Interaction**: The integration uses a `ControlNetUnit` data class as a structured payload to reliably send the fetched image and settings to a ControlNet unit.u.png)
+![Logo](pics/ranbooru.png)
 
 > **Important:** This is the `adetailer` branch -- a work-in-progress build focused on adding native ADetailer support to RanbooruX. Expect rapid iteration while we converge on a mainline-ready release.
 
-RanbooruX is an extension for the [automatic111 Stable Diffusion UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui) and Forge. It adds a panel that fetches tags (and optionally source images) from multiple boorus to quickly generate varied prompts and test models.
+> **ADetailer Bug Notice:** There is currently a bug where ADetailer stops processing images after an unknown number of generations. The solution is to reload the WebUI. A fix is a work in progress.
+
+RanbooruX is an extension for the [automatic111 Stable Diffusion UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui) and [Forge](https://github.com/lllyasviel/stable-diffusion-webui-forge). It adds a panel that fetches tags (and optionally source images) from multiple boorus to quickly generate varied prompts and test models. This extension is only tested on Forge.
 
 ## About This Fork
+
 The primary purpose of this fork is to resolve core **img2img** and **ControlNet** integration issues present in the original Ranbooru repository. **RanbooruX** enables their seamless combination while incorporating extensive refactoring and custom Forge UI scripts to supplant the original ones, addressing critical bugs and performance errors.
+![Image of the RanbooruX interface](pics/image.png)
 
 ### Technical Enhancements
+
 RanbooruX is not just a bugfix; it's a complete architectural overhaul designed for stability, maintainability, and modern development practices.
 
 #### 1. Core Script Refactoring
+
 The original procedural `ranbooru.py` script was fully refactored into an Object-Oriented architecture.
 -   **API Abstraction**: A base `Booru` class now manages common API request logic, error handling, and caching. Each specific booru (e.g., `Gelbooru`, `Danbooru`) inherits from this class, drastically reducing code duplication and making it easier to add new boorus.
 -   **Robust Error Handling**: Network timeouts, HTTP errors, and invalid API responses are now gracefully handled with `try...except` blocks and a custom `BooruError` exception, preventing silent failures.
@@ -38,11 +40,13 @@ The original procedural `ranbooru.py` script was fully refactored into an Object
     ```
 
 #### 2. Stable ControlNet Integration for SD Forge
+
 RanbooruX features a stable, built-in integration with ControlNet that isolates it from breaking changes in the main ControlNet extension.
 -   **Modified ControlNet Script**: A modified `controlnet.py` is included in the `scripts/` folder to ensure compatibility with RanbooruX's img2img integration.
 -   **Structured API Interaction**: The integration uses a `ControlNetUnit` data class as a structured payload to reliably send the fetched image and settings to a ControlNet unit.
 
 #### 3. Modernized Installation and Dependency Management
+
 The installation process was updated to follow modern Python best practices.
 -   **From Hardcoded to `requirements.txt`**: The original `install.py` performed a single, hardcoded dependency check. The new version reads dependencies from `requirements.txt`, allowing for version pinning and easier management of multiple packages.
 
@@ -106,7 +110,7 @@ Here's an explanation of all the parameters:
 
 - **Max Pages**: Maximum pages considered when selecting random posts.
 - **Post ID**: Here you can specify the ID of the post to get the tags from. If you leave it blank, the extension will get a random post (or more than one) from the random page.
-- **Tags to Search (Pre)**: This add the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) to the search query. This is useful if you want to get tags from a specific category, like "1girl" or "solo". Add `!refresh` to force fetch new images instead of reusing cached ones (e.g., `1girl,solo,short_hair,!refresh`).
+- **Tags to Search (Pre)**: This add the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) to the search query. This is useful if you want to get tags from a specific category, like "1girl" or "solo".
 - **Tags to Remove (Post)**: This remove the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) from the result query. This is useful if you want to remove tags that are too generic, like "1girl" or "solo". You can also use * with any tag to remove every tags which contains the related word. e.g: *hair will remove every tag that contains the word "hair".
 - **Mature Rating**: This sets the mature rating of the booru. This is useful if you want to get only SFW or NSFW tags. It only works on supported boorus (right now it has been tested only on Gelbooru).
 - **Remove Bad Tags**: This remove tags that you usually don't need (watermarks,text,censor)
@@ -147,7 +151,7 @@ RanbooruX includes several advanced features for more granular control over prom
 -   **Advanced Prompt Manipulation**: Fine-tune prompts with features like mixing tags from multiple posts, introducing controlled chaos by shuffling tags between positive and negative prompts, and using file-based tag collections for easy reuse.
 -   **LoRAnado**: Automatically select and apply LoRAs from a specified subfolder with customizable weights, making it easy to experiment with different model combinations.
 -   **Enhanced Batch Processing**: Ensure consistency across batches with options to use the same prompt, source image, and seed for all generated images.
--   **Image Caching and Refresh**: RanbooruX automatically caches fetched images and posts to improve performance. Add `!refresh` to your search tags to force fetch new images instead of reusing cached ones. The cache is automatically invalidated when search parameters change.
+-   **Image Caching and Refresh**: RanbooruX automatically caches fetched images and posts to improve performance. The cache is automatically invalidated when search parameters change.
 -   **Photopea Integration**: The included ControlNet script includes a direct integration with Photopea, allowing for in-browser editing of ControlNet input images without leaving the Stable Diffusion UI.
 
 For more details on these features, see the [usage.md](usage.md) file.
