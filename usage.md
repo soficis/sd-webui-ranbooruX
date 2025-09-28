@@ -1,6 +1,6 @@
 # RanbooruX Usage Guide
 
-> **Note**: This repository is a heavily refactored fork of the original Ranbooru. Key `img2img` and `ControlNet` functionalities that are broken in the original have been fixed here. For a full overview of the project's purpose, see the main [README.md](README.md).
+> **Note**: This guide covers the `adetailer` branch -- a work-in-progress build that layers automatic ADetailer processing on top of RanbooruX's rebuilt Img2Img and ControlNet workflows. For project context, see the main [README.md](README.md).
 
 ## Core Workflows
 
@@ -29,27 +29,42 @@ graph TD
     F --> G[End];
 ```
 
-### 2. Img2Img + ControlNet Workflow
-This workflow uses both the tags and the source image from a booru post, feeding them into an `img2img` pass while conditioning the generation with ControlNet.
+### 2. Img2Img + ControlNet + ADetailer Workflow
+This workflow pulls both the tags and source image from a booru post, feeds them into an Img2Img pass with ControlNet conditioning, and finally pushes the result through ADetailer.
+
+**Before you start:**
+-   Open the ADetailer tab in the WebUI and enable the detector(s) you want (e.g., `face_yolov8n.pt`). This branch invokes the same settings you configure there.
+-   Optional but recommended: set "Inpaint only masked" and padding values suited to your subject. RanbooruX passes the entire processed image to ADetailer, so your usual presets apply.
 
 **Steps:**
 1.  **Select Booru and Tags**: As with the basic search, choose a booru and provide search tags. Use `!refresh` to force fetch new images (e.g., `1girl, solo, short_hair,!refresh`).
-2.  **Enable `img2img`**: Check the `Use img2img` box.
-3.  **Enable ControlNet**: Check the `Send to ControlNet` box.
-4.  **Configure Parameters**:
-    -   Set the `Denoising Strength` for the `img2img` pass (e.g., `0.75`).
-    -   Ensure your ControlNet unit is enabled in the main WebUI `ControlNet` panel. RanbooruX will automatically send the source image to **Unit 0**.
-5.  **Generate**: Click "Generate".
+2.  **Enable Img2Img**: Check the `Use img2img` box. RanbooruX will stage a lightweight txt2img warm-up pass and then launch the proper Img2Img job using the fetched source image.
+3.  **Enable ControlNet**: Check the `Send to ControlNet` box. RanbooruX will automatically push the fetched image into ControlNet Unit 0 using the fallback path when necessary.
+4.  **Tune RanbooruX Img2Img Settings**: Set `Denoising Strength`, `Steps`, and any RanbooruX overrides (same prompt/image/seed for batch) as desired.
+5.  **Verify ControlNet Unit**: In the main UI, ensure Unit 0 is enabled and the right model and weight are selected. RanbooruX will sync the source preview once generation starts.
+6.  **Generate**: Click "Generate". Watch the console for `[R Post]` lines confirming ADetailer activation and `[R Post] ... _adetailer_PROCESSED` save paths.
+
+#### Multi-Image Batch Tips
+-   RanbooruX runs each image in the batch sequentially through Img2Img and then ADetailer. Expect longer render times compared with vanilla batches.
+-   To reuse the same ControlNet conditioning for every frame, enable `Use same image for batch` and `Use same prompt for batch` inside the RanbooruX panel.
+-   If you need each image to fetch a new post, leave those options disabled; RanbooruX will still route every result through ADetailer one by one.
+-   Keep an eye on VRAM usage when combining large ControlNet models with high-resolution batches. Lower `Denoising Strength` or resolution if you encounter OOM errors.
+
+#### Result Files
+-   Every run creates paired files in `outputs/img2img-images/<date>/`.
+-   `*_adetailer_ORIGINAL-####.png` is the plain Img2Img output saved for reference (with matching `.txt` metadata).
+-   `*_adetailer_PROCESSED-####.png` is the ADetailer-refined image that the UI also displays, again with matching metadata.
+-   The log will note `FINAL FIX: Patching ADetailer directly` and `SUCCESS: ADetailer processed img2img results` when the pipeline finishes.
 
 **Workflow Diagram:**
 ```mermaid
 graph TD
     A[Start] --> B{Select Booru & Tags};
-    B --> C{Enable img2img & ControlNet};
-    C --> D{Fetch Post + Image};
-    D --> E{Extract Tags for Prompt};
-    E --> F{Send Image to ControlNet Unit 0};
-    F --> G{Run Img2Img Pass};
+    B --> C[Enable Img2Img + ControlNet];
+    C --> D[Fetch Post + Image];
+    D --> E[Run Img2Img Pass];
+    E --> F[Invoke ADetailer];
+    F --> G[Save ORIGINAL + PROCESSED];
     G --> H[End];
 ```
 
@@ -61,6 +76,14 @@ If you already know the post you want to use, you can target it directly.
 2.  **Enter Post ID**: In the `Post ID` field, enter the numeric ID.
     -   *Example*: For a post at `https://danbooru.donmai.us/posts/123456`, the ID is `123456`.
 3.  **Generate**: Click "Generate". The extension will fetch tags (and the image, if `img2img` is enabled) from that specific post.
+
+### 4. Quick Checklist: Img2Img + ControlNet + ADetailer
+Use this whenever you tweak your workflow:
+-   ADetailer tab enabled with the detectors you expect.
+-   `Use img2img` and `Send to ControlNet` ticked in RanbooruX.
+-   ControlNet Unit 0 enabled with your chosen model.
+-   Console logs show `[R Post]` lines for the Img2Img pass followed by ADetailer saves.
+-   Output folder contains matching `_ORIGINAL` and `_PROCESSED` files.
 
 ## Advanced Features and Workflows
 
@@ -399,6 +422,21 @@ RanbooruX processes images through multiple stages:
 2. **Unit 0**: Ensure ControlNet Unit 0 is enabled in UI
 3. **Forge Users**: This is expected behavior - uses fallback method
 4. **Image Format**: Ensure images are RGB format
+
+#### ADetailer Metadata Present but Image Is Unchanged
+**Symptoms**: `_adetailer_PROCESSED` file looks identical to `_ORIGINAL`
+**Solutions**:
+1. Confirm your detectors are enabled in the ADetailer tab and that confidence thresholds are not set too high.
+2. Lower the ADetailer confidence slider or increase mask dilation to capture the target region.
+3. Try a higher denoising strength (0.6-0.8) for Img2Img so ADetailer has more room to inpaint.
+4. Check the console for "Skipping RanbooruX postprocess" lines -- this is normal -- followed by `SUCCESS: ADetailer processed img2img results`.
+
+#### Multiple Images Saved but Only First Is Refined
+**Symptoms**: Later batch items stay unprocessed.
+**Solutions**:
+1. Ensure `Batch count` is set in the main UI, not `Batch size`. RanbooruX processes each image consecutively.
+2. Leave the WebUI idle until the console prints `Img2Img finished.`; cancelling early interrupts ADetailer.
+3. Verify there is enough disk space in `outputs/img2img-images` for additional processed files.
 
 #### Memory Issues / Out of Memory
 **Symptoms**: Generation fails with CUDA out of memory errors

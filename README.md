@@ -1,6 +1,12 @@
 # RanbooruX
 
-![Alt text](pics/ranbooru.png)
+![Alt text](pics/image.png. Stable ControlNet Integration for SD Forge
+RanbooruX features a stable, built-in integration with ControlNet that isolates it from breaking changes in the main ControlNet extension.
+
+-   **Modified ControlNet Script**: A modified `controlnet.py` is included in the `scripts/` folder to ensure compatibility with RanbooruX's img2img integration.
+-   **Structured API Interaction**: The integration uses a `ControlNetUnit` data class as a structured payload to reliably send the fetched image and settings to a ControlNet unit.u.png)
+
+> **Important:** This is the `adetailer` branch -- a work-in-progress build focused on adding native ADetailer support to RanbooruX. Expect rapid iteration while we converge on a mainline-ready release.
 
 RanbooruX is an extension for the [automatic111 Stable Diffusion UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui) and Forge. It adds a panel that fetches tags (and optionally source images) from multiple boorus to quickly generate varied prompts and test models.
 
@@ -33,12 +39,12 @@ The original procedural `ranbooru.py` script was fully refactored into an Object
 
 #### 2. Stable ControlNet Integration for SD Forge
 RanbooruX features a stable, built-in integration with ControlNet that isolates it from breaking changes in the main ControlNet extension.
--   **Bundled ControlNet Module**: A self-contained copy of the necessary ControlNet API files is included in the `sd_forge_controlnet` directory. This ensures that RanbooruX's core functionality remains stable even if the user's main ControlNet extension is updated or changed.
--   **Structured API Interaction**: The integration uses a `ControlNetUnit` data class (`lib_controlnet/external_code.py`) as a structured payload to reliably send the fetched image and settings to a ControlNet unit.
+-   **Modified ControlNet Script**: A modified `controlnet.py` is included in the `scripts/` folder to ensure compatibility with RanbooruX's img2img integration.
+-   **Structured API Interaction**: The integration uses a `ControlNetUnit` data class as a structured payload to reliably send the fetched image and settings to a ControlNet unit.
 
 #### 3. Modernized Installation and Dependency Management
 The installation process was updated to follow modern Python best practices.
--   **From Hardcoded to `requirements.txt`**: The original `install.py` performed a single, hardcoded dependency check. The new version reads dependencies from `requirements.txt`, allowing for version pinning and easier management of multiple packages for both the main extension and the bundled ControlNet module.
+-   **From Hardcoded to `requirements.txt`**: The original `install.py` performed a single, hardcoded dependency check. The new version reads dependencies from `requirements.txt`, allowing for version pinning and easier management of multiple packages.
 
 *   **Modernized `install.py` in RanbooruX:**
     ```python
@@ -51,10 +57,18 @@ The installation process was updated to follow modern Python best practices.
                 launch.run_pip(f"install -r \"{path}\"", desc)
             # ...
     _install_req(os.path.join(ext_root, "requirements.txt"), "RanbooruX requirements")
-    _install_req(os.path.join(ext_root, "sd_forge_controlnet", "requirements.txt"), "...")
     ```
 
 For a full list of user-facing changes, see the [CHANGELOG.md](CHANGELOG.md).
+
+## ADetailer Integration (WIP Branch)
+-   **What ships here**: Automated post-processing that reruns ADetailer on every RanbooruX Img2Img result, including ControlNet-assisted generations.
+-   **When it runs**: RanbooruX performs a lightweight txt2img warm-up pass, then launches a dedicated Img2Img job and finally invokes ADetailer on the finished result so the UI receives the refined image.
+-   **Batch handling**: Multi-image batches are processed sequentially to keep GPU memory usage predictable. Each item is routed through ADetailer before the next one starts, so larger batches take longer but every frame is refined.
+-   **Output layout**: Processed files land in `outputs/img2img-images/<date>/` alongside the untouched source captured as `_adetailer_ORIGINAL-xxxx.png`. The ADetailer-enhanced render is saved as `_adetailer_PROCESSED-xxxx.png`, and matching `.txt` metadata files are written next to both images.
+-   **Fallback behavior**: If you disable ADetailer in the WebUI or the detector finds no regions to refine, RanbooruX simply returns the plain Img2Img output.
+-   **Important Note**: ADetailer runs manually with every RanbooruX generation regardless of whether it is toggled on or off in the Forge WebUI.
+
 ## Installation
 - Clone or copy this repo into your Stable Diffusion WebUI extensions directory (Forge or A1111 compatible).
 - Dependencies are installed automatically by `install.py` (or run `pip install -r requirements.txt`).
@@ -134,7 +148,7 @@ RanbooruX includes several advanced features for more granular control over prom
 -   **LoRAnado**: Automatically select and apply LoRAs from a specified subfolder with customizable weights, making it easy to experiment with different model combinations.
 -   **Enhanced Batch Processing**: Ensure consistency across batches with options to use the same prompt, source image, and seed for all generated images.
 -   **Image Caching and Refresh**: RanbooruX automatically caches fetched images and posts to improve performance. Add `!refresh` to your search tags to force fetch new images instead of reusing cached ones. The cache is automatically invalidated when search parameters change.
--   **Photopea Integration**: The bundled ControlNet module includes a direct integration with Photopea, allowing for in-browser editing of ControlNet input images without leaving the Stable Diffusion UI.
+-   **Photopea Integration**: The included ControlNet script includes a direct integration with Photopea, allowing for in-browser editing of ControlNet input images without leaving the Stable Diffusion UI.
 
 For more details on these features, see the [usage.md](usage.md) file.
 ## How to Use
@@ -143,7 +157,7 @@ For step-by-step examples and detailed guides, please refer to [usage.md](usage.
 - `Comments` (now bundled): removes `#`, `//`, and `/* */` comments from prompts and negative prompts before other scripts run. It is shipped inside this extension (`scripts/comments.py`) so Forge/A1111 will load it automatically with RanbooruX enabled. Note: While bundled with RanbooruX, this script may not be necessary for all users depending on their workflow and other extensions.
 
 ### Bundled ControlNet and paths
-- `sd_forge_controlnet/` is bundled for compatibility. RanbooruX will try to use Forge’s built‑in ControlNet first, then this bundled copy if needed. During install, its requirements are auto‑installed.
+- A modified `controlnet.py` is included in the `scripts/` folder for compatibility. RanbooruX will try to use Forge’s built‑in ControlNet first, then fall back to script-based integration if needed.
 - You can explicitly point to a ControlNet install by setting one of these env vars before launch:
   - `SD_FORGE_CONTROLNET_PATH` or `RANBOORUX_CN_PATH` → folder containing `lib_controlnet/external_code.py` (for example your Forge built‑in `extensions-builtin/sd_forge_controlnet`).
 
@@ -153,7 +167,7 @@ If your Forge build does not pass the Img2Img source image to ControlNet Unit 0 
 1. Make a backup of your original file:
    - `webui\extensions-builtin\sd_forge_controlnet\scripts\controlnet.py`
 2. Copy the bundled file over it:
-   - From `extensions\sd-webui-ranbooruX\sd_forge_controlnet\scripts\controlnet.py`
+   - From `extensions\sd-webui-ranbooruX\scripts\controlnet.py`
    - To `webui\extensions-builtin\sd_forge_controlnet\scripts\controlnet.py`
 3. Restart the WebUI.
 
@@ -169,7 +183,6 @@ Note: Overwriting is optional and only needed if your current Forge ControlNet d
 ## Known Issues
 - The chaos mode and negative mode can return an error when using a batch size greater than 1 combined with a batch count greater than 1. Rerunning the batch usually fixes the issue.
 - "sd-dynamic-prompts" creates problems with the multiple prompts option. Disabling the extension is the only solution for now.
-- Right now to run the img2img the extension creates an img with 1 step before creating the actual image. I don't know how to fix this, if someone want to help me with this I'd be grateful.
-- Send to controlnet needs an dummy image to work.
+- ADetailer adds a short post-processing stage per image; large batches will run sequentially and take longer than vanilla RanbooruX.
 ---
 ## Original Repo by Inzaniak

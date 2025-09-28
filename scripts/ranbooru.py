@@ -1221,6 +1221,10 @@ class Script(scripts.Script):
         # Clean up stored original values
         if hasattr(self, 'original_full_prompt'):
             delattr(self, 'original_full_prompt')
+        if hasattr(self, '_adetailer_script_args_snapshot'):
+            delattr(self, '_adetailer_script_args_snapshot')
+        if hasattr(self, '_current_processing_object'):
+            delattr(self, '_current_processing_object')
         if hasattr(self, 'original_cfg'):
             delattr(self, 'original_cfg')
         if hasattr(self, 'original_denoising'):
@@ -1383,6 +1387,12 @@ class Script(scripts.Script):
             setattr(self.__class__, '_ranbooru_global_processing', True)
             setattr(p, '_ranbooru_already_processing', True)
             print(f"[R Before] 🎯 Started RanbooruX processing for request {id(p)}")
+            self._current_processing_object = p
+            script_args_source = getattr(p, 'script_args', None)
+            if isinstance(script_args_source, (list, tuple)):
+                self._adetailer_script_args_snapshot = list(script_args_source)
+            else:
+                self._adetailer_script_args_snapshot = None
             
             # Store the processing key for cleanup
             self._current_processing_key = processing_key
@@ -1536,8 +1546,8 @@ class Script(scripts.Script):
             self.cache_installed_by_us = self._setup_cache(use_cache)
             
             # Always calculate num_images_needed - needed for both new and cached images
-            num_images_needed = p.batch_size * p.n_iter
-            
+            original_batch = getattr(self, 'original_batch_size', p.batch_size)
+            num_images_needed = original_batch * p.n_iter
             if should_fetch_new:
                 search_tags, bad_tags, initial_additions = self._prepare_tags(tags, remove_tags_ui, use_remove_txt, choose_remove_txt, change_background, change_color, use_search_txt, choose_search_txt, remove_bad_tags_ui)
                 api = self._get_booru_api(booru, fringe_benefits)
@@ -2309,6 +2319,111 @@ class Script(scripts.Script):
         except Exception as e:
             print(f"[R Before] Error resetting ScriptRunner guards: {e}")
     
+
+    def _extract_adetailer_script_args(self, script, processing_obj):
+        """Return sanitized ADetailer arguments derived from the processing object."""
+        def _normalize(args):
+            if args is None:
+                return []
+            if isinstance(args, tuple):
+                return list(args)
+            if isinstance(args, list):
+                return list(args)
+            return [args]
+    
+        def _contains_ad_dict(seq):
+            for item in seq:
+                if isinstance(item, dict) and any(str(key).startswith('ad_') for key in item.keys()):
+                    return True
+            return False
+    
+        def _extract_ad_dicts(seq):
+            return [item for item in seq if isinstance(item, dict) and any(str(key).startswith('ad_') for key in item.keys())]
+    
+        all_args = _normalize(getattr(processing_obj, 'script_args', None))
+        snapshot = getattr(self, '_adetailer_script_args_snapshot', None)
+    
+        used_snapshot = False
+        if not _contains_ad_dict(all_args) and isinstance(snapshot, (list, tuple)):
+            snapshot_norm = _normalize(snapshot)
+            if _contains_ad_dict(snapshot_norm):
+                all_args = snapshot_norm
+                used_snapshot = True
+    
+        start_idx = getattr(script, 'args_from', None)
+        end_idx = getattr(script, 'args_to', None)
+        if isinstance(start_idx, int) and start_idx < 0:
+            start_idx = 0
+        if isinstance(end_idx, int) and end_idx < 0:
+            end_idx = 0
+    
+        if isinstance(start_idx, int) and start_idx < len(all_args):
+            slice_start = max(start_idx, 0)
+            slice_end = max(end_idx, slice_start) if isinstance(end_idx, int) else len(all_args)
+            slice_end = min(slice_end, len(all_args))
+        else:
+            slice_start = 0
+            slice_end = len(all_args)
+    
+        subset = all_args[slice_start:slice_end]
+    
+        bool_candidates = [item for item in subset if isinstance(item, bool)]
+        enable_flag = bool_candidates[0] if bool_candidates else None
+        skip_flag = bool_candidates[1] if len(bool_candidates) > 1 else None
+    
+        dicts = _extract_ad_dicts(subset)
+        fallback_reason = None
+    
+        if not dicts and not used_snapshot and isinstance(snapshot, (list, tuple)):
+            snapshot_norm = _normalize(snapshot)
+            snap_subset = snapshot_norm[slice_start:slice_end]
+            dicts = _extract_ad_dicts(snap_subset) or _extract_ad_dicts(snapshot_norm)
+            if dicts:
+                fallback_reason = 'snapshot'
+                used_snapshot = True
+    
+        if not dicts and _contains_ad_dict(all_args):
+            dicts = _extract_ad_dicts(all_args)
+            if dicts and fallback_reason is None:
+                fallback_reason = 'all_args'
+    
+        meta = {
+            'slice_start': slice_start,
+            'slice_end': slice_end,
+            'total_args': len(all_args),
+            'dict_count': len(dicts),
+            'fallback_reason': fallback_reason,
+            'used_snapshot': used_snapshot,
+        }
+    
+        if not dicts:
+            return {'args': [], 'meta': meta}
+    
+        if enable_flag is None:
+            enable_flag = True
+        if skip_flag is None:
+            skip_flag = False
+    
+        enable_flag = True if enable_flag is None else bool(enable_flag)
+        # Manual runs should not honour skip flags from the UI; force processing
+        skip_flag = False
+
+        enable_flag = True if enable_flag is None else bool(enable_flag)
+        # Manual img2img runs should never skip ADetailer tabs via the bool flag
+        skip_flag = False
+
+        # Ensure each tab only runs when it has a valid model
+        for idx_dict, ad_dict in enumerate(dicts):
+            model_name = str(ad_dict.get('ad_model', '') or '').strip().lower()
+            has_model = model_name not in ('', 'none')
+            if idx_dict == 0 and has_model:
+                ad_dict['ad_tab_enable'] = True
+            else:
+                ad_dict['ad_tab_enable'] = bool(ad_dict.get('ad_tab_enable', False) and has_model)
+
+        sanitized = [enable_flag, skip_flag] + dicts
+        return {'args': sanitized, 'meta': meta}
+    
     def _run_adetailer_on_img2img(self, p, processed, img2img_results):
         """Manually run ADetailer on our img2img results - EACH IMAGE in batch"""
         try:
@@ -2532,17 +2647,23 @@ class Script(scripts.Script):
                                 print(f"[R Post] ⚠️ PIL conversion failed: {conversion_error}")
                             
                             # Get script arguments
-                            script_args = []
-                            if hasattr(p, 'script_args'):
-                                script_args = p.script_args
-                            elif hasattr(script, 'args_from') and hasattr(script, 'args_to'):
-                                start = script.args_from or 0
-                                end = script.args_to or 0
-                                if hasattr(p.scripts, 'alwayson_scripts_txt2img') and p.scripts.alwayson_scripts_txt2img:
-                                    total_args = len(getattr(p.scripts.alwayson_scripts_txt2img, 'args', []))
-                                    script_args = [None] * min(end - start, total_args - start)
-                            
-                            print(f"[R Post] DEBUG - Image {img_idx + 1}: Using {len(script_args)} script args")
+                            extracted_args = self._extract_adetailer_script_args(script, p)
+                            script_args = extracted_args['args']
+                            meta = extracted_args['meta']
+                            if not script_args:
+                                reason = meta.get('fallback_reason')
+                                reason_text = f' (fallback={reason})' if reason else ''
+                                print(f"[R Post] ⚠️ Image {img_idx + 1}: No ADetailer config found in script args; skipping manual run{reason_text}")
+                                continue
+                            args_preview = []
+                            for arg_index, arg_value in enumerate(script_args[:6]):
+                                if isinstance(arg_value, dict):
+                                    keys = {k: arg_value.get(k) for k in ('ad_model', 'ad_tab_enable', 'ad_prompt', 'ad_negative_prompt')}
+                                    args_preview.append((arg_index, 'dict', keys))
+                                else:
+                                    args_preview.append((arg_index, type(arg_value).__name__, arg_value))
+                            print(f"[R Post] DEBUG - Image {img_idx + 1}: Using {len(script_args)} script args (slice={meta.get('slice_start')}->{meta.get('slice_end')}); preview={args_preview}")
+
                             
                             # Store the original image before ADetailer processing
                             original_image = single_temp_processed.images[0] if single_temp_processed.images else single_img
@@ -2563,6 +2684,15 @@ class Script(scripts.Script):
                                     print(f"[R Post] 🚀 Image {img_idx + 1}: Calling postprocess_image")
                                     result = script.postprocess_image(p, single_temp_processed, *script_args)
                                     print(f"[R Post] 📋 Image {img_idx + 1}: postprocess_image returned: {result}")
+
+                                    processed_attr = getattr(single_temp_processed, 'image', None)
+                                    if processed_attr is not None:
+                                        if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
+                                            single_temp_processed.images[0] = processed_attr
+                                        else:
+                                            single_temp_processed.images = [processed_attr]
+                                        print(f"[R Post] DEBUG - Image {img_idx + 1}: Synced processed image from temp_processed.image ({getattr(processed_attr, 'size', 'unknown')})")
+
                                     
                                     # COMPREHENSIVE DEBUG: Check ALL possible result locations
                                     print(f"[R Post] 🔍 POST-ADETAILER STATE:")
@@ -2643,18 +2773,19 @@ class Script(scripts.Script):
                                                         print(f"[R Post] ✅ Image {img_idx + 1}: ADetailer metadata indicates processing occurred")
                                                         image_changed = True
                                                     else:
-                                                        print(f"[R Post] 📊 Image {img_idx + 1}: No clear changes detected but face processing may have occurred")
-                                                        image_changed = True  # Still consider successful since ADetailer ran without errors
+                                                        print(f"[R Post] 📊 Image {img_idx + 1}: No clear changes detected")
+
                                             except Exception as compare_e:
                                                 print(f"[R Post] 📊 Image {img_idx + 1}: Could not compare image data: {compare_e}")
-                                                image_changed = True  # Assume successful if we can't compare
+                                                image_changed = False
                                         
                                         if image_changed:
                                             adetailer_success = True
                                             print(f"[R Post] ✅ Image {img_idx + 1}: ADetailer processing detected as successful")
+                                            if isinstance(getattr(p, 'extra_generation_params', None), dict):
+                                                single_temp_processed.extra_generation_params = dict(p.extra_generation_params)
                                         else:
-                                            print(f"[R Post] ⚠️ Image {img_idx + 1}: No changes detected but marking as successful")
-                                            adetailer_success = True  # Still successful since ADetailer ran without errors
+                                            print(f"[R Post] ⚠️ Image {img_idx + 1}: No changes detected; keeping original image")
                                     else:
                                         print(f"[R Post] ⚠️ Image {img_idx + 1}: No images in temp_processed after ADetailer")
                                 except Exception as e:
@@ -2732,13 +2863,21 @@ class Script(scripts.Script):
                                     base_filename = f"{getattr(p, 'seed', 'unknown')}_{img_idx+1}_adetailer"
                                     
                                     # Save both original and processed for comparison
+                                    info_text = None
+                                    if hasattr(processed, 'infotexts') and processed.infotexts:
+                                        try:
+                                            info_text = processed.infotexts[img_idx]
+                                        except Exception:
+                                            info_text = processed.infotexts[0]
+                                    if info_text is None:
+                                        info_text = getattr(single_temp_processed, 'info', '')
                                     if original_images_backup:
                                         orig_filepath = images_module.save_image(
                                             original_images_backup[0], 
                                             save_dir, 
                                             f"{base_filename}_ORIGINAL",
                                             extension='png',
-                                            info=getattr(single_temp_processed, 'info', ''),
+                                            info=info_text,
                                             p=p
                                         )
                                         print(f"[R Post] 💾 SAVED original for comparison: {orig_filepath}")
@@ -2748,7 +2887,7 @@ class Script(scripts.Script):
                                         save_dir, 
                                         f"{base_filename}_PROCESSED",
                                         extension='png',
-                                        info=getattr(single_temp_processed, 'info', ''),
+                                        info=info_text,
                                         p=p
                                     )
                                     print(f"[R Post] 💾 SAVED ADetailer result: {filepath}")

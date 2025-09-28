@@ -4,6 +4,20 @@ This document outlines the principal changes in **RanbooruX**, a feature-rich, s
 
 ---
 
+## adetailer-branch (WIP)
+
+### Added
+- Automatic ADetailer post-processing after every RanbooruX Img2Img run, including ControlNet-assisted generations.
+- Sequential batch pipeline that routes each image through ADetailer while preserving the original Img2Img result for comparison.
+
+### Changed
+- Updated README and Usage Guide with branch-specific instructions, output locations, and multi-image guidance.
+- Highlighted the adetailer branch status and workflow expectations for new testers.
+
+### Fixed
+- Prevented initial txt2img warm-up frames from overwriting Img2Img outputs during ADetailer runs.
+- Resolved cases where multi-image batches skipped ADetailer, ensuring every saved frame includes processed metadata.
+
 ## v1.1.0 - Stability and Performance Improvements
 
 This release focuses on critical stability fixes, performance optimizations, and new user-friendly features to enhance the overall RanbooruX experience.
@@ -38,7 +52,7 @@ This release focuses on critical stability fixes, performance optimizations, and
 This inaugural release marks the official fork of Ranbooru, introducing a comprehensive architectural overhaul, new features, and critical bug fixes for a more stable and powerful experience.
 
 ### ✨ Features
-- **Stable ControlNet Integration**: Bundled a self-contained ControlNet module (`sd_forge_controlnet`) to ensure a stable, long-term compatible API for sending images directly to ControlNet, especially for SD Forge users.
+- **Stable ControlNet Integration**: Included a modified ControlNet script (`scripts/controlnet.py`) to ensure a stable, long-term compatible API for sending images directly to ControlNet, especially for SD Forge users.
 - **Advanced Prompt Controls**:
     - **Mix Prompts**: Combine tags from multiple random posts to generate complex and varied prompts.
     - **Chaos Mode**: Introduce controlled randomness by shuffling tags between positive and negative prompts.
@@ -79,7 +93,7 @@ The codebase was restructured to improve clarity, maintainability, and ease of f
 
 ### 3. ControlNet Integration
 - **Robust Integration Path**: RanbooruX now uses a robust integration path that prefers Forge/A1111 external API helpers when available and automatically falls back to a `p.script_args`-based method when they are not. This ensures maximum compatibility.
-- **Bundled Scripts**: The extension includes a bundled `sd_forge_controlnet` copy and provides documented steps to overwrite host ControlNet scripts if the host environment fails to pass `img2img` inputs to ControlNet Unit 0 by default.
+- **Bundled Scripts**: The extension includes a modified `controlnet.py` script and provides documented steps to overwrite host ControlNet scripts if the host environment fails to pass `img2img` inputs to ControlNet Unit 0 by default.
 
 ### 4. UI/UX Enhancements
 - The user interface was reorganized to present options more clearly.
