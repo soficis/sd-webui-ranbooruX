@@ -1525,7 +1525,7 @@ class Script(scripts.Script):
         # Clean up early protection state
         if hasattr(self, '_temp_disabled_adetailer'):
             # Force restore if cleanup is called early
-            self._restore_early_adetailer_protection()
+            self._restore_early_adetailer_protection(getattr(self, '_initial_pass_p', None))
             
         # Clean up blocking state  
         if hasattr(self.__class__, '_block_640x512_images'):
@@ -1547,6 +1547,94 @@ class Script(scripts.Script):
                 del self.cache_installed_by_us
             except AttributeError:
                 pass
+
+    def _force_release_processing_guards(self, reason, attempt_cleanup=True, processing_obj=None):
+        """Aggressively clear processing locks when a previous job ended abruptly."""
+        try:
+            print(f"[R Guard] ⚠️ Forcing release of RanbooruX processing lock: {reason}")
+        except Exception:
+            pass
+
+        released = False
+        if attempt_cleanup:
+            try:
+                use_cache = getattr(self, '_post_use_cache', True)
+                self._cleanup_after_run(use_cache)
+            except Exception as exc:
+                print(f"[R Guard] Cleanup while releasing lock failed: {exc}")
+
+        try:
+            if hasattr(self, '_current_processing_key'):
+                processing_key = self._current_processing_key
+                if hasattr(self, processing_key):
+                    delattr(self, processing_key)
+                delattr(self, '_current_processing_key')
+            released = True
+        except Exception as exc:
+            print(f"[R Guard] Failed clearing instance processing key: {exc}")
+
+        try:
+            setattr(self.__class__, '_ranbooru_global_processing', False)
+        except Exception as exc:
+            print(f"[R Guard] Failed clearing global processing flag: {exc}")
+            released = False
+
+        if hasattr(self, '_current_processing_object'):
+            try:
+                delattr(self, '_current_processing_object')
+            except Exception as exc:
+                print(f"[R Guard] Failed clearing processing object reference: {exc}")
+                released = False
+
+        # Ensure ADetailer hooks are restored so future generations run normally
+        try:
+            self._restore_early_adetailer_protection(processing_obj)
+        except Exception as exc:
+            print(f"[R Guard] Failed restoring ADetailer protection: {exc}")
+            released = False
+
+        return released
+
+    def _maybe_release_stale_guards(self, new_processing_obj):
+        """Detect and release stale locks left behind by interrupted runs."""
+        guard_active = getattr(self.__class__, '_ranbooru_global_processing', False)
+        if not guard_active:
+            return
+
+        previous_obj = getattr(self, '_current_processing_object', None)
+        if previous_obj is new_processing_obj:
+            return
+
+        state_interrupted = False
+        state_processing = False
+        try:
+            state = getattr(shared, 'state', None)
+            if state is not None:
+                state_interrupted = getattr(state, 'interrupted', False) or getattr(state, 'stopping_job', False)
+                state_processing = getattr(state, 'processing', False)
+        except Exception:
+            state_processing = False
+
+        previous_finalized = False
+        if previous_obj is not None:
+            previous_finalized = getattr(previous_obj, '_ranbooru_finalized', False)
+
+        # Release when the WebUI is idle, interrupted, or the previous object was already finalized.
+        if not state_processing or state_interrupted or previous_finalized or previous_obj is None:
+            reason_bits = []
+            if not state_processing:
+                reason_bits.append('WebUI idle')
+            if state_interrupted:
+                reason_bits.append('interrupted flag set')
+            if previous_finalized:
+                reason_bits.append('previous job finalized')
+            if previous_obj is None:
+                reason_bits.append('no tracked processing object')
+            reason = '; '.join(reason_bits) if reason_bits else 'stale lock detected'
+            self._force_release_processing_guards(reason, processing_obj=new_processing_obj)
+        else:
+            # New processing object arrived while guard is still active—treat as stale lock.
+            self._force_release_processing_guards('new processing request detected while guard active', processing_obj=new_processing_obj)
 
     def before_process(self, p: StableDiffusionProcessing, *args):
         try:
@@ -1574,6 +1662,9 @@ class Script(scripts.Script):
                 except Exception as _e:
                     print(f"[R Before] WARN: Internal img2img seed init failed: {_e}")
                 return
+
+            # Ensure leftover guards from interrupted jobs don't block new generations
+            self._maybe_release_stale_guards(p)
 
             # CRITICAL: Ultra-strict processing guard to prevent any duplicate runs
             processing_key = f'_ranbooru_processing_{id(p)}'
@@ -2020,7 +2111,7 @@ class Script(scripts.Script):
 
             if use_adetailer:
                 # EARLY PROTECTION: Restore ADetailer scripts that were temporarily disabled during initial pass
-                self._restore_early_adetailer_protection()
+                self._restore_early_adetailer_protection(p)
                 # CRITICAL: Prepare ADetailer for img2img so it can process the final results
                 self._prepare_adetailer_for_img2img(p)
             else:
@@ -4160,17 +4251,48 @@ class Script(scripts.Script):
         except Exception as e:
             print(f"[R Process] Error removing ADetailer from runner: {e}")
     
-    def _restore_early_adetailer_protection(self):
-        """Restore ADetailer scripts to runner for manual processing"""
+    def _restore_early_adetailer_protection(self, processing_obj=None):
+        """Restore ADetailer scripts and flags after an interrupted or completed run."""
         try:
             print("[R Process] 🛡️  Restoring ADetailer scripts for manual processing")
-            
-            # Clear initial pass block flags
+
+            # Clear initial pass/block flags so subsequent generations can run ADetailer
             setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
             setattr(self.__class__, '_adetailer_global_guard_active', False)
-            
+            self._set_adetailer_block(False)
+
+            # Determine which processing object's script runner to restore into
+            candidate_p = processing_obj or getattr(self, '_initial_pass_p', None) or getattr(self, '_current_processing_object', None)
+            runner = getattr(candidate_p, 'scripts', None) if candidate_p else None
+
+            # Restore scripts we removed during the initial pass safeguard
+            stored = getattr(self, '_stored_adetailer_scripts', None)
+            if stored and runner:
+                try:
+                    if hasattr(runner, 'alwayson_scripts') and stored.get('alwayson'):
+                        for script in stored['alwayson']:
+                            if script not in runner.alwayson_scripts:
+                                runner.alwayson_scripts.append(script)
+                        print(f"[R Process] 🔄 Reattached {len(stored['alwayson'])} ADetailer always-on script(s)")
+                    if hasattr(runner, 'scripts') and stored.get('regular'):
+                        for script in stored['regular']:
+                            if script not in runner.scripts:
+                                runner.scripts.append(script)
+                        print(f"[R Process] 🔄 Reattached {len(stored['regular'])} ADetailer on-demand script(s)")
+                finally:
+                    # Clear stored references so we don't duplicate reinsertion
+                    delattr(self, '_stored_adetailer_scripts')
+
+            # Ensure any scripts we hard-disabled are re-enabled for the next generation
+            if hasattr(self, 'disabled_adetailer_scripts'):
+                self._reenable_adetailer_from_previous_generation()
+
+            # Clear temporary protection flag if present
+            if hasattr(self, '_temp_disabled_adetailer'):
+                delattr(self, '_temp_disabled_adetailer')
+
             print("[R Process] 🛡️  Early protection restoration complete")
-                
+
         except Exception as e:
             print(f"[R Process] Error restoring early ADetailer protection: {e}")
     

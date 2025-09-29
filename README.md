@@ -4,7 +4,6 @@
 
 > **Important:** This is the `adetailer` branch -- a work-in-progress build focused on adding native ADetailer support to RanbooruX. Expect rapid iteration while we converge on a mainline-ready release.
 
-> **ADetailer Bug Notice:** There is currently a bug where ADetailer stops processing images after an unknown number of generations. The solution is to reload the WebUI. A fix is a work in progress.
 
 RanbooruX is an extension for the [automatic111 Stable Diffusion UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui) and [Forge](https://github.com/lllyasviel/stable-diffusion-webui-forge). It adds a panel that fetches tags (and optionally source images) from multiple boorus to quickly generate varied prompts and test models. This extension is only tested on Forge.
 
