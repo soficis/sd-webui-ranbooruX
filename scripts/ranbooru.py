@@ -1,4 +1,4 @@
-from io import BytesIO
+﻿from io import BytesIO
 import re
 import random
 import requests
@@ -141,7 +141,7 @@ STRICT_IMG2IMG_LOG_SAMPLE = 5
 
 def get_available_ratings(booru):
     choices = list(RATINGS.get(booru, RATING_TYPES['none']).keys())
-    return gr.Radio.update(choices=choices, value="All")
+    return gr.Radio.update(choices=choices, value="All", visible=True)
 
 
 def _get_scatbooru_cookie():
@@ -166,23 +166,13 @@ def has_scatbooru_access():
 
 
 def show_fringe_benefits(booru):
-    return gr.Checkbox.update(visible=(booru == 'gelbooru'))
-
-
-
-
-
+    return gr.Checkbox.update(visible=(booru == 'gelbooru'), value=True)
 
 
 def _sanitize_gelbooru_credential(value: Optional[str]) -> str:
     if not isinstance(value, str):
         return ""
-    sanitized = value.strip()
-    if not sanitized:
-        return ""
-    sanitized = sanitized.replace(chr(13), '').replace(chr(10), '')
-    return sanitized
-
+    return value.strip()
 
 
 def _load_gelbooru_credentials_from_disk() -> Optional[Dict[str, str]]:
@@ -190,31 +180,29 @@ def _load_gelbooru_credentials_from_disk() -> Optional[Dict[str, str]]:
         return None
     try:
         with open(GELBOORU_CREDENTIALS_FILE, 'r', encoding='utf-8') as handle:
-            payload = json.load(handle)
+            data = json.load(handle)
+        api_key = _sanitize_gelbooru_credential(data.get('api_key')) if isinstance(data, dict) else ""
+        user_id = _sanitize_gelbooru_credential(data.get('user_id')) if isinstance(data, dict) else ""
+        if api_key and user_id:
+            return {'api_key': api_key, 'user_id': user_id}
     except Exception as exc:
         print(f"[R] Warn: Failed to read Gelbooru credentials: {exc}")
-        return None
-    if not isinstance(payload, dict):
-        return None
-    api_key = _sanitize_gelbooru_credential(payload.get('api_key'))
-    user_id = _sanitize_gelbooru_credential(payload.get('user_id'))
-    if api_key and user_id:
-        return {'api_key': api_key, 'user_id': user_id}
     return None
 
 
-def _save_gelbooru_credentials_to_disk(api_key: Optional[str], user_id: Optional[str]) -> bool:
+def _save_gelbooru_credentials_to_disk(api_key: str, user_id: str) -> bool:
     api_key = _sanitize_gelbooru_credential(api_key)
-    user_id = _sanitize_gelbooru_credential(user_id)
+    user_id = _sanitize_gelbooru_credential(user_id) if user_id else ""
     if not api_key or not user_id:
         return False
     try:
         os.makedirs(GELBOORU_CREDENTIALS_DIR, exist_ok=True)
+        payload = {'api_key': api_key, 'user_id': user_id}
         with open(GELBOORU_CREDENTIALS_FILE, 'w', encoding='utf-8') as handle:
-            json.dump({'api_key': api_key, 'user_id': user_id}, handle, ensure_ascii=False)
+            json.dump(payload, handle)
         return True
     except Exception as exc:
-        print(f"[R] Warn: Failed to save Gelbooru credentials: {exc}")
+        print(f"[R] Error: Unable to save Gelbooru credentials: {exc}")
         return False
 
 
@@ -226,6 +214,7 @@ def _clear_gelbooru_credentials_from_disk() -> bool:
     except Exception as exc:
         print(f"[R] Warn: Failed to clear Gelbooru credentials: {exc}")
         return False
+
 
 def check_booru_exceptions(booru, post_id, tags):
     if booru == 'konachan' and post_id:
@@ -265,6 +254,8 @@ def resize_image(img, width, height, cropping=True):
     except Exception as e:
         print(f"[R] Error resize: {e}")
         return img
+
+
 def modify_prompt(prompt, tagged_prompt, type_deepbooru):
     prompt_tags = [tag.strip() for tag in prompt.split(',') if tag.strip()]
     tagged_tags = [tag.strip() for tag in tagged_prompt.split(',') if tag.strip()]
@@ -329,42 +320,43 @@ def get_original_post_url(post):
             return f"https://rule34.xxx/index.php?page=post&s=view&id={pid}"
         if booru == 'xbooru':
             return f"https://xbooru.com/index.php?page=post&s=view&id={pid}"
-        if booru == 'konachan':
-            return f"https://konachan.com/post/show/{pid}"
-        if booru == 'yandere':
-            return f"https://yande.re/post/show/{pid}"
-        if booru == 'aibooru':
-            return f"https://aibooru.online/posts/{pid}"
-        if booru == 'e621':
-            return f"https://e621.net/posts/{pid}"
-        return None
-    except Exception:
-        return None
+        if booru == 'konachan' and post_id:
+            raise ValueError("Konachan does not support post IDs")
+        if booru == 'yande.re' and post_id:
+            raise ValueError("Yande.re does not support post IDs")
+        if booru == 'e621' and post_id:
+            raise ValueError("e621 does not support post IDs")
+        if booru == 'danbooru' and tags and len([t for t in tags.split(',') if t.strip()]) > 1:
+            raise ValueError("Danbooru API only supports one tag.")
 
 
-def generate_chaos(pos_tags, neg_tags, chaos_amount):
-    pos_tag_list = [tag.strip() for tag in pos_tags.split(',') if tag.strip()]
-    neg_tag_list = [tag.strip() for tag in neg_tags.split(',') if tag.strip()]
-    chaos_list = list(set(pos_tag_list + neg_tag_list))
-    if not chaos_list:
-        return pos_tags, neg_tags
-    random.shuffle(chaos_list)
-    len_list = round(len(chaos_list) * chaos_amount)
-    neg_add = chaos_list[:len_list]
-    pos_add = chaos_list[len_list:]
-    final_pos = list(set(pos_tag_list) - set(neg_add)) + pos_add
-    final_neg = list(set(neg_tag_list) - set(pos_add)) + neg_add
-    return ','.join(list(dict.fromkeys(final_pos))), ','.join(list(dict.fromkeys(final_neg)))
-
-
-class BooruError(Exception):
-    pass
-
-
-class Booru():
-    def __init__(self, booru_name, base_api_url):
-        self.booru_name = booru_name
-        self.base_api_url = base_api_url
+    def resize_image(img, width, height, cropping=True):
+        if img is None:
+            return None
+        if width <= 0 or height <= 0:
+            print(f"[R] Warn: Invalid resize {width}x{height}")
+            return img
+        try:
+            if cropping:
+                img_aspect = img.width / img.height
+                target_aspect = width / height
+                if img_aspect > target_aspect:
+                    new_height = height
+                    new_width = int(new_height * img_aspect)
+                else:
+                    new_width = width
+                    new_height = int(new_width / img_aspect)
+                img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                left = (new_width - width) / 2
+                top = (new_height - height) / 2
+                right = (new_width + width) / 2
+                bottom = (new_height + height) / 2
+                return img_resized.crop((left, top, right, bottom))
+            else:
+                return img.resize((width, height), Image.Resampling.LANCZOS)
+        except Exception as e:
+            print(f"[R] Error resize: {e}")
+            return img
         self.headers = {'user-agent': f'Ranbooru Extension/{Script.version} for Forge'}
 
     def _fetch_data(self, query_url):
@@ -393,28 +385,28 @@ class Booru():
         """Check if URL is a direct image URL (not from external sites like Pixiv/Twitter)"""
         if not url or not isinstance(url, str):
             return False
-        
+
         # Skip external sites that don't provide direct image access
         external_sites = [
             'pixiv.net', 'pximg.net', 'twitter.com', 'x.com', 't.co',
             'deviantart.com', 'artstation.com', 'instagram.com',
             'facebook.com', 'patreon.com', 'fanbox.cc'
         ]
-        
+
         url_lower = url.lower()
         for site in external_sites:
             if site in url_lower:
                 return False
-        
+
         # Check if URL ends with common image extensions
         image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff']
         if any(url_lower.endswith(ext) for ext in image_extensions):
             return True
-            
+
         # Check if URL contains image-serving patterns
         if any(pattern in url_lower for pattern in ['/images/', '/img/', '/media/', '/files/']):
             return True
-            
+
         return False
 
     def _standardize_post(self, post_data):
@@ -437,24 +429,24 @@ class Booru():
             # some APIs provide tag_string_artist / tag_string_character
         if 'tag_string_artist' in post_data:
             try:
-                artist_tags = [t for t in re.split(r'[,\s]+', post_data.get('tag_string_artist', '').strip()) if t]
+                artist_tags = [t for t in re.split(r'[\,\s]+', post_data.get('tag_string_artist', '').strip()) if t]
             except Exception:
                 pass
         if 'tag_string_character' in post_data:
             try:
-                character_tags = [t for t in re.split(r'[,\s]+', post_data.get('tag_string_character', '').strip()) if t]
+                character_tags = [t for t in re.split(r'[\,\s]+', post_data.get('tag_string_character', '').strip()) if t]
             except Exception:
                 pass
         if 'tag_string_copyright' in post_data:
             try:
-                copyright_tags = [t for t in re.split(r'[,\s]+', post_data.get('tag_string_copyright', '').strip()) if t]
+                copyright_tags = [t for t in re.split(r'[\,\s]+', post_data.get('tag_string_copyright', '').strip()) if t]
             except Exception:
                 pass
-        
+
         # For boorus that don't provide categorized tags, try to extract character tags from the main tag string
         # This handles cases like Gelbooru/Danbooru where character tags are mixed with other tags
         if not character_tags and isinstance(raw_tags, str):
-            all_tags = [t.strip() for t in re.split(r'[,\s]+', raw_tags) if t.strip()]
+            all_tags = [t.strip() for t in re.split(r'[\,\s]+', raw_tags) if t.strip()]
             for tag in all_tags:
                 # Common patterns for character tags: contains parentheses (series name) or ends with specific patterns
                 if ('(' in tag and ')' in tag) or tag.endswith(r'_\(series\)') or tag.endswith(r'_\(character\)'):
@@ -462,9 +454,7 @@ class Booru():
                 # Also catch some common character name patterns (this is heuristic but should catch most)
                 elif any(series in tag.lower() for series in ['genshin_impact', 'touhou', 'fate_', 'azur_lane', 'kantai_collection', 'pokemon']):
                     character_tags.append(tag)
-        
-        # print(f"[R Debug] Post {post_data.get('id', 'unknown')}: extracted {len(character_tags)} character tags: {character_tags}")
-        
+
         post['tags'] = raw_tags
         post['artist_tags'] = artist_tags
         post['character_tags'] = character_tags
@@ -922,32 +912,33 @@ class Script(scripts.Script):
         ordered: List[str] = []
         for part in parts:
             key = self._normalize_tag(part) or part.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            ordered.append(part.strip())
-        return ordered
 
-    def _write_list_file(self, path: str, tags: Iterable[str]) -> None:
-        self._ensure_user_file(path)
-        seen: Set[str] = set()
-        deduped: List[str] = []
-        for tag in tags:
-            cleaned = (tag or '').strip()
-            if not cleaned:
-                continue
-            key = self._normalize_tag(cleaned)
-            if key in seen:
-                continue
-            if key:
-                seen.add(key)
-            deduped.append(cleaned)
-        try:
-            with open(path, 'w', encoding='utf-8') as handle:
-                handle.write('\n'.join(deduped))
-        except Exception as exc:
-            print(f"[R Files] Failed to write list file {path}: {exc}")
-
+            if img is None:
+                return None
+            if width <= 0 or height <= 0:
+                print(f"[R] Warn: Invalid resize {width}x{height}")
+                return img
+            try:
+                if cropping:
+                    img_aspect = img.width / img.height
+                    target_aspect = width / height
+                    if img_aspect > target_aspect:
+                        new_height = height
+                        new_width = int(new_height * img_aspect)
+                    else:
+                        new_width = width
+                        new_height = int(new_width / img_aspect)
+                    img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    left = (new_width - width) / 2
+                    top = (new_height - height) / 2
+                    right = (new_width + width) / 2
+                    bottom = (new_height + height) / 2
+                    return img_resized.crop((left, top, right, bottom))
+                else:
+                    return img.resize((width, height), Image.Resampling.LANCZOS)
+            except Exception as e:
+                print(f"[R] Error resize: {e}")
+                return img
     def _load_personal_lists(self) -> Tuple[Set[str], Set[str]]:
         personal = set(self._read_list_file(PERSONAL_REMOVE_FILE))
         favorites = set(self._read_list_file(FAVORITES_FILE))
@@ -1301,9 +1292,10 @@ class Script(scripts.Script):
         has_saved = self._get_saved_gelbooru_credentials() is not None
         if booru_name == 'gelbooru':
             if has_saved:
+                message = self._gelbooru_saved_message()
                 return (
                     gr.Group.update(visible=False),
-                    gr.Markdown.update(value=self._gelbooru_saved_message(), visible=True),
+                    gr.Markdown.update(value=message, visible=True),
                     gr.Button.update(visible=True),
                     gr.Textbox.update(value=""),
                     gr.Textbox.update(value=""),
