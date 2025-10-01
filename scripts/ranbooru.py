@@ -1,10 +1,13 @@
-﻿from io import BytesIO
+from io import BytesIO
 import re
 import random
 import requests
 import modules.scripts as scripts
 import gradio as gr
 import os
+import json
+import unicodedata
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 from PIL import Image
 import numpy as np
 import requests_cache
@@ -12,6 +15,7 @@ import importlib
 import sys
 import traceback
 from datetime import datetime
+from urllib.parse import quote_plus
 
 from modules.processing import process_images, StableDiffusionProcessingImg2Img, StableDiffusionProcessing
 from modules import shared
@@ -35,6 +39,18 @@ os.makedirs(USER_REMOVE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(COOKIES_DIR, exist_ok=True)
 
+GELBOORU_CREDENTIALS_DIR = os.path.join(USER_DATA_DIR, 'gelbooru')
+GELBOORU_CREDENTIALS_FILE = os.path.join(GELBOORU_CREDENTIALS_DIR, 'credentials.json')
+
+PERSONAL_REMOVE_FILE = os.path.join(USER_REMOVE_DIR, 'personal_remove.txt')
+FAVORITES_FILE = os.path.join(USER_SEARCH_DIR, 'favorites.txt')
+PROMPT_LOG_JSONL = os.path.join(LOG_DIR, 'prompt_sources.jsonl')
+
+REMOVAL_SYNONYM_GROUPS_RAW: Tuple[Set[str], ...] = (
+    {'grayscale', 'greyscale', 'monochrome'},
+    {'1girl', '1female', '1woman'},
+)
+
 # Ensure default files exist
 for filename in ['tags_search.txt', 'tags_remove.txt']:
     dir_path = USER_SEARCH_DIR if 'search' in filename else USER_REMOVE_DIR
@@ -46,12 +62,59 @@ for filename in ['tags_search.txt', 'tags_remove.txt']:
         except Exception as e:
             print(f"[Ranbooru] Error creating file {filepath}: {e}")
 
+for ensured_path in (PERSONAL_REMOVE_FILE, FAVORITES_FILE, PROMPT_LOG_JSONL):
+    parent = os.path.dirname(ensured_path)
+    try:
+        os.makedirs(parent, exist_ok=True)
+        if not os.path.isfile(ensured_path):
+            mode = 'w'
+            with open(ensured_path, mode, encoding='utf-8') as f:
+                if ensured_path == PROMPT_LOG_JSONL:
+                    pass
+    except Exception as exc:
+        print(f"[Ranbooru] Error ensuring file {ensured_path}: {exc}")
+
 COLORED_BG = ['black_background', 'aqua_background', 'white_background', 'colored_background', 'gray_background', 'blue_background', 'green_background', 'red_background', 'brown_background', 'purple_background', 'yellow_background', 'orange_background', 'pink_background', 'plain', 'transparent_background', 'simple_background', 'two-tone_background', 'grey_background']
 ADD_BG = ['outdoors', 'indoors']
 BW_BG = ['monochrome', 'greyscale', 'grayscale']
 POST_AMOUNT = 100
 COUNT = 100
 DEBUG = False
+
+FURRY_CORE_TAGS = {
+    'anthro', 'furry', 'feral', 'feral_focus', 'feral_only', 'scalie', 'avian', 'hooved_animal', 'digitigrade',
+    'taur', 'mythological_creature', 'kemono', 'beastman', 'beastgirl', 'beastboy', 'kemonomimi', 'fur', 'fur_focus'
+}
+
+POKEMON_PREFIXES = ('pokemon', 'pikachu', 'eevee', 'charizard', 'mewtwo', 'gardevoir', 'lucario', 'lopunny')
+ANIMAL_EAR_KEYWORDS = ('_ear', 'animal_ears', 'beast_ears', 'cat_ears', 'dog_ears', 'fox_ears', 'bunny_ears', 'wolf_ears', 'horse_ears', 'bear_ears')
+HORN_KEYWORDS = ('horn', 'horns', 'antlers', 'unicorn_horn', 'goat_horns', 'demon_horns', 'ram_horns', 'bull_horns', 'long_horns')
+
+HEADWEAR_TAGS = {
+    'hat', 'cap', 'beret', 'helmet', 'hood', 'crown', 'tiara', 'headband', 'hairband', 'headdress', 'veil',
+    'witch_hat', 'wizard_hat', 'top_hat', 'beanie', 'goggles', 'glasses_on_head', 'sailor_hat', 'nurse_cap',
+    'maid_headdress', 'pirate_hat', 'sombrero', 'bunny_ears_headband', 'cat_ears_headband', 'animal_ears_headband',
+    'motorcycle_helmet', 'baseball_cap', 'bowler_hat', 'straw_hat', 'sun_hat', 'halo', 'circular_halo', 'floating_halo'
+}
+
+HALO_TAGS = {'halo', 'circular_halo', 'ring_halo', 'floating_halo', 'angelic_halo'}
+
+HAIR_COLOR_TAGS = {
+    'blonde_hair', 'brown_hair', 'black_hair', 'grey_hair', 'gray_hair', 'white_hair', 'silver_hair', 'blue_hair',
+    'green_hair', 'red_hair', 'pink_hair', 'purple_hair', 'orange_hair', 'aqua_hair', 'magenta_hair', 'teal_hair',
+    'multicolored_hair', 'gradient_hair', 'rainbow_hair'
+}
+
+EYE_COLOR_TAGS = {
+    'blue_eyes', 'green_eyes', 'red_eyes', 'brown_eyes', 'black_eyes', 'yellow_eyes', 'amber_eyes', 'orange_eyes',
+    'purple_eyes', 'pink_eyes', 'golden_eyes', 'silver_eyes', 'grey_eyes', 'gray_eyes', 'white_eyes', 'aqua_eyes',
+    'heterochromia', 'multicolored_eyes', 'gradient_eyes'
+}
+
+SERIES_KEYWORDS = {
+    'franchise', 'series', 'canon', 'official_media', 'gacha_game', 'anime', 'manga_franchise', 'visual_novel'
+}
+SERIES_SUFFIXES = ('_series', '_franchise', '_media', '_universe')
 
 RATING_TYPES = {
     "none": {"All": "All"},
@@ -71,6 +134,9 @@ RATINGS = {
     "xbooru": RATING_TYPES['full'],
     "gelbooru": RATING_TYPES['single']
 }
+
+STRICT_IMG2IMG_EXTRA_ROUNDS = 2
+STRICT_IMG2IMG_LOG_SAMPLE = 5
 
 
 def get_available_ratings(booru):
@@ -102,6 +168,64 @@ def has_scatbooru_access():
 def show_fringe_benefits(booru):
     return gr.Checkbox.update(visible=(booru == 'gelbooru'))
 
+
+
+
+
+
+
+def _sanitize_gelbooru_credential(value: Optional[str]) -> str:
+    if not isinstance(value, str):
+        return ""
+    sanitized = value.strip()
+    if not sanitized:
+        return ""
+    sanitized = sanitized.replace(chr(13), '').replace(chr(10), '')
+    return sanitized
+
+
+
+def _load_gelbooru_credentials_from_disk() -> Optional[Dict[str, str]]:
+    if not os.path.isfile(GELBOORU_CREDENTIALS_FILE):
+        return None
+    try:
+        with open(GELBOORU_CREDENTIALS_FILE, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        print(f"[R] Warn: Failed to read Gelbooru credentials: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    api_key = _sanitize_gelbooru_credential(payload.get('api_key'))
+    user_id = _sanitize_gelbooru_credential(payload.get('user_id'))
+    if api_key and user_id:
+        return {'api_key': api_key, 'user_id': user_id}
+    return None
+
+
+def _save_gelbooru_credentials_to_disk(api_key: Optional[str], user_id: Optional[str]) -> bool:
+    api_key = _sanitize_gelbooru_credential(api_key)
+    user_id = _sanitize_gelbooru_credential(user_id)
+    if not api_key or not user_id:
+        return False
+    try:
+        os.makedirs(GELBOORU_CREDENTIALS_DIR, exist_ok=True)
+        with open(GELBOORU_CREDENTIALS_FILE, 'w', encoding='utf-8') as handle:
+            json.dump({'api_key': api_key, 'user_id': user_id}, handle, ensure_ascii=False)
+        return True
+    except Exception as exc:
+        print(f"[R] Warn: Failed to save Gelbooru credentials: {exc}")
+        return False
+
+
+def _clear_gelbooru_credentials_from_disk() -> bool:
+    try:
+        if os.path.isfile(GELBOORU_CREDENTIALS_FILE):
+            os.remove(GELBOORU_CREDENTIALS_FILE)
+        return True
+    except Exception as exc:
+        print(f"[R] Warn: Failed to clear Gelbooru credentials: {exc}")
+        return False
 
 def check_booru_exceptions(booru, post_id, tags):
     if booru == 'konachan' and post_id:
@@ -141,8 +265,6 @@ def resize_image(img, width, height, cropping=True):
     except Exception as e:
         print(f"[R] Error resize: {e}")
         return img
-
-
 def modify_prompt(prompt, tagged_prompt, type_deepbooru):
     prompt_tags = [tag.strip() for tag in prompt.split(',') if tag.strip()]
     tagged_tags = [tag.strip() for tag in tagged_prompt.split(',') if tag.strip()]
@@ -368,16 +490,22 @@ class Booru():
 
 
 class Gelbooru(Booru):
-    def __init__(self, fringe_benefits):
+    def __init__(self, fringe_benefits, credentials: Optional[Dict[str, str]] = None):
         super().__init__('Gelbooru', f'https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&limit={POST_AMOUNT}')
         self.fringeBenefits = fringe_benefits
+        credentials = credentials or {}
+        self.api_key = _sanitize_gelbooru_credential(credentials.get('api_key')) if isinstance(credentials, dict) else ""
+        self.user_id = _sanitize_gelbooru_credential(credentials.get('user_id')) if isinstance(credentials, dict) else ""
 
     def get_posts(self, tags_query="", max_pages=10, post_id=None):
         global COUNT
         COUNT = 0
         all_fetched_posts = []
+        if not self.api_key or not self.user_id:
+            raise BooruError("Gelbooru requires an API key and user ID. Set them under RanbooruX → Gelbooru settings.")
+        credentials_query = f"&api_key={quote_plus(self.api_key)}&user_id={quote_plus(self.user_id)}"
         if post_id:
-            query_url = f"{self.base_api_url}&id={post_id}{tags_query}"
+            query_url = f"{self.base_api_url}{credentials_query}&id={post_id}{tags_query}"
             fetched_data = self._fetch_data(query_url)
             if fetched_data and 'post' in fetched_data and isinstance(fetched_data['post'], list):
                 all_fetched_posts = fetched_data['post']
@@ -385,7 +513,7 @@ class Gelbooru(Booru):
             print(f"[R] Found {COUNT} post(s) for ID: {post_id}")
         else:
             page = random.randint(0, max_pages - 1)
-            query_url = f"{self.base_api_url}&pid={page}{tags_query}"
+            query_url = f"{self.base_api_url}{credentials_query}&pid={page}{tags_query}"
             fetched_data = self._fetch_data(query_url)
             if fetched_data and 'post' in fetched_data and isinstance(fetched_data['post'], list):
                 all_fetched_posts = fetched_data['post']
@@ -661,6 +789,41 @@ class e621(Booru):
 
 
 class Script(scripts.Script):
+    def __init__(self):
+        super().__init__()
+        self._gelbooru_saved_credentials: Optional[Dict[str, str]] = _load_gelbooru_credentials_from_disk()
+        self._gelbooru_effective_credentials: Optional[Dict[str, str]] = None
+        self._personal_remove_tags: Set[str] = set()
+        self._favorite_tags: Set[str] = set()
+        self._removal_context: Dict[str, object] = {}
+        self._tag_normal_cache: Dict[str, str] = {}
+        self._synonym_groups: Tuple[Set[str], ...] = tuple()
+        self._synonym_lookup: Dict[str, Set[str]] = {}
+        try:
+            norm = self._normalize_tag
+            groups: List[Set[str]] = []
+            for group in REMOVAL_SYNONYM_GROUPS_RAW:
+                normalized_group = {norm(tag) for tag in group if norm(tag)}
+                if normalized_group:
+                    groups.append(normalized_group)
+            self._synonym_groups = tuple(groups)
+            lookup: Dict[str, Set[str]] = {}
+            for group in self._synonym_groups:
+                for entry in group:
+                    lookup[entry] = group
+            self._synonym_lookup = lookup
+        except Exception:
+            self._synonym_groups = tuple()
+            self._synonym_lookup = {}
+        self._legacy_bad_exact: Set[str] = set()
+        self._legacy_bad_wildcard: Dict[str, str] = {}
+        self._strict_img2img_fetch: bool = True
+        self._strict_img2img_active: bool = False
+        self._strict_img2img_relaxed: bool = False
+        self._strict_img2img_rejections: List[Dict[str, object]] = []
+        self._strict_allowed_subjects: Set[str] = set()
+        self._strict_initial_additions: str = ""
+
     sorting_priority = 1  # Highest priority to run before ALL other extensions
     previous_loras = ''
     last_img = []
@@ -672,6 +835,13 @@ class Script(scripts.Script):
     cache_installed_by_us = False
     _adetailer_support_enabled = False
     _post_adetailer_enabled = False
+    _manual_adetailer_prev_enabled = False
+    _DASH_UNDERSCORE_RE = re.compile(r'[_\-]+')
+    _WHITESPACE_RE = re.compile(r'\s+')
+    _USER_LIST_PATHS = {
+        'personal': PERSONAL_REMOVE_FILE,
+        'favorites': FAVORITES_FILE,
+    }
     _CLOTHING_KEYWORDS = {
         'dress', 'shirt', 'skirt', 'skorts', 'pants', 'jeans', 'shorts', 'jacket', 'coat', 'sweater', 'hoodie',
         'kimono', 'robe', 'uniform', 'school uniform', 'sailor uniform', 'bikini', 'swimsuit', 'lingerie', 'underwear',
@@ -696,6 +866,576 @@ class Script(scripts.Script):
         'multiple girls', 'multiple boys', 'multiple people', 'multiple others', 'solo focus', 'female focus', 'male focus',
         'mixed group', '1female', '1male', '2females', '2males', '3females', '3males', '1person', '2people', '3people', '4people'
     }
+    _FURRY_CORE_NORMALIZED = {tag.replace('_', ' ') for tag in FURRY_CORE_TAGS}
+    _POKEMON_PREFIXES_NORMALIZED = tuple(prefix.replace('_', ' ') for prefix in POKEMON_PREFIXES)
+    _ANIMAL_EAR_KEYWORDS_NORMALIZED = tuple(keyword.replace('_', ' ') for keyword in ANIMAL_EAR_KEYWORDS)
+    _HORN_KEYWORDS_NORMALIZED = tuple(keyword.replace('_', ' ') for keyword in HORN_KEYWORDS)
+    _HEADWEAR_TAGS_NORMALIZED = {tag.replace('_', ' ') for tag in HEADWEAR_TAGS}
+    _HALO_TAGS_NORMALIZED = {tag.replace('_', ' ') for tag in HALO_TAGS}
+    _HAIR_COLOR_TAGS_NORMALIZED = {tag.replace('_', ' ') for tag in HAIR_COLOR_TAGS}
+    _EYE_COLOR_TAGS_NORMALIZED = {tag.replace('_', ' ') for tag in EYE_COLOR_TAGS}
+    _SERIES_KEYWORDS_NORMALIZED = {tag.replace('_', ' ') for tag in SERIES_KEYWORDS}
+    _SERIES_SUFFIXES_NORMALIZED = tuple(suffix.replace('_', ' ') for suffix in SERIES_SUFFIXES)
+
+    @staticmethod
+    def _canonicalize_raw_tag(tag: str) -> str:
+        if not isinstance(tag, str):
+            return ""
+        lowered = (tag or '').strip().lower().replace('_', ' ')
+        return re.sub(r'\s+', ' ', lowered) if lowered else ""
+
+    @staticmethod
+    def _normalize_tag(tag: str) -> str:
+        if not isinstance(tag, str):
+            return ""
+        normalized = unicodedata.normalize("NFKC", tag).casefold()
+        normalized = Script._DASH_UNDERSCORE_RE.sub(' ', normalized)
+        normalized = Script._WHITESPACE_RE.sub(' ', normalized).strip()
+        if not normalized:
+            return ""
+        wrapper_pairs = {('(', ')'), ('[', ']'), ('{', '}')}
+        while len(normalized) > 2 and (normalized[0], normalized[-1]) in wrapper_pairs:
+            normalized = normalized[1:-1].strip()
+        return normalized
+
+    def _ensure_user_file(self, path: str) -> None:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if not os.path.isfile(path):
+                with open(path, 'w', encoding='utf-8') as handle:
+                    handle.write('')
+        except Exception as exc:
+            print(f"[R Files] Failed to ensure file {path}: {exc}")
+
+    def _read_list_file(self, path: str) -> List[str]:
+        self._ensure_user_file(path)
+        try:
+            with open(path, 'r', encoding='utf-8') as handle:
+                contents = handle.read()
+        except Exception as exc:
+            print(f"[R Files] Failed to read list file {path}: {exc}")
+            return []
+        if not contents:
+            return []
+        parts = [segment.strip() for segment in re.split(r'[\n,]+', contents) if segment.strip()]
+        seen: Set[str] = set()
+        ordered: List[str] = []
+        for part in parts:
+            key = self._normalize_tag(part) or part.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(part.strip())
+        return ordered
+
+    def _write_list_file(self, path: str, tags: Iterable[str]) -> None:
+        self._ensure_user_file(path)
+        seen: Set[str] = set()
+        deduped: List[str] = []
+        for tag in tags:
+            cleaned = (tag or '').strip()
+            if not cleaned:
+                continue
+            key = self._normalize_tag(cleaned)
+            if key in seen:
+                continue
+            if key:
+                seen.add(key)
+            deduped.append(cleaned)
+        try:
+            with open(path, 'w', encoding='utf-8') as handle:
+                handle.write('\n'.join(deduped))
+        except Exception as exc:
+            print(f"[R Files] Failed to write list file {path}: {exc}")
+
+    def _load_personal_lists(self) -> Tuple[Set[str], Set[str]]:
+        personal = set(self._read_list_file(PERSONAL_REMOVE_FILE))
+        favorites = set(self._read_list_file(FAVORITES_FILE))
+        self._personal_remove_tags = personal
+        self._favorite_tags = favorites
+        return personal, favorites
+
+    def _normalize_cached(self, tag: str, cache: Dict[str, str]) -> str:
+        if tag in cache:
+            return cache[tag]
+        normalized = self._normalize_tag(tag)
+        cache[tag] = normalized
+        return normalized
+
+    def _expand_with_synonyms(self, normalized_tag: str, target_set: Set[str]) -> None:
+        if not normalized_tag:
+            return
+        group = self._synonym_lookup.get(normalized_tag)
+        if group:
+            target_set.update(group)
+
+    def _build_removal_context(self, removal_raw: Iterable[str], favorites_raw: Iterable[str]) -> Dict[str, object]:
+        norm = self._normalize_tag
+        exact: Set[str] = set()
+        prefix: List[str] = []
+        suffix: List[str] = []
+        contains: List[str] = []
+        regex_objects: List[re.Pattern[str]] = []
+        for raw in removal_raw:
+            if not isinstance(raw, str):
+                continue
+            candidate = raw.strip()
+            if not candidate:
+                continue
+            if '*' not in candidate:
+                normalized = norm(candidate)
+                if normalized:
+                    exact.add(normalized)
+                    self._expand_with_synonyms(normalized, exact)
+                continue
+            if candidate.startswith('*') and candidate.endswith('*') and candidate.count('*') == 2:
+                body = candidate[1:-1]
+                normalized = norm(body)
+                if normalized:
+                    contains.append(normalized)
+                continue
+            if candidate.endswith('*') and candidate.count('*') == 1:
+                body = candidate[:-1]
+                normalized = norm(body)
+                if normalized:
+                    prefix.append(normalized)
+                continue
+            if candidate.startswith('*') and candidate.count('*') == 1:
+                body = candidate[1:]
+                normalized = norm(body)
+                if normalized:
+                    suffix.append(normalized)
+                continue
+            segments = candidate.split('*')
+            pattern_fragments: List[str] = []
+            for idx, segment in enumerate(segments):
+                if segment:
+                    normalized_segment = norm(segment)
+                    if normalized_segment:
+                        pattern_fragments.append(re.escape(normalized_segment))
+                if idx < len(segments) - 1:
+                    pattern_fragments.append('.*')
+            pattern_body = ''.join(pattern_fragments)
+            if pattern_body:
+                try:
+                    regex_objects.append(re.compile(f'^{pattern_body}$'))
+                except re.error as exc:
+                    print(f"[R Filters] Invalid wildcard pattern '{candidate}': {exc}")
+        contains_set = set(filter(None, contains))
+        contains_regex: Optional[re.Pattern[str]] = None
+        if len(contains_set) > 50:
+            pattern_union = '|'.join(re.escape(term) for term in contains_set if term)
+            if pattern_union:
+                try:
+                    contains_regex = re.compile(pattern_union)
+                except re.error as exc:
+                    print(f"[R Filters] Failed to compile contains regex: {exc}")
+                    contains_regex = None
+        prefix_tuple = tuple(sorted(set(filter(None, prefix))))
+        suffix_tuple = tuple(sorted(set(filter(None, suffix))))
+        contains_tuple = tuple(sorted(contains_set))
+        favorites_exact: Set[str] = set()
+        for fav in favorites_raw:
+            if not isinstance(fav, str):
+                continue
+            normalized = norm(fav)
+            if not normalized:
+                continue
+            favorites_exact.add(normalized)
+            self._expand_with_synonyms(normalized, favorites_exact)
+        return {
+            'exact': frozenset(exact),
+            'prefix': prefix_tuple,
+            'suffix': suffix_tuple,
+            'contains': contains_tuple,
+            'contains_regex': contains_regex,
+            'regex_objects': tuple(regex_objects),
+            'favorites': frozenset(favorites_exact),
+        }
+
+    def _tag_matches_removal(self, normalized_tag: str, context: Optional[Dict[str, object]]) -> bool:
+        if not context or not normalized_tag:
+            return False
+        favorites: Set[str] = context.get('favorites', frozenset())  # type: ignore[assignment]
+        if normalized_tag in favorites:
+            return False
+        exact: Set[str] = context.get('exact', frozenset())  # type: ignore[assignment]
+        if normalized_tag in exact:
+            return True
+        prefix_terms: Tuple[str, ...] = context.get('prefix', tuple())  # type: ignore[assignment]
+        if any(normalized_tag.startswith(term) for term in prefix_terms if term):
+            return True
+        suffix_terms: Tuple[str, ...] = context.get('suffix', tuple())  # type: ignore[assignment]
+        if any(normalized_tag.endswith(term) for term in suffix_terms if term):
+            return True
+        contains_regex: Optional[re.Pattern[str]] = context.get('contains_regex')  # type: ignore[assignment]
+        if contains_regex and contains_regex.search(normalized_tag):
+            return True
+        contains_terms: Tuple[str, ...] = context.get('contains', tuple())  # type: ignore[assignment]
+        if not contains_regex and any(term and term in normalized_tag for term in contains_terms):
+            return True
+        regex_patterns: Tuple[re.Pattern[str], ...] = context.get('regex_objects', tuple())  # type: ignore[assignment]
+        for pattern in regex_patterns:
+            if pattern.fullmatch(normalized_tag):
+                return True
+        return False
+
+    def _parse_user_tags(self, text: str) -> List[str]:
+        if not text or not isinstance(text, str):
+            return []
+        segments = [seg.strip() for seg in re.split(r'[\n,]+', text) if seg and seg.strip()]
+        if not segments:
+            return []
+        seen: Set[str] = set()
+        ordered: List[str] = []
+        for seg in segments:
+            norm = self._normalize_tag(seg) or seg.casefold()
+            if norm in seen:
+                continue
+            seen.add(norm)
+            ordered.append(seg.strip())
+        return ordered
+
+    def _coerce_selection(self, selection: Optional[object]) -> List[str]:
+        if selection is None:
+            return []
+        if isinstance(selection, str):
+            return [selection]
+        if isinstance(selection, (list, tuple)):
+            return [item for item in selection if isinstance(item, str) and item.strip()]
+        return []
+
+    def _merge_tag_lists(self, base: List[str], additions: List[str]) -> List[str]:
+        merged: List[str] = []
+        seen: Set[str] = set()
+        for tag in list(base) + list(additions):
+            cleaned = (tag or '').strip()
+            if not cleaned:
+                continue
+            key = self._normalize_tag(cleaned) or cleaned.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cleaned)
+        return merged
+
+    def _apply_list_operation(
+        self,
+        list_key: str,
+        *,
+        additions: Optional[List[str]] = None,
+        removals: Optional[List[str]] = None,
+        imported: Optional[List[str]] = None,
+        dedupe: bool = False,
+    ) -> List[str]:
+        path = self._USER_LIST_PATHS[list_key]
+        existing = self._read_list_file(path)
+        working = list(existing)
+        combined_additions: List[str] = []
+        if additions:
+            combined_additions.extend(additions)
+        if imported:
+            combined_additions.extend(imported)
+        if combined_additions:
+            working = self._merge_tag_lists(working, combined_additions)
+        if removals:
+            removal_keys = {self._normalize_tag(tag) or tag.casefold() for tag in removals if isinstance(tag, str)}
+            if removal_keys:
+                working = [tag for tag in working if (self._normalize_tag(tag) or tag.casefold()) not in removal_keys]
+        if dedupe:
+            working = self._merge_tag_lists([], working)
+        self._write_list_file(path, working)
+        self._load_personal_lists()
+        return working
+
+    def _ui_add_personal_tags(self, tags_text: str, current_selection: Optional[object]):
+        additions = self._parse_user_tags(tags_text)
+        new_list = self._apply_list_operation('personal', additions=additions)
+        selection = additions or self._coerce_selection(current_selection)
+        selection = [tag for tag in selection if tag in new_list]
+        return (
+            gr.Dropdown.update(choices=new_list, value=selection),
+            gr.Textbox.update(value="")
+        )
+
+    def _ui_remove_personal_tags(self, selected: Optional[object]):
+        removals = self._coerce_selection(selected)
+        new_list = self._apply_list_operation('personal', removals=removals) if removals else self._read_list_file(PERSONAL_REMOVE_FILE)
+        return gr.Dropdown.update(choices=new_list, value=[])
+
+    def _ui_dedupe_personal_list(self):
+        new_list = self._apply_list_operation('personal', dedupe=True)
+        return gr.Dropdown.update(choices=new_list, value=new_list)
+
+    def _ui_import_personal_list(self, uploaded_file: Optional[dict]):
+        if not uploaded_file:
+            current = self._read_list_file(PERSONAL_REMOVE_FILE)
+            return gr.Dropdown.update(choices=current, value=current), gr.File.update(value=None)
+        data = uploaded_file.get('data') if isinstance(uploaded_file, dict) else None
+        text = ''
+        if isinstance(data, bytes):
+            try:
+                text = data.decode('utf-8', errors='ignore')
+            except Exception as exc:
+                print(f"[R Lists] Failed to decode personal import: {exc}")
+        additions = self._parse_user_tags(text)
+        new_list = self._apply_list_operation('personal', additions=additions)
+        selection = [tag for tag in additions if tag in new_list]
+        return gr.Dropdown.update(choices=new_list, value=selection), gr.File.update(value=None)
+
+    def _ui_export_personal_list(self):
+        return PERSONAL_REMOVE_FILE
+
+    def _ui_add_favorite_tags(self, tags_text: str, current_selection: Optional[object]):
+        additions = self._parse_user_tags(tags_text)
+        new_list = self._apply_list_operation('favorites', additions=additions)
+        selection = additions or self._coerce_selection(current_selection)
+        selection = [tag for tag in selection if tag in new_list]
+        return (
+            gr.Dropdown.update(choices=new_list, value=selection),
+            gr.Textbox.update(value="")
+        )
+
+    def _ui_remove_favorite_tags(self, selected: Optional[object]):
+        removals = self._coerce_selection(selected)
+        new_list = self._apply_list_operation('favorites', removals=removals) if removals else self._read_list_file(FAVORITES_FILE)
+        return gr.Dropdown.update(choices=new_list, value=[])
+
+    def _ui_dedupe_favorite_list(self):
+        new_list = self._apply_list_operation('favorites', dedupe=True)
+        return gr.Dropdown.update(choices=new_list, value=new_list)
+
+    def _ui_import_favorite_list(self, uploaded_file: Optional[dict]):
+        if not uploaded_file:
+            current = self._read_list_file(FAVORITES_FILE)
+            return gr.Dropdown.update(choices=current, value=current), gr.File.update(value=None)
+        data = uploaded_file.get('data') if isinstance(uploaded_file, dict) else None
+        text = ''
+        if isinstance(data, bytes):
+            try:
+                text = data.decode('utf-8', errors='ignore')
+            except Exception as exc:
+                print(f"[R Lists] Failed to decode favorites import: {exc}")
+        additions = self._parse_user_tags(text)
+        new_list = self._apply_list_operation('favorites', additions=additions)
+        selection = [tag for tag in additions if tag in new_list]
+        return gr.Dropdown.update(choices=new_list, value=selection), gr.File.update(value=None)
+
+    def _ui_export_favorite_list(self):
+        return FAVORITES_FILE
+
+    def _get_saved_gelbooru_credentials(self) -> Optional[Dict[str, str]]:
+        creds = self._gelbooru_saved_credentials
+        if isinstance(creds, dict):
+            api_key = _sanitize_gelbooru_credential(creds.get('api_key'))
+            user_id = _sanitize_gelbooru_credential(creds.get('user_id'))
+            if api_key and user_id:
+                return {'api_key': api_key, 'user_id': user_id}
+        return None
+
+    def _resolve_gelbooru_credentials(self, runtime_api_key: Optional[str], runtime_user_id: Optional[str]) -> Optional[Dict[str, str]]:
+        runtime_api_key = _sanitize_gelbooru_credential(runtime_api_key)
+        runtime_user_id = _sanitize_gelbooru_credential(runtime_user_id)
+        if runtime_api_key and runtime_user_id:
+            return {'api_key': runtime_api_key, 'user_id': runtime_user_id}
+        saved = self._get_saved_gelbooru_credentials()
+        if saved:
+            return saved
+        return None
+
+    def _gelbooru_saved_message(self) -> str:
+        return f"✅ Using saved Gelbooru credentials from `{GELBOORU_CREDENTIALS_FILE}`."
+
+    def _ui_save_gelbooru_credentials(self, api_key: Optional[str], user_id: Optional[str]):
+        api_key = _sanitize_gelbooru_credential(api_key)
+        user_id = _sanitize_gelbooru_credential(user_id)
+        if not api_key or not user_id:
+            warn = "⚠️ Please enter both API Key and User ID before saving."
+            return (
+                gr.Markdown.update(value=warn, visible=True),
+                gr.Group.update(visible=True),
+                gr.Button.update(visible=False),
+                gr.Textbox.update(value=api_key),
+                gr.Textbox.update(value=user_id),
+            )
+        if _save_gelbooru_credentials_to_disk(api_key, user_id):
+            self._gelbooru_saved_credentials = {'api_key': api_key, 'user_id': user_id}
+            message = self._gelbooru_saved_message()
+            return (
+                gr.Markdown.update(value=message, visible=True),
+                gr.Group.update(visible=False),
+                gr.Button.update(visible=True),
+                gr.Textbox.update(value=""),
+                gr.Textbox.update(value=""),
+            )
+        error = "⚠️ Failed to save Gelbooru credentials. Check console for details."
+        return (
+            gr.Markdown.update(value=error, visible=True),
+            gr.Group.update(visible=True),
+            gr.Button.update(visible=False),
+            gr.Textbox.update(value=api_key),
+            gr.Textbox.update(value=user_id),
+        )
+
+    def _ui_clear_gelbooru_credentials(self):
+        if _clear_gelbooru_credentials_from_disk():
+            self._gelbooru_saved_credentials = None
+            return (
+                gr.Markdown.update(value="🧹 Saved Gelbooru credentials cleared.", visible=True),
+                gr.Group.update(visible=True),
+                gr.Button.update(visible=False),
+                gr.Textbox.update(value=""),
+                gr.Textbox.update(value=""),
+            )
+        warn = "⚠️ Gelbooru credentials file could not be removed."
+        return (
+            gr.Markdown.update(value=warn, visible=True),
+            gr.Group.update(visible=False),
+            gr.Button.update(visible=True),
+            gr.Textbox.update(value=""),
+            gr.Textbox.update(value=""),
+        )
+
+    def _update_gelbooru_ui_visibility(self, booru_name: Optional[str]):
+        booru_name = (booru_name or "").strip().lower()
+        has_saved = self._get_saved_gelbooru_credentials() is not None
+        if booru_name == 'gelbooru':
+            if has_saved:
+                return (
+                    gr.Group.update(visible=False),
+                    gr.Markdown.update(value=self._gelbooru_saved_message(), visible=True),
+                    gr.Button.update(visible=True),
+                    gr.Textbox.update(value=""),
+                    gr.Textbox.update(value=""),
+                )
+            return (
+                gr.Group.update(visible=True),
+                gr.Markdown.update(value="", visible=False),
+                gr.Button.update(visible=False),
+                gr.Textbox.update(value=""),
+                gr.Textbox.update(value=""),
+            )
+        # Hide for non-Gelbooru selections
+        return (
+            gr.Group.update(visible=False),
+            gr.Markdown.update(value="", visible=False),
+            gr.Button.update(visible=False),
+            gr.Textbox.update(value=""),
+            gr.Textbox.update(value=""),
+        )
+
+    def _build_legacy_bad_index(self, bad_tags: Iterable[str]) -> None:
+        exact: Set[str] = set()
+        wildcard: Dict[str, str] = {}
+        for tag in bad_tags:
+            if not isinstance(tag, str):
+                continue
+            cleaned = tag.strip()
+            if not cleaned:
+                continue
+            if '*' not in cleaned:
+                exact.add(cleaned)
+                continue
+            base = cleaned.replace('*', '')
+            if not base:
+                continue
+            if cleaned.endswith('*') and not cleaned.startswith('*'):
+                wildcard[base] = 's'
+            elif cleaned.startswith('*') and not cleaned.endswith('*'):
+                wildcard[base] = 'e'
+            else:
+                wildcard[base] = 'c'
+        self._legacy_bad_exact = exact
+        self._legacy_bad_wildcard = wildcard
+
+    def _legacy_tag_matches(self, tag: str) -> bool:
+        if tag in self._legacy_bad_exact:
+            return True
+        for pattern, mode in self._legacy_bad_wildcard.items():
+            if not pattern:
+                continue
+            if mode == 's' and tag.startswith(pattern):
+                return True
+            if mode == 'e' and tag.endswith(pattern):
+                return True
+            if mode == 'c' and pattern in tag:
+                return True
+        return False
+
+    def _is_furry_tag(self, tag: str) -> bool:
+        normalized = (self._normalize_tag(tag) or '').strip().lower()
+        if not normalized:
+            normalized = self._canonicalize_raw_tag(tag)
+        if not normalized:
+            return False
+        raw_lower = (tag or '').strip().lower()
+        if normalized in self._FURRY_CORE_NORMALIZED or raw_lower in FURRY_CORE_TAGS:
+            return True
+        if any(normalized.startswith(prefix) or raw_lower.startswith(prefix) for prefix in self._POKEMON_PREFIXES_NORMALIZED):
+            return True
+        if any(keyword in normalized for keyword in self._ANIMAL_EAR_KEYWORDS_NORMALIZED):
+            return True
+        if any(keyword in normalized for keyword in self._HORN_KEYWORDS_NORMALIZED):
+            return True
+        return False
+
+    def _is_headwear_tag(self, tag: str) -> bool:
+        normalized = (self._normalize_tag(tag) or '').strip().lower()
+        if not normalized:
+            normalized = self._canonicalize_raw_tag(tag)
+        if not normalized:
+            return False
+        if normalized in self._HEADWEAR_TAGS_NORMALIZED or normalized in self._HALO_TAGS_NORMALIZED:
+            return True
+        # Allow simple keyword containment like " halo" or " headpiece"
+        if ' halo' in normalized or normalized.endswith(' halo'):
+            return True
+        return False
+
+    def _is_hair_color_tag(self, tag: str) -> bool:
+        normalized = (self._normalize_tag(tag) or '').strip().lower()
+        if not normalized:
+            normalized = self._canonicalize_raw_tag(tag)
+        return normalized in self._HAIR_COLOR_TAGS_NORMALIZED
+
+    def _is_eye_color_tag(self, tag: str) -> bool:
+        normalized = (self._normalize_tag(tag) or '').strip().lower()
+        if not normalized:
+            normalized = self._canonicalize_raw_tag(tag)
+        return normalized in self._EYE_COLOR_TAGS_NORMALIZED
+
+    def _is_series_tag(self, tag: str) -> bool:
+        normalized = (self._normalize_tag(tag) or '').strip().lower()
+        if not normalized:
+            normalized = self._canonicalize_raw_tag(tag)
+        if not normalized:
+            return False
+        raw_lower = (tag or '').strip().lower()
+        if any(keyword in normalized for keyword in self._SERIES_KEYWORDS_NORMALIZED):
+            return True
+        if any(raw_lower.endswith(suffix) or normalized.endswith(suffix) for suffix in SERIES_SUFFIXES):
+            return True
+        if any(normalized.endswith(suffix) for suffix in self._SERIES_SUFFIXES_NORMALIZED):
+            return True
+        return False
+
+    def _extract_color_tags(self, text: str) -> tuple[set[str], set[str]]:
+        hair_tags: set[str] = set()
+        eye_tags: set[str] = set()
+        if not text or not isinstance(text, str):
+            return hair_tags, eye_tags
+        tokens = [token.strip() for token in re.split(r'[\s,]+', text) if token.strip()]
+        for token in tokens:
+            normalized = (self._normalize_tag(token) or '').strip().lower()
+            if not normalized:
+                normalized = self._canonicalize_raw_tag(token)
+            if not normalized:
+                continue
+            if normalized in self._HAIR_COLOR_TAGS_NORMALIZED:
+                hair_tags.add(normalized)
+            if normalized in self._EYE_COLOR_TAGS_NORMALIZED:
+                eye_tags.add(normalized)
+        return hair_tags, eye_tags
     def _is_clothing_tag(self, tag: str) -> bool:
         normalized = self._normalize_tag(tag)
         if not normalized:
@@ -732,6 +1472,276 @@ class Script(scripts.Script):
             return set()
         tags = [t.strip() for t in re.split(r'[\s,]+', text) if t.strip()]
         return {self._normalize_tag(t) for t in tags if self._is_subject_tag(t)}
+
+    def _normalize_post_tags(self, post: Optional[Dict[str, object]], cache: Dict[str, str]) -> Tuple[Set[str], Dict[str, List[str]]]:
+        normalized_tags: Set[str] = set()
+        buckets: Dict[str, List[str]] = {
+            'tags': [],
+            'artist_tags': [],
+            'character_tags': [],
+            'copyright_tags': [],
+        }
+        if not isinstance(post, dict):
+            return normalized_tags, buckets
+
+        raw_tags = post.get('tags')
+        tag_list: List[str] = []
+        if isinstance(raw_tags, str):
+            tag_list = [segment.strip() for segment in re.split(r'[\s,]+', raw_tags) if segment.strip()]
+        elif isinstance(raw_tags, dict):
+            for value in raw_tags.values():
+                if isinstance(value, (list, tuple, set)):
+                    tag_list.extend([str(item).strip() for item in value if isinstance(item, str) and item.strip()])
+                elif isinstance(value, str) and value.strip():
+                    tag_list.append(value.strip())
+        elif isinstance(raw_tags, (list, tuple, set)):
+            tag_list = [str(item).strip() for item in raw_tags if isinstance(item, str) and item.strip()]
+        buckets['tags'] = tag_list
+
+        for key in ('artist_tags', 'character_tags', 'copyright_tags'):
+            values = post.get(key)
+            if isinstance(values, str) and values.strip():
+                buckets[key] = [values.strip()]
+            elif isinstance(values, (list, tuple, set)):
+                buckets[key] = [str(item).strip() for item in values if isinstance(item, str) and item.strip()]
+            else:
+                buckets[key] = []
+
+        for key, values in buckets.items():
+            cleaned: List[str] = []
+            for tag in values:
+                if not isinstance(tag, str):
+                    continue
+                cleaned_tag = tag.strip()
+                if not cleaned_tag:
+                    continue
+                cleaned.append(cleaned_tag)
+                normalized = self._normalize_cached(cleaned_tag, cache)
+                if normalized:
+                    normalized_tags.add(normalized)
+            buckets[key] = cleaned
+
+        return normalized_tags, buckets
+
+    def _post_rejected_by_filter(
+        self,
+        post: Optional[Dict[str, object]],
+        *,
+        filter_ctx: Optional[Dict[str, object]],
+        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool],
+        base_colors: Tuple[Set[str], Set[str]],
+        allowed_subjects: Set[str],
+        cache: Dict[str, str],
+        favorites_guard: Set[str],
+    ) -> Tuple[bool, Optional[Dict[str, object]]]:
+        (
+            remove_artist,
+            remove_character,
+            remove_clothing,
+            remove_text,
+            restrict_subject,
+            remove_furry,
+            remove_headwear,
+            preserve_hair_eye,
+            remove_series,
+        ) = toggles
+        base_hair, base_eye = base_colors
+        _, buckets = self._normalize_post_tags(post, cache)
+        primary_subject: Optional[str] = None
+
+        for bucket_name, tags in buckets.items():
+            for raw_tag in tags:
+                normalized_tag = self._normalize_cached(raw_tag, cache)
+                if normalized_tag and normalized_tag in favorites_guard:
+                    continue
+                canonical_tag = normalized_tag or self._canonicalize_raw_tag(raw_tag)
+                canonical_tag = canonical_tag or ''
+                reason_base = {
+                    'tag': raw_tag,
+                    'norm': normalized_tag,
+                    'bucket': bucket_name,
+                }
+
+                if remove_artist and (
+                    bucket_name == 'artist_tags'
+                    or (normalized_tag and (normalized_tag.endswith(' artist') or ' drawn by' in normalized_tag))
+                ):
+                    return True, {**reason_base, 'rule': 'artist'}
+
+                if remove_character and (
+                    bucket_name == 'character_tags'
+                    or ('(' in raw_tag and ')' in raw_tag and not raw_tag.strip().startswith('('))
+                    or (normalized_tag and (
+                        normalized_tag.endswith(' character')
+                        or normalized_tag.endswith(' characters')
+                        or normalized_tag.endswith(' series')
+                        or normalized_tag.endswith(' franchise')
+                    ))
+                ):
+                    return True, {**reason_base, 'rule': 'character'}
+
+                if remove_series and (
+                    bucket_name == 'copyright_tags'
+                    or self._is_series_tag(raw_tag)
+                ):
+                    return True, {**reason_base, 'rule': 'series'}
+
+                if remove_clothing and self._is_clothing_tag(raw_tag):
+                    return True, {**reason_base, 'rule': 'clothing'}
+
+                if remove_text and self._is_textual_tag(raw_tag):
+                    return True, {**reason_base, 'rule': 'text'}
+
+                if remove_furry and self._is_furry_tag(raw_tag):
+                    return True, {**reason_base, 'rule': 'furry'}
+
+                if remove_headwear and self._is_headwear_tag(raw_tag):
+                    return True, {**reason_base, 'rule': 'headwear'}
+
+                if preserve_hair_eye:
+                    if base_hair and self._is_hair_color_tag(raw_tag) and canonical_tag not in base_hair:
+                        return True, {**reason_base, 'rule': 'hair-color-conflict'}
+                    if base_eye and self._is_eye_color_tag(raw_tag) and canonical_tag not in base_eye:
+                        return True, {**reason_base, 'rule': 'eye-color-conflict'}
+
+                if restrict_subject and self._is_subject_tag(raw_tag):
+                    subject_norm = normalized_tag or canonical_tag
+                    if allowed_subjects:
+                        if subject_norm not in allowed_subjects:
+                            return True, {**reason_base, 'rule': 'subject-not-allowed'}
+                    else:
+                        if primary_subject is None:
+                            primary_subject = subject_norm
+                        elif subject_norm != primary_subject:
+                            return True, {**reason_base, 'rule': 'multiple-subjects'}
+
+                if filter_ctx and normalized_tag and self._tag_matches_removal(normalized_tag, filter_ctx):
+                    return True, {**reason_base, 'rule': 'removal-list'}
+
+        return False, None
+
+    def _apply_strict_img2img_prefilter(
+        self,
+        posts: List[Dict[str, object]],
+        *,
+        api: Booru,
+        tags_query: str,
+        post_id: Optional[str],
+        num_images_needed: int,
+        max_pages: int,
+        filter_ctx: Optional[Dict[str, object]],
+        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool],
+        base_colors: Tuple[Set[str], Set[str]],
+        allowed_subjects: Set[str],
+    ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], bool, bool]:
+        if not posts:
+            return [], [], False, False
+
+        if not getattr(self, '_strict_img2img_fetch', True):
+            return list(posts), [], False, False
+
+        cache = getattr(self, '_tag_normal_cache', {})
+        if not isinstance(cache, dict):
+            cache = {}
+            self._tag_normal_cache = cache
+
+        favorites_guard: Set[str] = set()
+        if filter_ctx:
+            favorites_guard = set(filter_ctx.get('favorites', frozenset()))  # type: ignore[arg-type]
+
+        hair_colors, eye_colors = base_colors
+        base_colors = (set(hair_colors or []), set(eye_colors or []))
+        allowed_subjects = set(allowed_subjects or [])
+
+        kept: List[Dict[str, object]] = []
+        rejections: List[Dict[str, object]] = []
+        seen_keys: Set[Tuple[Optional[str], Optional[str], Optional[str]]] = set()
+
+        def _post_key(entry: Dict[str, object]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+            return (
+                str(entry.get('booru_name')).lower() if entry.get('booru_name') else None,
+                entry.get('id'),
+                entry.get('file_url'),
+            )
+
+        original_posts = list(posts)
+
+        for post in original_posts:
+            key = _post_key(post)
+            seen_keys.add(key)
+            rejected, reason = self._post_rejected_by_filter(
+                post,
+                filter_ctx=filter_ctx,
+                toggles=toggles,
+                base_colors=base_colors,
+                allowed_subjects=allowed_subjects,
+                cache=cache,
+                favorites_guard=favorites_guard,
+            )
+            if rejected:
+                reason_entry = {
+                    'post_id': post.get('id'),
+                    'booru': post.get('booru_name'),
+                    'matched_tag': reason.get('tag') if reason else None,
+                    'normalized_tag': reason.get('norm') if reason else None,
+                    'rule_type': reason.get('rule') if reason else None,
+                    'bucket': reason.get('bucket') if reason else None,
+                }
+                rejections.append(reason_entry)
+            else:
+                kept.append(post)
+
+        if len(kept) >= num_images_needed or post_id:
+            return kept, rejections, True, False
+
+        relaxed = False
+        rounds = max(0, int(STRICT_IMG2IMG_EXTRA_ROUNDS))
+        for round_index in range(rounds):
+            try:
+                extra_posts = api.get_posts(tags_query=tags_query, max_pages=max_pages, post_id=None)
+            except Exception as exc:
+                print(f"[R Strict] Warn: extra fetch round {round_index + 1} failed: {exc}")
+                break
+            if not extra_posts:
+                continue
+            for post in extra_posts:
+                key = _post_key(post)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                rejected, reason = self._post_rejected_by_filter(
+                    post,
+                    filter_ctx=filter_ctx,
+                    toggles=toggles,
+                    base_colors=base_colors,
+                    allowed_subjects=allowed_subjects,
+                    cache=cache,
+                    favorites_guard=favorites_guard,
+                )
+                if rejected:
+                    reason_entry = {
+                        'post_id': post.get('id'),
+                        'booru': post.get('booru_name'),
+                        'matched_tag': reason.get('tag') if reason else None,
+                        'normalized_tag': reason.get('norm') if reason else None,
+                        'rule_type': reason.get('rule') if reason else None,
+                        'bucket': reason.get('bucket') if reason else None,
+                        'extra_round': round_index + 1,
+                    }
+                    rejections.append(reason_entry)
+                    continue
+                kept.append(post)
+                if len(kept) >= num_images_needed:
+                    break
+            if len(kept) >= num_images_needed:
+                break
+
+        if len(kept) < num_images_needed:
+            print("[R Strict] Img2Img strict pre-filter exhausted candidates; relaxing to prompt-level filtering")
+            relaxed = True
+            kept = list(original_posts)
+
+        return kept, rejections, True, relaxed
 
     def _log_generation_reference(self, p):
         if not getattr(self, '_log_prompt_sources', False):
@@ -776,6 +1786,24 @@ class Script(scripts.Script):
                     if post and post.get('id') is not None:
                         log_file.write(f"post_id={post.get('id')}\n")
                     log_file.write('\n')
+            try:
+                json_payload = {
+                    'timestamp': datetime.now().isoformat(),
+                    'booru': booru,
+                    'mode': 'img2img' if bool(getattr(self, '_post_use_img2img', False)) else 'txt2img',
+                    'strict_fetch_enabled': bool(getattr(self, '_strict_img2img_fetch', False)),
+                    'strict_prefilter_active': bool(getattr(self, '_strict_img2img_active', False)),
+                    'strict_prefilter_relaxed': bool(getattr(self, '_strict_img2img_relaxed', False)),
+                    'strict_rejections': list(getattr(self, '_strict_img2img_rejections', [])),
+                    'kept_post_ids': [post.get('id') for post in posts if isinstance(post, dict)],
+                    'prompts': prompts,
+                    'negative_prompt': negative_prompt if isinstance(negative_prompt, str) else None,
+                    'reuse_cached': bool(getattr(self, '_reuse_cached_posts', False)),
+                }
+                with open(PROMPT_LOG_JSONL, 'a', encoding='utf-8') as jsonl_file:
+                    jsonl_file.write(json.dumps(json_payload, ensure_ascii=False) + '\n')
+            except Exception as exc:
+                print(f"[R Log] Failed to append JSONL prompt record: {exc}")
             self._posts_used_for_generation = []
             self._final_prompts_snapshot = []
             self._final_negative_prompts_snapshot = []
@@ -894,18 +1922,128 @@ class Script(scripts.Script):
             booru_list = ["gelbooru", "danbooru", "xbooru", "rule34", "safebooru", "konachan", 'yande.re', 'aibooru', 'e621']
             if has_scatbooru_access():
                 booru_list.insert(2, "scatbooru")
-            booru = gr.Dropdown(booru_list, label="Booru", value="gelbooru")
+            booru = gr.Dropdown(booru_list, label="Booru", value="danbooru")
+            with gr.Group(visible=False) as gelbooru_credentials_group:
+                gelbooru_api_key = gr.Textbox(label="Gelbooru API Key", type="password", placeholder="Enter your Gelbooru API key")
+                gelbooru_user_id = gr.Textbox(label="Gelbooru User ID", placeholder="Enter your Gelbooru user ID")
+                gelbooru_save_button = gr.Button("Save Credentials to Disk", variant="primary")
+            gelbooru_saved_message = gr.Markdown("", visible=False)
+            gelbooru_clear_button = gr.Button("Clear Saved Credentials", visible=False)
             max_pages = gr.Slider(label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1)
             gr.Markdown("""## Post"""); post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
             gr.Markdown("""## Tags"""); tags = gr.Textbox(lines=1, label="Tags to Search (Pre)"); remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
             mature_rating = gr.Radio(list(RATINGS.get('gelbooru', RATING_TYPES['none'])), label="Mature Rating", value="All")
-            remove_bad_tags = gr.Checkbox(label="Remove common 'bad' tags", value=True)
-            gr.Markdown("**Note:** Tag removal is not perfect and is a work in progress.")
-            remove_artist_tags = gr.Checkbox(label="Remove Artist tags from prompt", value=False)
-            remove_character_tags = gr.Checkbox(label="Remove Character tags from prompt", value=False)
-            remove_clothing_tags = gr.Checkbox(label="Remove clothing tags from prompt", value=False)
-            remove_text_tags = gr.Checkbox(label="Remove tag/text/commentary metadata from prompt", value=True)
-            restrict_subject_tags = gr.Checkbox(label="Keep only subject tags from base prompt", value=False, info="Prevents extra subject counts (e.g., 2girls) from being added when you specify 1girl/solo.")
+            with gr.Accordion("Removal Filters", open=False):
+                beta_filter_toggle = gr.Checkbox(
+                    label="Beta: New Tag Filtering",
+                    value=True,
+                    info="Enable the normalized removal engine with personal lists and favorites guard. Disable to fall back to legacy behavior."
+                )
+                gr.Markdown("**Quick Presets** — apply common filter combinations with one click.")
+                with gr.Row():
+                    preset_strip_series = gr.Button("Strip Series/Character")
+                    preset_remove_text = gr.Button("Remove Text-like Tags")
+                    preset_preserve_colors = gr.Button("Preserve Base Colors")
+                with gr.Group():
+                    gr.Markdown("**Text & Metadata**")
+                    remove_bad_tags = gr.Checkbox(
+                        label="Remove common 'bad' tags",
+                        value=True,
+                        info="Cull frequent watermark, commentary, and UI text tags from prompts."
+                    )
+                    remove_text_tags = gr.Checkbox(
+                        label="Remove tag/text/commentary metadata",
+                        value=True,
+                        info="Strip speech bubbles, watermark text, and similar metadata from fetched prompts."
+                    )
+                with gr.Group():
+                    gr.Markdown("**Characters & Series**")
+                    remove_artist_tags = gr.Checkbox(
+                        label="Remove artist tags",
+                        value=False,
+                        info="Drop artist credits drawn from the source post."
+                    )
+                    remove_character_tags = gr.Checkbox(
+                        label="Remove character tags",
+                        value=False,
+                        info="Filter character/franchise tags sourced from metadata."
+                    )
+                    remove_series_tags = gr.Checkbox(
+                        label="Remove series / franchise tags",
+                        value=False,
+                        info="Ignore franchise/game/anime tags to keep prompts generic."
+                    )
+                with gr.Group():
+                    gr.Markdown("**Clothing & Accessories**")
+                    remove_clothing_tags = gr.Checkbox(
+                        label="Remove clothing tags",
+                        value=False,
+                        info="Omit apparel/accessory tags introduced by the booru."
+                    )
+                with gr.Group():
+                    gr.Markdown("**Furry & Headwear**")
+                    remove_furry_tags = gr.Checkbox(
+                        label="Filter furry/pokémon tags",
+                        value=False,
+                        info="Remove furry, pokémon, and animal trait tags."
+                    )
+                    remove_headwear_tags = gr.Checkbox(
+                        label="Filter headwear / halo tags",
+                        value=False,
+                        info="Strip hats, halos, and similar head accessories."
+                    )
+                with gr.Group():
+                    gr.Markdown("**Colors & Traits**")
+                    preserve_hair_eye_colors = gr.Checkbox(
+                        label="Preserve base hair & eye colors",
+                        value=False,
+                        info="Keep your prompt's hair/eye colors while removing conflicting imports."
+                    )
+                with gr.Group():
+                    gr.Markdown("**Subject Constraints**")
+                    restrict_subject_tags = gr.Checkbox(
+                        label="Keep only subject counts",
+                        value=False,
+                        info="Maintain your subject count (e.g., solo/1girl) by removing mismatched tags."
+                    )
+            personal_choices = self._read_list_file(PERSONAL_REMOVE_FILE)
+            favorite_choices = self._read_list_file(FAVORITES_FILE)
+            with gr.Accordion("Personal Lists", open=False):
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("**Personal Removal List**")
+                        personal_remove_dropdown = gr.Dropdown(
+                            choices=personal_choices,
+                            value=personal_choices,
+                            multiselect=True,
+                            label="Removal Tags",
+                            allow_custom_value=False
+                        )
+                        personal_remove_input = gr.Textbox(label="Add tags", placeholder="comma or newline separated")
+                        with gr.Row():
+                            personal_add_btn = gr.Button("Add", variant="primary")
+                            personal_remove_btn = gr.Button("Remove Selected")
+                            personal_dedupe_btn = gr.Button("De-duplicate")
+                        with gr.Row():
+                            personal_import_file = gr.File(label="Import CSV/TXT", file_types=['.txt', '.csv'], visible=True)
+                            personal_export_btn = gr.DownloadButton("Export", file_name="personal_remove.txt")
+                    with gr.Column():
+                        gr.Markdown("**Favorites List**")
+                        favorites_dropdown = gr.Dropdown(
+                            choices=favorite_choices,
+                            value=favorite_choices,
+                            multiselect=True,
+                            label="Favorite Tags",
+                            allow_custom_value=False
+                        )
+                        favorites_input = gr.Textbox(label="Add favorites", placeholder="comma or newline separated")
+                        with gr.Row():
+                            favorites_add_btn = gr.Button("Add", variant="primary")
+                            favorites_remove_btn = gr.Button("Remove Selected")
+                            favorites_dedupe_btn = gr.Button("De-duplicate")
+                        with gr.Row():
+                            favorites_import_file = gr.File(label="Import CSV/TXT", file_types=['.txt', '.csv'], visible=True)
+                            favorites_export_btn = gr.DownloadButton("Export", file_name="favorites.txt")
             shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
             change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
             same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
@@ -916,6 +2054,24 @@ class Script(scripts.Script):
             sorting_order = gr.Radio(["Random", "Score Descending", "Score Ascending"], label="Sort Order (tag search)", value="Random")
             booru.change(get_available_ratings, booru, mature_rating)
             booru.change(show_fringe_benefits, booru, fringe_benefits)
+            booru.change(
+                self._update_gelbooru_ui_visibility,
+                inputs=[booru],
+                outputs=[gelbooru_credentials_group, gelbooru_saved_message, gelbooru_clear_button, gelbooru_api_key, gelbooru_user_id],
+                queue=False,
+            )
+            gelbooru_save_button.click(
+                fn=self._ui_save_gelbooru_credentials,
+                inputs=[gelbooru_api_key, gelbooru_user_id],
+                outputs=[gelbooru_saved_message, gelbooru_credentials_group, gelbooru_clear_button, gelbooru_api_key, gelbooru_user_id],
+                queue=False,
+            )
+            gelbooru_clear_button.click(
+                fn=self._ui_clear_gelbooru_credentials,
+                inputs=[],
+                outputs=[gelbooru_saved_message, gelbooru_credentials_group, gelbooru_clear_button, gelbooru_api_key, gelbooru_user_id],
+                queue=False,
+            )
 
             gr.Markdown("""\n---\n""")
             with gr.Group():
@@ -952,7 +2108,45 @@ class Script(scripts.Script):
             with gr.Box(): lora_min = gr.Slider(value=0.6, label="Min LoRAs Weight", minimum=-1.0, maximum=1.5, step=0.1); lora_max = gr.Slider(value=1.0, label="Max LoRAs Weight", minimum=-1.0, maximum=1.5, step=0.1); lora_custom_weights = gr.Textbox(lines=1, label="Custom Weights (optional)", placeholder="e.g., 0.8, 0.5, 1.0")
         search_refresh_btn.click(fn=self.refresh_ser, inputs=[], outputs=[choose_search_txt])
         remove_refresh_btn.click(fn=self.refresh_rem, inputs=[], outputs=[choose_remove_txt])
-        return [enabled, tags, booru, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags]
+        personal_add_btn.click(fn=self._ui_add_personal_tags, inputs=[personal_remove_input, personal_remove_dropdown], outputs=[personal_remove_dropdown, personal_remove_input], queue=False)
+        personal_remove_btn.click(fn=self._ui_remove_personal_tags, inputs=[personal_remove_dropdown], outputs=[personal_remove_dropdown], queue=False)
+        personal_dedupe_btn.click(fn=self._ui_dedupe_personal_list, inputs=[], outputs=[personal_remove_dropdown], queue=False)
+        personal_import_file.upload(fn=self._ui_import_personal_list, inputs=[personal_import_file], outputs=[personal_remove_dropdown, personal_import_file], queue=False)
+        personal_export_btn.click(fn=self._ui_export_personal_list, inputs=[], outputs=None, queue=False)
+
+        favorites_add_btn.click(fn=self._ui_add_favorite_tags, inputs=[favorites_input, favorites_dropdown], outputs=[favorites_dropdown, favorites_input], queue=False)
+        favorites_remove_btn.click(fn=self._ui_remove_favorite_tags, inputs=[favorites_dropdown], outputs=[favorites_dropdown], queue=False)
+        favorites_dedupe_btn.click(fn=self._ui_dedupe_favorite_list, inputs=[], outputs=[favorites_dropdown], queue=False)
+        favorites_import_file.upload(fn=self._ui_import_favorite_list, inputs=[favorites_import_file], outputs=[favorites_dropdown, favorites_import_file], queue=False)
+        favorites_export_btn.click(fn=self._ui_export_favorite_list, inputs=[], outputs=None, queue=False)
+
+        preset_strip_series.click(
+            fn=lambda: (
+                gr.Checkbox.update(value=True),
+                gr.Checkbox.update(value=True),
+                gr.Checkbox.update(value=True)
+            ),
+            inputs=[],
+            outputs=[remove_series_tags, remove_character_tags, remove_artist_tags],
+            queue=False
+        )
+        preset_remove_text.click(
+            fn=lambda: (
+                gr.Checkbox.update(value=True),
+                gr.Checkbox.update(value=True)
+            ),
+            inputs=[],
+            outputs=[remove_text_tags, remove_bad_tags],
+            queue=False
+        )
+        preset_preserve_colors.click(
+            fn=lambda: gr.Checkbox.update(value=True),
+            inputs=[],
+            outputs=[preserve_hair_eye_colors],
+            queue=False
+        )
+
+        return [enabled, tags, booru, gelbooru_api_key, gelbooru_user_id, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags, remove_furry_tags, remove_headwear_tags, preserve_hair_eye_colors, remove_series_tags, beta_filter_toggle]
 
     def check_orientation(self, img):
         if img is None:
@@ -1075,9 +2269,9 @@ class Script(scripts.Script):
                 print(f"[R] Warn: Read search file failed {search_file}: {e}")
         return search_tags, bad_tags, initial_additions_str
 
-    def _get_booru_api(self, booru_name, fringe_benefits):
+    def _get_booru_api(self, booru_name, fringe_benefits, gelbooru_credentials: Optional[Dict[str, str]] = None):
         booru_apis = {
-            'gelbooru': Gelbooru(fringe_benefits),
+            'gelbooru': Gelbooru(fringe_benefits, gelbooru_credentials),
             'danbooru': Danbooru(),
             'xbooru': XBooru(),
             'rule34': Rule34(),
@@ -1112,7 +2306,7 @@ class Script(scripts.Script):
             all_posts = api.get_posts(tags_query=tags_query, max_pages=max_pages, post_id=post_id)
             if not all_posts:
                 raise ValueError("No valid posts found matching criteria after fetching.")
-            return all_posts
+            return all_posts, tags_query
         except BooruError as e:
             print(f"[R] Error fetching from {api.booru_name}: {e}")
             raise
@@ -1162,7 +2356,7 @@ class Script(scripts.Script):
                 return []
             image_urls = [first_valid_url] * len(posts_to_fetch)
         try:
-            api = self._get_booru_api(booru_name, fringe_benefits)
+            api = self._get_booru_api(booru_name, fringe_benefits, getattr(self, '_gelbooru_effective_credentials', None))
         except ValueError as e:
             print(f"[R] Error getting API for image fetch: {e}")
             return []
@@ -1194,24 +2388,22 @@ class Script(scripts.Script):
             print("[R] Warn: Some images failed.")
         return fetched_images
 
-    def _process_single_prompt(self, index, raw_prompt, base_positive, base_negative, initial_additions, bad_tags, settings):
-        (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags) = settings
+    def _process_single_prompt(self, index, raw_prompt, base_positive, base_negative, initial_additions, settings):
+        (
+            shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash,
+            use_deepbooru, type_deepbooru, remove_artist_tags, remove_character_tags,
+            remove_clothing_tags, remove_text_tags, restrict_subject_tags,
+            remove_furry_tags, remove_headwear_tags, preserve_hair_eye_colors, remove_series_tags
+        ) = settings
         current_prompt = f"{initial_additions},{raw_prompt}" if initial_additions else raw_prompt
-        prompt_tags = [tag.strip() for tag in re.split(r'[,\t\s]+', current_prompt) if tag.strip()]
+        prompt_tags = [tag.strip() for tag in re.split(r'[\,\t\s]+', current_prompt) if tag.strip()]
+        base_hair_colors = set(getattr(self, '_base_hair_color_tags', set()) or [])
+        base_eye_colors = set(getattr(self, '_base_eye_color_tags', set()) or [])
         # If removal flags are set, remove tags coming from selected post's artist/character lists
         try:
             post_meta = self._selected_posts[index] if hasattr(self, '_selected_posts') and index < len(self._selected_posts) else {}
             artist_tags_meta = post_meta.get('artist_tags', []) if isinstance(post_meta, dict) else []
             character_tags_meta = post_meta.get('character_tags', []) if isinstance(post_meta, dict) else []
-            # Debug: show what tags we extracted from post metadata
-            # print(f"[R Debug] Remove flags: artist={remove_artist_tags}, character={remove_character_tags}")
-            if remove_artist_tags and artist_tags_meta:
-                pass
-                # print(f"[R Debug] Artist tags from post {index}: {artist_tags_meta}")
-            if remove_character_tags and character_tags_meta:
-                pass
-                # print(f"[R Debug] Character tags from post {index}: {character_tags_meta}")
-            # normalize tags for comparison (underscores/spaces, lower)
             norm = self._normalize_tag
             artist_norm = {norm(t) for t in artist_tags_meta if isinstance(t, str)}
             char_norm = {norm(t) for t in character_tags_meta if isinstance(t, str)}
@@ -1244,20 +2436,49 @@ class Script(scripts.Script):
                 allowed_subjects.update(self._extract_subject_tags(base_positive))
                 allowed_subjects.update(self._extract_subject_tags(initial_additions))
                 allowed_subjects.update(self._extract_subject_tags(getattr(self, 'original_prompt', '')))
+            use_new_filter = getattr(self, '_beta_filter_enabled', True)
+            filter_ctx = getattr(self, '_removal_context', None) if use_new_filter else None
+            favorites_guard: Set[str] = set()
+            if use_new_filter and filter_ctx:
+                favorites_guard = set(filter_ctx.get('favorites', frozenset()))  # type: ignore[arg-type]
+            norm_cache = getattr(self, '_tag_normal_cache', {})
+            if not isinstance(norm_cache, dict):
+                norm_cache = {}
+                self._tag_normal_cache = norm_cache
             filtered_prompt_tags = []
             primary_subject = None
             for t in prompt_tags:
-                t_norm = norm(t)
+                t_norm = self._normalize_cached(t, norm_cache)
+                canonical_tag = t_norm or self._canonicalize_raw_tag(t)
                 t_orig = (t or '').strip().lower()
+                is_favorite = bool(use_new_filter and t_norm and t_norm in favorites_guard)
+                if is_favorite:
+                    filtered_prompt_tags.append(t)
+                    continue
                 should_remove = False
-                if remove_artist_tags and (t_norm in artist_norm or t_orig in artist_norm or t_norm.endswith(' artist')):
+                if remove_artist_tags and (t_norm in artist_norm or t_orig in artist_norm or (t_norm and t_norm.endswith(' artist'))):
                     should_remove = True
-                elif remove_character_tags and (t_norm in char_norm or t_orig in char_norm or ('(' in t and ')' in t and not t.strip().startswith('(')) or t_norm.endswith(' series') or t_norm.endswith(' franchise')):
+                elif remove_character_tags and (t_norm in char_norm or t_orig in char_norm or ('(' in t and ')' in t and not t.strip().startswith('(')) or (t_norm and (t_norm.endswith(' series') or t_norm.endswith(' franchise')))):
                     should_remove = True
                 if not should_remove and remove_clothing_tags and self._is_clothing_tag(t):
                     should_remove = True
                 if not should_remove and remove_text_tags and self._is_textual_tag(t):
                     should_remove = True
+                if not should_remove and remove_furry_tags and self._is_furry_tag(t):
+                    should_remove = True
+                if not should_remove and remove_headwear_tags and self._is_headwear_tag(t):
+                    should_remove = True
+                if not should_remove and remove_series_tags and self._is_series_tag(t):
+                    should_remove = True
+                if not should_remove and preserve_hair_eye_colors:
+                    if base_hair_colors and canonical_tag in base_hair_colors:
+                        pass
+                    elif base_eye_colors and canonical_tag in base_eye_colors:
+                        pass
+                    elif base_hair_colors and self._is_hair_color_tag(t) and canonical_tag not in base_hair_colors:
+                        should_remove = True
+                    elif base_eye_colors and self._is_eye_color_tag(t) and canonical_tag not in base_eye_colors:
+                        should_remove = True
                 if not should_remove and restrict_subject_tags and self._is_subject_tag(t):
                     subject_norm = t_norm
                     if allowed_subjects:
@@ -1269,26 +2490,17 @@ class Script(scripts.Script):
                         elif subject_norm != primary_subject:
                             should_remove = True
                 if not should_remove:
+                    if use_new_filter and filter_ctx and t_norm:
+                        should_remove = self._tag_matches_removal(t_norm, filter_ctx)
+                    elif not use_new_filter:
+                        should_remove = self._legacy_tag_matches(t)
+                if not should_remove:
                     filtered_prompt_tags.append(t)
             prompt_tags = filtered_prompt_tags
         except Exception:
             # fallback: ignore removal if anything goes wrong
             pass
-        wildcard_bad = {pat.replace('*', ''): ('s' if pat.endswith('*') else ('e' if pat.startswith('*') else 'c')) for pat in bad_tags if '*' in pat}
-        non_wild_bad = bad_tags - set(wildcard_bad.keys()) if isinstance(bad_tags, set) else set(bad_tags) - set(wildcard_bad.keys())
-        filtered_tags = []
-        for tag in prompt_tags:
-            is_bad = tag in non_wild_bad
-            if not is_bad:
-                for pattern, mode in wildcard_bad.items():
-                    if not pattern:
-                        continue
-                    if (mode == 's' and tag.startswith(pattern)) or (mode == 'e' and tag.endswith(pattern)) or (mode == 'c' and pattern in tag):
-                        is_bad = True
-                        break
-            if not is_bad:
-                filtered_tags.append(tag)
-        current_prompt = ','.join(filtered_tags)
+        current_prompt = ','.join(prompt_tags)
         if shuffle_tags:
             tags_list = [t.strip() for t in current_prompt.split(',') if t.strip()]
             random.shuffle(tags_list)
@@ -1508,7 +2720,10 @@ class Script(scripts.Script):
             delattr(self, '_ranbooru_processing_complete')
         if hasattr(self, '_ranbooru_intermediate_results'):
             delattr(self, '_ranbooru_intermediate_results')
-        
+
+        if hasattr(self, '_native_adetailer_fallback_used'):
+            delattr(self, '_native_adetailer_fallback_used')
+
         # Clean up ADetailer state
         if hasattr(self, '_ranbooru_initial_pass'):
             self._ranbooru_initial_pass = False
@@ -1539,6 +2754,9 @@ class Script(scripts.Script):
             # ADetailer will be available for the next generation automatically
             delattr(self, '_removed_adetailer_scripts')
             
+        # Ensure any manual patches are removed once we're finished
+        self._unpatch_manual_adetailer_overrides()
+
         if not use_cache and hasattr(self, 'cache_installed_by_us') and self.cache_installed_by_us and requests_cache.patcher.is_installed():
             requests_cache.uninstall_cache()
             print("[R Post] Uninstalled cache.")
@@ -1711,7 +2929,7 @@ class Script(scripts.Script):
             self._current_processing_key = processing_key
 
             # Keep existing ordering stable for most outputs; new toggles are appended toward the end.
-            (enabled, tags, booru, remove_bad_tags_ui, max_pages, change_dash, same_prompt,
+            (enabled, tags, booru, gelbooru_api_key_ui, gelbooru_user_id_ui, remove_bad_tags_ui, max_pages, change_dash, same_prompt,
              fringe_benefits, remove_tags_ui, use_img2img, denoising, use_last_img,
              change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount,
              chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, sorting_order, mature_rating,
@@ -1719,7 +2937,8 @@ class Script(scripts.Script):
              lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt,
              choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn,
              crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources_ui,
-             remove_artist_tags_ui, remove_character_tags_ui, remove_clothing_tags_ui, remove_text_tags_ui, restrict_subject_tags_ui) = args
+             remove_artist_tags_ui, remove_character_tags_ui, remove_clothing_tags_ui, remove_text_tags_ui, restrict_subject_tags_ui,
+             remove_furry_tags_ui, remove_headwear_tags_ui, preserve_hair_eye_colors_ui, remove_series_tags_ui, beta_filter_toggle_ui) = args
         except Exception as e:
             print(f"[R Before] CRITICAL Error unpack args: {e}. Aborting.")
             traceback.print_exc()
@@ -1745,9 +2964,17 @@ class Script(scripts.Script):
         self._reuse_cached_posts = bool(reuse_cached_posts)
         self._adetailer_support_enabled = bool(enable_adetailer_support)
         self._post_adetailer_enabled = self._adetailer_support_enabled
+        prev_manual_state = getattr(self, '_manual_adetailer_prev_enabled', False)
+        self._handle_adetailer_toggle_change(prev_manual_state, self._adetailer_support_enabled, p)
+        self._manual_adetailer_prev_enabled = self._adetailer_support_enabled
         self._log_prompt_sources = bool(log_prompt_sources_ui)
+        self._beta_filter_enabled = bool(beta_filter_toggle_ui)
 
         self._current_booru_name = booru
+        if booru == 'gelbooru':
+            self._gelbooru_effective_credentials = self._resolve_gelbooru_credentials(gelbooru_api_key_ui, gelbooru_user_id_ui)
+        else:
+            self._gelbooru_effective_credentials = None
         if not self._reuse_cached_posts:
             self._last_post_urls = []
         self._posts_used_for_generation = []
@@ -1802,11 +3029,11 @@ class Script(scripts.Script):
                 setattr(self.__class__, '_ranbooru_global_processing', False)
             return
 
+        self._reset_script_runner_guards()
         if self._is_adetailer_enabled():
             print("[R Before] Resetting ADetailer blocking flags for new generation")
-            self._reset_script_runner_guards()
         else:
-            print("[R Before] Manual ADetailer support disabled - leaving ADetailer scripts untouched")
+            print("[R Before] Manual ADetailer support disabled - ensuring native ADetailer remains available")
 
         # Clear notification that extension is active
         print("[R Before] ⚠️  RanbooruX IS ENABLED AND RUNNING ⚠️")
@@ -1822,6 +3049,8 @@ class Script(scripts.Script):
             tags = tags.replace("!refresh", "").replace(",,", ",").strip(",")
             print(f"[R Before] Detected !refresh command - forcing new image fetch")
             print(f"[R Before] Original tags: '{original_tags}' -> Cleaned: '{tags}'")
+
+        personal_remove_tags, favorites_tags = self._load_personal_lists()
 
         current_search_key = f"{booru}_{tags}_{post_id}_{mature_rating}_{sorting_order}"
         if not reuse_cached_posts:
@@ -1842,6 +3071,9 @@ class Script(scripts.Script):
             self._cached_search_tags = ''
             self._cached_bad_tags = set()
             self._cached_initial_additions = ''
+            self._cached_strict_rejections = []
+            self._cached_strict_active = False
+            self._cached_strict_relaxed = False
 
         if should_fetch_new:
             if force_refresh:
@@ -1854,6 +3086,15 @@ class Script(scripts.Script):
                 print("[R Before] 💡 TIP: Add '!refresh' to your tags to force fetch new images")
         
         self.original_prompt = p.prompt if isinstance(p.prompt, str) else (p.prompt[0] if isinstance(p.prompt, list) and p.prompt else "")
+        base_hair_colors, base_eye_colors = self._extract_color_tags(self.original_prompt)
+        self._base_hair_color_tags = base_hair_colors
+        self._base_eye_color_tags = base_eye_colors
+        self._strict_img2img_active = False
+        self._strict_img2img_relaxed = False
+        self._strict_img2img_rejections = []
+        self._strict_initial_additions = ""
+        self._strict_allowed_subjects = set(self._extract_subject_tags(self.original_prompt))
+        base_subjects = set(self._strict_allowed_subjects)
         
         if not should_fetch_new:
             # Skip the fetching process but continue with cached images
@@ -1868,19 +3109,106 @@ class Script(scripts.Script):
             # Always calculate num_images_needed - needed for both new and cached images
             original_batch = getattr(self, 'original_batch_size', p.batch_size)
             num_images_needed = original_batch * p.n_iter
+            filter_ctx: Optional[Dict[str, object]] = None
             if should_fetch_new:
-                search_tags, bad_tags, initial_additions = self._prepare_tags(tags, remove_tags_ui, use_remove_txt, choose_remove_txt, change_background, change_color, use_search_txt, choose_search_txt, remove_bad_tags_ui)
-                api = self._get_booru_api(booru, fringe_benefits)
-                all_posts = self._fetch_booru_posts(api, search_tags, mature_rating, max_pages, post_id)
-                selected_posts = self._select_posts(all_posts, sorting_order, num_images_needed, post_id, same_prompt)
-                
+                search_tags, bad_tags, initial_additions = self._prepare_tags(
+                    tags,
+                    remove_tags_ui,
+                    use_remove_txt,
+                    choose_remove_txt,
+                    change_background,
+                    change_color,
+                    use_search_txt,
+                    choose_search_txt,
+                    remove_bad_tags_ui,
+                )
+                bad_tags = set(bad_tags)
+                bad_tags.update(personal_remove_tags)
+                self._strict_initial_additions = initial_additions
+
+                allowed_subjects = set()
+                if bool(restrict_subject_tags_ui):
+                    allowed_subjects = set(base_subjects)
+                    allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                    self._strict_allowed_subjects = set(allowed_subjects)
+                else:
+                    self._strict_allowed_subjects = set()
+
+                filter_ctx = self._build_removal_context(bad_tags, favorites_tags)
+                self._removal_context = filter_ctx
+
+                toggles_tuple = (
+                    bool(remove_artist_tags_ui),
+                    bool(remove_character_tags_ui),
+                    bool(remove_clothing_tags_ui),
+                    bool(remove_text_tags_ui),
+                    bool(restrict_subject_tags_ui),
+                    bool(remove_furry_tags_ui),
+                    bool(remove_headwear_tags_ui),
+                    bool(preserve_hair_eye_colors_ui),
+                    bool(remove_series_tags_ui),
+                )
+                base_colors_tuple = (set(base_hair_colors), set(base_eye_colors))
+
+                api = self._get_booru_api(booru, fringe_benefits, getattr(self, '_gelbooru_effective_credentials', None))
+                all_posts, tags_query = self._fetch_booru_posts(api, search_tags, mature_rating, max_pages, post_id)
+
+                filtered_posts = list(all_posts)
+                strict_rejections: List[Dict[str, object]] = []
+                strict_active = False
+                strict_relaxed = False
+
+                strict_enabled_for_run = bool(use_img2img and not post_id)
+
+                if strict_enabled_for_run:
+                    filtered_posts, strict_rejections, strict_active, strict_relaxed = self._apply_strict_img2img_prefilter(
+                        list(all_posts),
+                        api=api,
+                        tags_query=tags_query,
+                        post_id=post_id,
+                        num_images_needed=num_images_needed,
+                        max_pages=max_pages,
+                        filter_ctx=filter_ctx,
+                        toggles=toggles_tuple,
+                        base_colors=base_colors_tuple,
+                        allowed_subjects=allowed_subjects,
+                    )
+                    self._strict_img2img_active = strict_active
+                    self._strict_img2img_relaxed = strict_relaxed
+                    self._strict_img2img_rejections = list(strict_rejections)
+                    self._last_rejections = list(self._strict_img2img_rejections)
+                    if strict_active:
+                        if strict_rejections:
+                            print(f"[R Strict] Img2Img strict pre-filter rejected {len(strict_rejections)} candidate(s) before download")
+                            preview = strict_rejections[:STRICT_IMG2IMG_LOG_SAMPLE]
+                            for entry in preview:
+                                print(
+                                    f"[R Strict] • {entry.get('booru')} post {entry.get('post_id')} rejected by {entry.get('rule_type')} (tag: {entry.get('matched_tag')})"
+                                )
+                            if len(strict_rejections) > STRICT_IMG2IMG_LOG_SAMPLE:
+                                print(f"[R Strict] • ... {len(strict_rejections) - STRICT_IMG2IMG_LOG_SAMPLE} more")
+                        print(
+                            f"[R Strict] {len(filtered_posts)} candidate(s) available after strict filtering (need {num_images_needed})"
+                        )
+                else:
+                    self._strict_img2img_active = False
+                    self._strict_img2img_relaxed = False
+                    self._strict_img2img_rejections = []
+                    self._last_rejections = []
+
+                all_posts = filtered_posts
+                selected_posts = self._select_posts(filtered_posts, sorting_order, num_images_needed, post_id, same_prompt)
+
                 # Cache the results for future use
                 self._cached_posts = selected_posts
                 self._last_search_key = current_search_key
                 self._cached_search_tags = search_tags
-                self._cached_bad_tags = bad_tags
+                self._cached_bad_tags = set(bad_tags)
                 self._cached_initial_additions = initial_additions
-                
+                self._cached_strict_rejections = list(self._strict_img2img_rejections)
+                self._cached_strict_active = self._strict_img2img_active
+                self._cached_strict_relaxed = self._strict_img2img_relaxed
+
                 post_urls = []
                 try:
                     for idx, post in enumerate(selected_posts):
@@ -1897,8 +3225,34 @@ class Script(scripts.Script):
             else:
                 # Use cached values
                 search_tags = getattr(self, '_cached_search_tags', '')
-                bad_tags = getattr(self, '_cached_bad_tags', set())
+                bad_tags = set(getattr(self, '_cached_bad_tags', set()))
+                bad_tags.update(personal_remove_tags)
                 initial_additions = getattr(self, '_cached_initial_additions', '')
+                self._cached_bad_tags = set(bad_tags)
+                self._strict_initial_additions = initial_additions
+                all_posts = list(getattr(self, '_cached_posts', []))
+
+                if bool(restrict_subject_tags_ui):
+                    allowed_subjects = set(base_subjects)
+                    allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                    self._strict_allowed_subjects = set(allowed_subjects)
+                else:
+                    self._strict_allowed_subjects = set()
+
+                filter_ctx = getattr(self, '_removal_context', None)
+                if filter_ctx is None:
+                    filter_ctx = self._build_removal_context(bad_tags, favorites_tags)
+                self._strict_img2img_active = bool(getattr(self, '_cached_strict_active', False))
+                self._strict_img2img_relaxed = bool(getattr(self, '_cached_strict_relaxed', False))
+                cached_rejections = getattr(self, '_cached_strict_rejections', [])
+                self._strict_img2img_rejections = list(cached_rejections) if cached_rejections else []
+                self._last_rejections = list(self._strict_img2img_rejections)
+
+            self._build_legacy_bad_index(bad_tags)
+            if filter_ctx is None:
+                filter_ctx = self._build_removal_context(bad_tags, favorites_tags)
+            self._removal_context = filter_ctx
+            self._tag_normal_cache = {}
             
             # persist selected posts and removal flags so prompt processing can access them
             self._selected_posts = selected_posts
@@ -1907,13 +3261,23 @@ class Script(scripts.Script):
             self._remove_clothing_tags = bool(remove_clothing_tags_ui)
             self._remove_text_tags = bool(remove_text_tags_ui)
             self._restrict_subject_tags = bool(restrict_subject_tags_ui)
+            self._remove_furry_tags = bool(remove_furry_tags_ui)
+            self._remove_headwear_tags = bool(remove_headwear_tags_ui)
+            self._preserve_hair_eye_colors = bool(preserve_hair_eye_colors_ui)
+            self._remove_series_tags = bool(remove_series_tags_ui)
 
             # Preview UI removed by request
 
             base_negative = getattr(p, 'negative_prompt', '') or ""
             final_prompts = []
             final_negative_prompts = [base_negative] * num_images_needed
-            prompt_processing_settings = (shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash, use_deepbooru, type_deepbooru, self._remove_artist_tags, self._remove_character_tags, self._remove_clothing_tags, self._remove_text_tags, self._restrict_subject_tags)
+            prompt_processing_settings = (
+                shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash,
+                use_deepbooru, type_deepbooru, self._remove_artist_tags, self._remove_character_tags,
+                self._remove_clothing_tags, self._remove_text_tags, self._restrict_subject_tags,
+                self._remove_furry_tags, self._remove_headwear_tags, self._preserve_hair_eye_colors,
+                self._remove_series_tags
+            )
             
             # Ensure we only use the number of posts that match the current generation request
             posts_to_use = selected_posts[:num_images_needed] if len(selected_posts) > num_images_needed else selected_posts
@@ -1953,7 +3317,7 @@ class Script(scripts.Script):
                 raw_prompts = mixed_prompts
 
             for i, rp in enumerate(raw_prompts):
-                processed_prompt, processed_negative = self._process_single_prompt(i, rp, self.original_prompt, base_negative, initial_additions, bad_tags, prompt_processing_settings)
+                processed_prompt, processed_negative = self._process_single_prompt(i, rp, self.original_prompt, base_negative, initial_additions, prompt_processing_settings)
                 final_prompts.append(processed_prompt)
                 final_negative_prompts[i] = processed_negative
 
@@ -2039,6 +3403,7 @@ class Script(scripts.Script):
 
     def _reset_adetailer_state_for_run(self, p):
         """Clear RanbooruX-managed ADetailer flags before a generation begins."""
+        self._unpatch_manual_adetailer_overrides()
         setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
         setattr(self.__class__, '_adetailer_global_guard_active', False)
         setattr(self.__class__, '_adetailer_pipeline_blocked', False)
@@ -2056,6 +3421,368 @@ class Script(scripts.Script):
                     delattr(p, attr)
                 except Exception:
                     setattr(p, attr, False)
+
+        # Ensure any global guard we installed is cleared before the next generation begins
+        try:
+            self._set_adetailer_block(False)
+        except Exception as exc:
+            print(f"[R Before] Warn: Could not clear ADetailer global guard: {exc}")
+
+        # If a previous manual run removed or disabled ADetailer scripts, restore them now so
+        # disabling the manual toggle returns control back to Forge's native behaviour.
+        restore_needed = (
+            hasattr(self, '_stored_adetailer_scripts') or
+            hasattr(self, 'disabled_adetailer_scripts') or
+            getattr(self.__class__, '_block_640x512_images', False)
+        )
+        if restore_needed:
+            try:
+                self._restore_early_adetailer_protection(p)
+            except Exception as exc:
+                print(f"[R Before] Warn: Failed to restore ADetailer pipeline state: {exc}")
+        if not getattr(self, '_adetailer_support_enabled', False):
+            try:
+                self._restore_native_adetailer_scripts(p)
+            except Exception as exc:
+                print(f"[R Before] Warn: Failed to restore native ADetailer state: {exc}")
+
+    def _restore_native_adetailer_scripts(self, p):
+        """Ensure native ADetailer scripts resume running when manual support is disabled."""
+        try:
+            needs_unpatch = any(
+                hasattr(self, attr)
+                for attr in ('_patched_processed_objects', '_patched_adetailer_modules', '_patched_conversion_modules')
+            )
+            if needs_unpatch:
+                self._unpatch_manual_adetailer_overrides()
+        except Exception as exc:
+            print(f"[R Before] Warn: Could not unpatch manual ADetailer overrides: {exc}")
+        try:
+            self._set_adetailer_block(False)
+        except Exception:
+            pass
+        setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
+        setattr(self.__class__, '_adetailer_global_guard_active', False)
+        try:
+            self._restore_early_adetailer_protection(p)
+        except Exception as exc:
+            print(f"[R Before] Warn: Could not restore ADetailer runner state: {exc}")
+        try:
+            self._reenable_adetailer_from_previous_generation()
+        except Exception as exc:
+            print(f"[R Before] Warn: Could not re-enable ADetailer scripts: {exc}")
+        try:
+            restored = self._force_enable_adetailer_scripts(p)
+        except Exception as exc:
+            print(f"[R Before] Warn: Could not force-enable ADetailer scripts: {exc}")
+            restored = 0
+        if restored:
+            print(f"[R Before] Restored {restored} native ADetailer script(s) after manual toggle was disabled")
+        if hasattr(self, 'disabled_adetailer_scripts'):
+            try:
+                delattr(self, 'disabled_adetailer_scripts')
+            except Exception:
+                pass
+        guard_present = False
+        try:
+            import modules.scripts as scripts_module
+            for runner_attr in ('scripts_txt2img', 'scripts_img2img'):
+                runner = getattr(scripts_module, runner_attr, None)
+                if runner and getattr(runner, '_ranbooru_guard_installed', False):
+                    guard_present = True
+                    break
+        except Exception:
+            guard_present = False
+        if guard_present:
+            try:
+                self._reset_script_runner_guards()
+            except Exception as exc:
+                print(f"[R Before] Warn: Could not reset script runner guards: {exc}")
+        self._ensure_native_adetailer_enable_flags(p)
+        if not self._native_adetailer_detected():
+            try:
+                import modules.scripts as scripts_module
+                if hasattr(scripts_module, 'reload_scripts'):
+                    print('[R Before] Reloading scripts to restore native ADetailer')
+                    scripts_module.reload_scripts()
+            except Exception as exc:
+                print(f"[R Before] Warn: Could not reload scripts for ADetailer: {exc}")
+
+    def _force_enable_adetailer_scripts(self, processing_obj=None):
+        """Return the count of ADetailer scripts restored to their original behaviour."""
+        try:
+            import modules.scripts as scripts_module
+        except Exception as exc:
+            print(f"[R Before] Warn: Could not access scripts module to restore ADetailer: {exc}")
+            return 0
+        runners = []
+        for runner_attr in ('scripts_txt2img', 'scripts_img2img'):
+            runner = getattr(scripts_module, runner_attr, None)
+            if runner:
+                runners.append(runner)
+        if processing_obj is not None and hasattr(processing_obj, 'scripts') and processing_obj.scripts not in runners:
+            runners.append(processing_obj.scripts)
+        seen_ids = set()
+        restored_count = 0
+        for runner in runners:
+            if runner is None:
+                continue
+            for list_attr in ('alwayson_scripts', 'scripts'):
+                script_list = getattr(runner, list_attr, None)
+                if not script_list:
+                    continue
+                for script in script_list:
+                    if not script:
+                        continue
+                    script_id = id(script)
+                    if script_id in seen_ids:
+                        continue
+                    seen_ids.add(script_id)
+                    if not self._is_adetailer_script(script):
+                        continue
+                    restored = False
+                    if hasattr(script, 'enabled') and script.enabled is False:
+                        script.enabled = True
+                        restored = True
+                    for method_name in ('postprocess', 'process', 'process_batch', 'before_process', 'after_process'):
+                        backup_name = f'_ranbooru_original_{method_name}'
+                        if hasattr(script, backup_name):
+                            try:
+                                setattr(script, method_name, getattr(script, backup_name))
+                            except Exception:
+                                pass
+                            try:
+                                delattr(script, backup_name)
+                            except Exception:
+                                pass
+                            restored = True
+                    for attr in ('_ranbooru_disabled_after_manual', '_ranbooru_disabled_source'):
+                        if hasattr(script, attr):
+                            try:
+                                delattr(script, attr)
+                            except Exception:
+                                pass
+                            restored = True
+                    if restored:
+                        restored_count += 1
+        if restored_count == 0:
+            try:
+                debug_entries = []
+                for runner in runners:
+                    if not runner:
+                        continue
+                    for list_attr in ('alwayson_scripts', 'scripts'):
+                        script_list = getattr(runner, list_attr, None)
+                        if not script_list:
+                            continue
+                        for script in script_list:
+                            if self._is_adetailer_script(script):
+                                debug_entries.append(f"{script.__class__.__name__}(enabled={getattr(script, 'enabled', 'n/a')})")
+                if debug_entries:
+                    print(f"[R Before] Native ADetailer scripts detected: {', '.join(debug_entries)}")
+            except Exception:
+                pass
+        return restored_count
+
+
+    def _ensure_native_adetailer_enable_flags(self, processing_obj):
+        if not getattr(self, '_adetailer_support_enabled', False):
+            return
+        try:
+            args = getattr(processing_obj, 'script_args', None)
+        except Exception as exc:
+            print(f"[R Before] Native ADetailer: unable to read script_args: {exc}")
+            return
+        if not isinstance(args, (list, tuple)) or not args:
+            print("[R Before] Native ADetailer: script_args empty or not list/tuple; skipping flag repair")
+            return
+        args_list = list(args)
+        runners = []
+        runner = getattr(processing_obj, 'scripts', None)
+        if runner is not None:
+            runners.append(runner)
+        try:
+            import modules.scripts as scripts_module
+            for attr in ('scripts_txt2img', 'scripts_img2img'):
+                global_runner = getattr(scripts_module, attr, None)
+                if global_runner is not None and global_runner not in runners:
+                    runners.append(global_runner)
+        except Exception as exc:
+            print(f"[R Before] Native ADetailer: could not gather global runners: {exc}")
+        candidates = []
+        for r in runners:
+            for list_attr in ('alwayson_scripts', 'scripts'):
+                script_list = getattr(r, list_attr, None)
+                if script_list:
+                    candidates.extend(script_list)
+        if not candidates:
+            print("[R Before] Native ADetailer: no script candidates found for flag repair")
+            return
+        changed = False
+        for script in candidates:
+            if not self._is_adetailer_script(script):
+                continue
+            extracted = self._extract_adetailer_script_args(script, processing_obj)
+            sanitized = list(extracted.get('args') or [])
+            meta = extracted.get('meta') or {}
+            start_idx = meta.get('slice_start')
+            end_idx = meta.get('slice_end')
+            if start_idx is None or end_idx is None:
+                continue
+            start_idx = max(0, min(len(args_list), start_idx))
+            end_idx = max(start_idx, min(len(args_list), end_idx))
+            if not sanitized or end_idx - start_idx != len(sanitized):
+                slice_view = args_list[start_idx:end_idx]
+            else:
+                slice_view = sanitized
+            print(f"[R Before] Native ADetailer candidate {script.__class__.__name__} enabled={getattr(script, 'enabled', 'n/a')} slice [{start_idx}:{end_idx}] -> {slice_view}")
+            if not sanitized:
+                continue
+            bool_index = 0
+            local_changed = False
+            for offset, val in enumerate(sanitized):
+                if isinstance(val, bool):
+                    if bool_index == 0 and val is False:
+                        sanitized[offset] = True
+                        local_changed = True
+                        print(f"[R Before] Set native ADetailer enable flag True at offset {offset}")
+                    elif bool_index == 1 and val is True:
+                        sanitized[offset] = False
+                        local_changed = True
+                        print(f"[R Before] Cleared native ADetailer skip flag at offset {offset}")
+                    bool_index += 1
+                elif isinstance(val, dict):
+                    if val.get('ad_tab_enable') is False and val.get('ad_model') not in (None, '', 'None'):
+                        val['ad_tab_enable'] = True
+                        local_changed = True
+                        print(f"[R Before] Enabled ad_tab_enable in dict at offset {offset}")
+            if local_changed:
+                if end_idx - start_idx == len(sanitized):
+                    args_list[start_idx:end_idx] = sanitized
+                    changed = True
+                    continue
+                # fallback if lengths mismatch
+                for offset, val in enumerate(sanitized):
+                    target_idx = start_idx + offset
+                    if target_idx < len(args_list):
+                        args_list[target_idx] = val
+                    else:
+                        args_list.append(val)
+                changed = True
+        if changed:
+            if isinstance(args, list):
+                processing_obj.script_args = args_list
+            else:
+                processing_obj.script_args = tuple(args_list)
+            print(f"[R Before] Native ADetailer flags updated: {args_list}")
+        else:
+            print("[R Before] Native ADetailer flags already enabled; no changes made")
+
+    def _force_native_adetailer_execution(self, p, processed):
+        if getattr(self, '_adetailer_support_enabled', False):
+            return False
+        if not self._native_adetailer_requested(p):
+            return False
+        try:
+            if getattr(self, '_native_adetailer_fallback_used', False):
+                return False
+            if not processed or not getattr(processed, 'images', None):
+                print('[R Before] Native fallback: processed has no images; skipping ADetailer run')
+                return False
+            image_list = [img for img in processed.images if img is not None]
+            if not image_list:
+                print('[R Before] Native fallback: no valid images available for ADetailer')
+                return False
+            if not self._native_adetailer_detected():
+                print('[R Before] Native fallback: no native ADetailer scripts detected; skipping fallback')
+                return False
+            print(f"[R Before] Native fallback: running manual ADetailer on {len(image_list)} txt2img result(s)")
+            self._prepare_processing_for_manual_adetailer(p, processed, image_list)
+            self._native_adetailer_fallback_used = True
+            original_support = getattr(self, '_adetailer_support_enabled', False)
+            original_post_support = getattr(self, '_post_adetailer_enabled', False)
+            original_prev_manual = getattr(self, '_manual_adetailer_prev_enabled', False)
+            try:
+                self._adetailer_support_enabled = True
+                self._post_adetailer_enabled = True
+                self._manual_adetailer_prev_enabled = True
+                ran = self._run_adetailer_on_img2img(p, processed, image_list)
+            finally:
+                self._adetailer_support_enabled = original_support
+                self._post_adetailer_enabled = original_post_support
+                self._manual_adetailer_prev_enabled = original_prev_manual
+            if ran:
+                print('[R Before] Native fallback: manual ADetailer execution complete')
+            else:
+                print('[R Before] Native fallback: manual ADetailer execution reported failure')
+            return bool(ran)
+        except Exception as exc:
+            print(f"[R Before] Native fallback: error running manual ADetailer: {exc}")
+            return False
+
+    def _native_adetailer_requested(self, processing_obj):
+        try:
+            args = getattr(processing_obj, 'script_args', None)
+        except Exception:
+            return False
+        if not isinstance(args, (list, tuple)) or not args:
+            return False
+        args_list = list(args)
+        runners = []
+        runner = getattr(processing_obj, 'scripts', None)
+        if runner is not None:
+            runners.append(runner)
+        try:
+            import modules.scripts as scripts_module
+            for attr in ('scripts_txt2img', 'scripts_img2img'):
+                global_runner = getattr(scripts_module, attr, None)
+                if global_runner is not None and global_runner not in runners:
+                    runners.append(global_runner)
+        except Exception:
+            pass
+        candidates = []
+        for r in runners:
+            for list_attr in ('alwayson_scripts', 'scripts'):
+                script_list = getattr(r, list_attr, None)
+                if script_list:
+                    candidates.extend(script_list)
+        for script in candidates:
+            if not self._is_adetailer_script(script):
+                continue
+            extracted = self._extract_adetailer_script_args(script, processing_obj)
+            sanitized = list(extracted.get('args') or [])
+            if sanitized and isinstance(sanitized[0], bool):
+                return sanitized[0]
+        # Fallback: try first bool in original args
+        for value in args_list:
+            if isinstance(value, bool):
+                return value
+        return False
+
+    def _native_adetailer_detected(self):
+        try:
+            import modules.scripts as scripts_module
+        except Exception:
+            return False
+        for runner_attr in ('scripts_txt2img', 'scripts_img2img'):
+            runner = getattr(scripts_module, runner_attr, None)
+            if not runner:
+                continue
+            for list_attr in ('alwayson_scripts', 'scripts'):
+                script_list = getattr(runner, list_attr, None)
+                if not script_list:
+                    continue
+                for script in script_list:
+                    if self._is_adetailer_script(script):
+                        return True
+        return False
+
+    def _handle_adetailer_toggle_change(self, previous_enabled, current_enabled, p):
+        if previous_enabled and not current_enabled:
+            try:
+                self._restore_native_adetailer_scripts(p)
+            except Exception as exc:
+                print(f"[R Before] Warn: Failed handling ADetailer toggle change: {exc}")
 
     def postprocess(self, p: StableDiffusionProcessing, processed, *args):
         try:
@@ -2092,6 +3819,12 @@ class Script(scripts.Script):
                 return
                 
             if not (getattr(self, 'run_img2img_pass', False) and hasattr(self, 'last_img') and self.last_img and use_img2img):
+                fallback_ran = False
+                if not use_adetailer and not getattr(self, '_adetailer_support_enabled', False):
+                    fallback_ran = self._force_native_adetailer_execution(p, processed)
+                if fallback_ran:
+                    self._cleanup_after_run(use_cache)
+                    return
                 print("[R Post] Img2Img conditions not met, skipping")
                 self._cleanup_after_run(use_cache)
                 return
@@ -2527,7 +4260,17 @@ class Script(scripts.Script):
             print("[R Post] 🎯 FINAL FIX: Patching ADetailer directly")
             
             # Method 1: Monkey patch common image access patterns
-            original_getattr = processed.__getattribute__
+            if hasattr(processed, '_ranbooru_original_getattribute'):
+                original_getattr = getattr(processed, '_ranbooru_original_getattribute')
+            else:
+                original_getattr = processed.__getattribute__
+                try:
+                    setattr(processed, '_ranbooru_original_getattribute', original_getattr)
+                    if not hasattr(self, '_patched_processed_objects'):
+                        self._patched_processed_objects = []
+                    self._patched_processed_objects.append(processed)
+                except Exception:
+                    pass
             
             def patched_getattr(name):
                 if name in ['images', 'image', 'imgs']:
@@ -2546,10 +4289,19 @@ class Script(scripts.Script):
                     module = sys.modules[module_name]
                     # Patch any image access methods we can find
                     if hasattr(module, 'get_images'):
-                        original_get_images = module.get_images
+                        if not hasattr(module, '_ranbooru_original_get_images'):
+                            try:
+                                setattr(module, '_ranbooru_original_get_images', module.get_images)
+                                if not hasattr(self, '_patched_adetailer_modules'):
+                                    self._patched_adetailer_modules = []
+                                self._patched_adetailer_modules.append((module, 'get_images'))
+                            except Exception:
+                                pass
+
                         def patched_get_images(*args, **kwargs):
                             print("[R Post] 🎯 Intercepted ADetailer.get_images() - returning img2img results")
                             return img2img_results
+
                         module.get_images = patched_get_images
                         print(f"[R Post] 🎯 Patched {module_name}.get_images()")
                 
@@ -3706,11 +5458,109 @@ class Script(scripts.Script):
                         return result
                     
                     module.pil2numpy = patched_pil2numpy
+                    try:
+                        if not hasattr(self, '_patched_conversion_modules'):
+                            self._patched_conversion_modules = []
+                        self._patched_conversion_modules.append((module, 'pil2numpy'))
+                    except Exception:
+                        pass
             
             print(f"[R Post] 🔧 PATCHED: {len(modules_to_patch)} modules to prevent numpy leaks to ADetailer")
             
         except Exception as e:
             print(f"[R Post] Error patching image conversion functions: {e}")
+
+    def _unpatch_manual_adetailer_overrides(self):
+        """Restore any monkey patches applied for manual ADetailer runs."""
+        try:
+            if hasattr(self, '_patched_processed_objects'):
+                for proc in list(self._patched_processed_objects):
+                    original = getattr(proc, '_ranbooru_original_getattribute', None)
+                    if original is not None:
+                        try:
+                            proc.__getattribute__ = original
+                        except Exception:
+                            pass
+                        try:
+                            delattr(proc, '_ranbooru_original_getattribute')
+                        except Exception:
+                            pass
+                delattr(self, '_patched_processed_objects')
+
+            if hasattr(self, '_patched_adetailer_modules'):
+                for module, attr_name in list(self._patched_adetailer_modules):
+                    attr_key = f'_ranbooru_original_{attr_name}'
+                    original = getattr(module, attr_key, None)
+                    if original is not None:
+                        try:
+                            setattr(module, attr_name, original)
+                        except Exception:
+                            pass
+                    if hasattr(module, attr_key):
+                        try:
+                            delattr(module, attr_key)
+                        except Exception:
+                            pass
+                delattr(self, '_patched_adetailer_modules')
+
+            if hasattr(self, '_patched_conversion_modules'):
+                for module, attr_name in list(self._patched_conversion_modules):
+                    attr_key = f'_ranbooru_original_{attr_name}'
+                    original = getattr(module, attr_key, None)
+                    if original is not None:
+                        try:
+                            setattr(module, attr_name, original)
+                        except Exception:
+                            pass
+                    if hasattr(module, attr_key):
+                        try:
+                            delattr(module, attr_key)
+                        except Exception:
+                            pass
+                delattr(self, '_patched_conversion_modules')
+
+            if hasattr(self.__class__, '_force_adetailer_images'):
+                try:
+                    delattr(self.__class__, '_force_adetailer_images')
+                except Exception:
+                    pass
+
+            # Restore ScriptRunner guards back to their original implementations
+            try:
+                import modules.scripts as _ranbooru_scripts_module  # type: ignore
+                for runner_attr in ('scripts_txt2img', 'scripts_img2img'):
+                    runner = getattr(_ranbooru_scripts_module, runner_attr, None)
+                    if not runner:
+                        continue
+                    original_post = getattr(runner, '_ranbooru_original_postprocess', None)
+                    if original_post is not None:
+                        try:
+                            runner.postprocess = original_post
+                        except Exception:
+                            pass
+                        try:
+                            delattr(runner, '_ranbooru_original_postprocess')
+                        except Exception:
+                            pass
+                    original_post_image = getattr(runner, '_ranbooru_original_postprocess_image', None)
+                    if original_post_image is not None:
+                        try:
+                            runner.postprocess_image = original_post_image
+                        except Exception:
+                            pass
+                        try:
+                            delattr(runner, '_ranbooru_original_postprocess_image')
+                        except Exception:
+                            pass
+                    if hasattr(runner, '_ranbooru_guard_installed'):
+                        try:
+                            delattr(runner, '_ranbooru_guard_installed')
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"[R Cleanup] Warn: Failed to unpatch manual ADetailer overrides: {exc}")
     
     def _construct_processed_fallback(self, processed, img2img_results, p):
         """Fallback method to construct Processed object"""

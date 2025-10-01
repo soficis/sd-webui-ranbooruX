@@ -29,7 +29,7 @@ See **[Comparison](docs/COMPARISON.md)** for a precise, side‑by‑side with th
 
 ## Quick start (noob‑friendly)
 
-1. Pick a **Booru** (e.g. `gelbooru`). If you choose Gelbooru, enter your API key and user ID when prompted—you can optionally save them for future sessions.  
+1. Pick a **Booru** (e.g. `danbooru`).  
 2. Click **Generate** to fetch tags and build a prompt.  
 3. (Optional) Enable **Use Image for Img2Img** and set **Denoising** for image‑to‑image.  
 4. (Optional) Toggle **Use Image for ControlNet (Unit 0)** to pass the same source image to ControlNet.  
@@ -40,7 +40,6 @@ You can stop here and it already works. The rest of the options are for finer co
 ## Features overview
 
 - **Booru Tagging** — Choose from: aibooru, danbooru, e621, gelbooru, konachan, rule34, safebooru, xbooru, yande.re
-- **Gelbooru credential manager** — Enter API key & user ID inline, optionally save them to `user/gelbooru/credentials.json`, and clear them anytime.
 - **Granular filters** — Artist • Character • Series • Clothing • Furry/Pokémon • Headwear • Keep base hair/eye colors • Enforce subject count
 - **Prompt hygiene** — Remove common “bad” tags; strip commentary/metadata; shuffle; convert underscores
 - **Batch controls** — Same prompt/seed/image per batch; mix tags from multiple posts; chaos amount
@@ -54,10 +53,6 @@ You can stop here and it already works. The rest of the options are for finer co
 | Control | Type | Default | What it does |
 |---|---|---|---|
 | `Booru` | Dropdown | gelbooru | Select which booru API to fetch tags from. |
-| `Gelbooru API Key` | Textbox |  | Visible only when Gelbooru is selected; enter the API key from your Gelbooru account (required). |
-| `Gelbooru User ID` | Textbox |  | Visible only when Gelbooru is selected; enter your Gelbooru user ID (required). |
-| `Save Credentials to Disk` | Button |  | Writes Gelbooru credentials to `user/gelbooru/credentials.json` so fields stay hidden next time. |
-| `Clear Saved Credentials` | Button |  | Deletes the saved Gelbooru credential file so you can re-enter new values. |
 | `Beta: New Tag Filtering` | Checkbox | true | Enable the normalized removal engine with personal lists and favorites guard. Disable to fall back to legacy behavior. |
 | `Remove common 'bad' tags` | Checkbox | true | Cull frequent watermark, commentary, and UI text tags from prompts. |
 | `Remove tag/text/commentary metadata` | Checkbox | true | Strip speech bubbles, watermark text, and similar metadata from fetched prompts. |
@@ -90,7 +85,7 @@ You can stop here and it already works. The rest of the options are for finer co
 | `DB Tags Position` | Radio | "Add | Where to place Deepbooru tags in relation to the Ranbooru tags. |
 | `Enable RanbooruX ADetailer support` | Checkbox | false | Run RanbooruX's manual ADetailer integration after img2img when enabled. |
 | `Reuse cached booru posts` | Checkbox | false | Leave disabled to fetch fresh images every generation. Enable when you want RanbooruX to reuse the previously cached posts. |
-| `Add line from Search File` | Checkbox | false | Appends one random line from your `user/search/*.txt` or `.csv` file to the prompt. |
+| `Add line from Search File` | Checkbox | false | Appends one random line from your `user/search/*.txt|.csv` file to the prompt. |
 | `Add tags from Remove File` | Checkbox | false | Removes this category of tags from fetched prompts. |
 | `Mix tags from multiple posts` | Checkbox | false | Build prompts by mixing tags pulled from multiple different posts. |
 | `Posts to mix` | Slider | 2 | How many distinct posts to mix together when building a prompt. |

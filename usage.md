@@ -1,3 +1,7 @@
+# Usage (RanbooruX)
+
+> This is the RanbooruX usage guide. It supersedes the original Ranbooru guide.
+
 # RanbooruX Usage Guide
 
 > **Note**: This guide covers the `adetailer` branch -- a work-in-progress build that can layer optional manual ADetailer processing on top of RanbooruX's rebuilt Img2Img and ControlNet workflows. Toggle the new RanbooruX "Enable ADetailer support" checkbox whenever you want the extra pass. For project context, see the main [README.md](README.md).
@@ -353,46 +357,54 @@ RanbooruX supports multiple booru APIs with different capabilities and limitatio
 -   **Tag Format**: Structured JSON with categorized tags (artist, character, general)
 -   **Rate Limiting**: Moderate; uses request caching to minimize API calls
 
+#### Danbooru (`danbooru.donmai.us`)
+
+- **Tag Query**: Single tag only (e.g., "1girl" works, "1girl solo" fails)
+- **Post ID Support**: ✅ Full support with direct post lookup
+- **Rating System**: Custom 4-tier system (All, Safe, Sensitive, Questionable, Explicit)
+- **Tag Format**: Structured JSON with categorized tags (artist, character, general)
+- **Rate Limiting**: Moderate; uses request caching to minimize API calls
+
 #### Gelbooru (`gelbooru.com`)
--   **Tag Query**: ✅ Multi-tag support with complex queries
--   **Post ID Support**: ✅ Full support
--   **Rating System**: Standard 3-tier (Safe, Questionable, Explicit)
--   **Special Feature**: "Fringe Benefits" - enables access to additional content categories
--   **Tag Format**: Flat tag strings with manual categorization
+
+- **Tag Query**: ✅ Multi-tag support with complex queries
+- **Post ID Support**: ✅ Full support
+- **Rating System**: Standard 3-tier (Safe, Questionable, Explicit)
+- **Special Feature**: "Fringe Benefits" - enables access to additional content categories
+- **Tag Format**: Flat tag strings with manual categorization
+- **Authentication**: As of June 2025 the public API requires both an API key and user ID. RanbooruX prompts for these when you pick Gelbooru; use the buttons to save to or clear `user/gelbooru/credentials.json`.
 
 #### Safebooru (`safebooru.org`)
--   **Tag Query**: ✅ Multi-tag support
--   **Post ID Support**: ✅ Full support
--   **Rating System**: None (Safe content only)
--   **Tag Format**: Flat strings with directory-based file URLs
--   **Use Case**: SFW content generation
+
+- **Tag Query**: ✅ Multi-tag support
+- **Post ID Support**: ✅ Full support
+- **Rating System**: None (Safe content only)
+- **Tag Format**: Flat strings with directory-based file URLs
+- **Use Case**: SFW content generation
 
 #### Rule34.xxx (`rule34.xxx`)
--   **Tag Query**: ✅ Multi-tag support
--   **Post ID Support**: ✅ Full support
--   **Rating System**: Standard 3-tier
--   **Tag Format**: Flat strings
--   **Content Warning**: Primarily adult content
+
+- **Tag Query**: ✅ Multi-tag support
+- **Post ID Support**: ✅ Full support
+- **Rating System**: Standard 3-tier
+- **Tag Format**: Flat strings
+- **Content Warning**: Primarily adult content
 
 #### Konachan/Yande.re (`konachan.com`, `yande.re`)
--   **Tag Query**: ✅ Multi-tag support
--   **Post ID Support**: ❌ Not supported (API limitation)
--   **Rating System**: Standard 3-tier
--   **Tag Format**: Structured JSON with categorized tags
--   **Quality Focus**: High-quality art collections
+
+- **Tag Query**: ✅ Multi-tag support
+- **Post ID Support**: ❌ Not supported (API limitation)
+- **Rating System**: Standard 3-tier
+- **Tag Format**: Structured JSON with categorized tags
+- **Quality Focus**: High-quality art collections
 
 #### e621 (`e621.net`)
--   **Tag Query**: ✅ Multi-tag support with complex queries
--   **Post ID Support**: ❌ Not supported
--   **Rating System**: Custom system
--   **Tag Format**: Highly structured with species/artist/character categorization
--   **Content Focus**: Furry/anthro content
 
-### ControlNet Integration Architecture
-
-RanbooruX uses a sophisticated dual-path ControlNet integration system:
-
-#### Primary Path (External API)
+- **Tag Query**: ✅ Multi-tag support with complex queries
+- **Post ID Support**: ❌ Not supported
+- **Rating System**: Custom system
+- **Tag Format**: Highly structured with species/artist/character categorization
+- **Content Focus**: Furry/anthro content
 ```python
 # Attempts to use ControlNet's official external_code API
 cn_module = self._load_cn_external_code()
