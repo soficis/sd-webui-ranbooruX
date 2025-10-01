@@ -2,10 +2,10 @@
 
 ![Logo](pics/ranbooru.png)
 
-**RanbooruX** is a modernized fork of the Ranbooru extension for the Automatic1111/Forge Stable Diffusion WebUI.  
+**RanbooruX** is an enhanced fork of the Ranbooru extension for the Automatic1111/Forge Stable Diffusion WebUI.  
 It pulls tags from popular boorus to build varied prompts, with robust **img2img**, **optional ControlNet handoff**, and **optional ADetailer** post‑processing.
 
-> Tested primarily on **SD Forge**. Compatible with A1111.
+> Tested primarily on **Forge**. Compatible with A1111.
 
 ## Why this fork?
 
@@ -14,7 +14,7 @@ It pulls tags from popular boorus to build varied prompts, with robust **img2img
 - Make installs **noob‑friendly** with `requirements.txt` and a bundled ControlNet helper.
 - Add **favorites**, **file‑driven prompts**, **logging**, and **sensible caching**.
 
-See **[Comparison](docs/COMPARISON.md)** for a precise, side‑by‑side with the original.
+See **[Comparison](COMPARISON.md)** for a precise, side‑by‑side with the original.
 
 ## Installation
 
@@ -27,7 +27,7 @@ See **[Comparison](docs/COMPARISON.md)** for a precise, side‑by‑side with th
 
 > Advanced: You can point RanbooruX at a specific Forge ControlNet install with `SD_FORGE_CONTROLNET_PATH` or `RANBOORUX_CN_PATH` before launch.
 
-## Quick start (noob‑friendly)
+## Quick start
 
 1. Pick a **Booru** (e.g. `gelbooru`). If you choose Gelbooru, enter your API key and user ID when prompted—you can optionally save them for future sessions.  
 2. Click **Generate** to fetch tags and build a prompt.  
@@ -104,13 +104,11 @@ You can stop here and it already works. The rest of the options are for finer co
 | `Min LoRAs Weight` | Slider | 0.6 | Weight range for randomly picked LoRAs. |
 | `Max LoRAs Weight` | Slider | 1.0 | Weight range for randomly picked LoRAs. |
 
-## Known issues
+## Known issues (Inherited from Ranbooru, no fixes made)
 
 - Chaos/negative modes may error with batch counts > 1 in some setups; retrying usually works.
 - `sd-dynamic-prompts` can conflict with the multiple prompts option — disable that extension if you see odd prompts.
-- ADetailer adds a short post‑processing step per image, so large batches will take longer than vanilla Ranbooru.
 
 ## Credits
 
 - Original Ranbooru by **Inzaniak**  
-- RanbooruX fork & docs updates — this repository
