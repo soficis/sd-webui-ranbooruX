@@ -14,6 +14,7 @@ This workflow fetches tags from a selected booru to generate a text prompt.
 **Steps:**
 
 1. **Select Booru**: Choose a source from the `Booru` dropdown (e.g., `danbooru`).
+   - **Note for Gelbooru**: As of June 2025, Gelbooru requires an API key and user ID for access. If you select Gelbooru (which is the default), the credential fields may not appear immediately. To make them visible, first select a different booru from the dropdown, then reselect Gelbooru. Enter your API key and user ID from your Gelbooru account, and optionally save them to disk for future sessions.
 2. **Add Search Tags**: In `Tags to Search (Pre)`, enter tags to filter posts, separated by commas.
    - *Example*: `1girl, solo, short_hair`
 3. **Configure Options (Optional)**:
@@ -90,6 +91,22 @@ If you already know the post you want to use, you can target it directly.
 2. **Enter Post ID**: In the `Post ID` field, enter the numeric ID.
    - *Example*: For a post at `https://danbooru.donmai.us/posts/123456`, the ID is `123456`.
 3. **Generate**: Click "Generate". The extension will fetch tags (and the image, if `img2img` is enabled) from that specific post.
+
+### Using Custom Gelbooru-Compatible Sites
+
+RanbooruX supports custom booru sites that are compatible with Gelbooru's API (DAPI). This allows you to fetch tags from sites like RealBooru, Scatbooru, or other Gelbooru forks.
+
+**Steps:**
+
+1. **Select Booru**: Choose `gelbooru-compatible` from the `Booru` dropdown.
+2. **Enter Base URL**: In the `Gelbooru-compatible Base URL` field that appears, enter the base URL of the site (e.g., `https://realbooru.com`).
+   - The URL should be the root of the site, without any path like `/index.php`.
+3. **Add Search Tags**: Proceed as with other boorus, entering tags in `Tags to Search (Pre)`.
+4. **Generate**: Click "Generate". RanbooruX will query the site's DAPI endpoint to fetch posts and tags.
+
+**Notes:**
+- Not all Gelbooru-compatible sites require credentials, but some may. If you encounter access issues, check the site's documentation for API keys.
+- The system automatically tries JSON responses first, falling back to XML if needed.
 
 ### 4. Quick Checklist: Img2Img + ControlNet + ADetailer
 
@@ -357,14 +374,6 @@ RanbooruX supports multiple booru APIs with different capabilities and limitatio
 -   **Tag Format**: Structured JSON with categorized tags (artist, character, general)
 -   **Rate Limiting**: Moderate; uses request caching to minimize API calls
 
-#### Danbooru (`danbooru.donmai.us`)
-
-- **Tag Query**: Single tag only (e.g., "1girl" works, "1girl solo" fails)
-- **Post ID Support**: ✅ Full support with direct post lookup
-- **Rating System**: Custom 4-tier system (All, Safe, Sensitive, Questionable, Explicit)
-- **Tag Format**: Structured JSON with categorized tags (artist, character, general)
-- **Rate Limiting**: Moderate; uses request caching to minimize API calls
-
 #### Gelbooru (`gelbooru.com`)
 
 - **Tag Query**: ✅ Multi-tag support with complex queries
@@ -372,7 +381,17 @@ RanbooruX supports multiple booru APIs with different capabilities and limitatio
 - **Rating System**: Standard 3-tier (Safe, Questionable, Explicit)
 - **Special Feature**: "Fringe Benefits" - enables access to additional content categories
 - **Tag Format**: Flat tag strings with manual categorization
-- **Authentication**: As of June 2025 the public API requires both an API key and user ID. RanbooruX prompts for these when you pick Gelbooru; use the buttons to save to or clear `user/gelbooru/credentials.json`.
+- **Authentication**: As of June 2025, the public API requires both an API key and user ID. RanbooruX prompts for these when you select Gelbooru from the dropdown. Since Gelbooru is the default selection, you may need to choose a different booru first, then reselect Gelbooru to make the credential fields appear. You can save the credentials to `user/gelbooru/credentials.json` for future sessions.
+
+#### Gelbooru-Compatible (Custom Sites)
+
+- **Tag Query**: ✅ Multi-tag support with complex queries
+- **Post ID Support**: ✅ Full support
+- **Rating System**: Standard 3-tier (Safe, Questionable, Explicit)
+- **Tag Format**: Flat tag strings with manual categorization
+- **Authentication**: Optional; some sites may require API keys or other credentials
+- **Base URL**: Requires entering the site's base URL (e.g., `https://realbooru.com`) in the `Gelbooru-compatible Base URL` field that appears when this option is selected
+- **Use Case**: Access custom or regional booru sites that use Gelbooru's DAPI (Danbooru API) format, such as RealBooru or other forks
 
 #### Safebooru (`safebooru.org`)
 

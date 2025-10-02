@@ -9,6 +9,8 @@ import json
 import unicodedata
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from PIL import Image
+import xml.etree.ElementTree as ET
+import time
 import numpy as np
 import requests_cache
 import importlib
@@ -33,11 +35,9 @@ USER_DATA_DIR = os.path.join(EXTENSION_ROOT, 'user')
 USER_SEARCH_DIR = os.path.join(USER_DATA_DIR, 'search')
 USER_REMOVE_DIR = os.path.join(USER_DATA_DIR, 'remove')
 LOG_DIR = os.path.join(USER_DATA_DIR, 'logs')
-COOKIES_DIR = os.path.join(USER_DATA_DIR, 'cookies')
 os.makedirs(USER_SEARCH_DIR, exist_ok=True)
 os.makedirs(USER_REMOVE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(COOKIES_DIR, exist_ok=True)
 
 GELBOORU_CREDENTIALS_DIR = os.path.join(USER_DATA_DIR, 'gelbooru')
 GELBOORU_CREDENTIALS_FILE = os.path.join(GELBOORU_CREDENTIALS_DIR, 'credentials.json')
@@ -125,14 +125,14 @@ RATING_TYPES = {
 RATINGS = {
     "e621": RATING_TYPES['full'],
     "danbooru": RATING_TYPES['single'],
-    "scatbooru": RATING_TYPES['single'],
     "aibooru": RATING_TYPES['full'],
     "yande.re": RATING_TYPES['full'],
     "konachan": RATING_TYPES['full'],
     "safebooru": RATING_TYPES['none'],
     "rule34": RATING_TYPES['full'],
     "xbooru": RATING_TYPES['full'],
-    "gelbooru": RATING_TYPES['single']
+    "gelbooru": RATING_TYPES['single'],
+    "gelbooru-compatible": RATING_TYPES['single']
 }
 
 STRICT_IMG2IMG_EXTRA_ROUNDS = 2
@@ -144,35 +144,52 @@ def get_available_ratings(booru):
     return gr.Radio.update(choices=choices, value="All", visible=True)
 
 
-def _get_scatbooru_cookie():
-    env_cookie = os.environ.get('RANBOORUX_SCATBOORU_COOKIE')
-    if isinstance(env_cookie, str) and env_cookie.strip():
-        return env_cookie.strip()
-
-    cookie_path = os.path.join(COOKIES_DIR, 'scatbooru.cookie')
-    if os.path.isfile(cookie_path):
-        try:
-            with open(cookie_path, 'r', encoding='utf-8') as cookie_file:
-                cookie_value = cookie_file.read().strip()
-                if cookie_value:
-                    return cookie_value
-        except Exception as exc:
-            print(f"[R] Warn: Failed to read scatbooru.cookie: {exc}")
-    return None
-
-
-def has_scatbooru_access():
-    return _get_scatbooru_cookie() is not None
-
-
 def show_fringe_benefits(booru):
     return gr.Checkbox.update(visible=(booru == 'gelbooru'), value=True)
 
 
 def _sanitize_gelbooru_credential(value: Optional[str]) -> str:
+    """Lenient cleanup for Gelbooru credential text.
+    Accepts raw tokens or mistakenly pasted query strings and extracts the core value.
+    - Strips quotes/whitespace
+    - Decodes minimal %26 and %3D encodings (ampersand/equal)
+    - Removes leading api_key= / user_id= if present
+    - Trims anything after the first '&'
+    """
     if not isinstance(value, str):
         return ""
-    return value.strip()
+    s = value.strip().strip('"').strip("'")
+    if not s:
+        return ""
+    # Minimal decode for common cases
+    s = s.replace('%26', '&').replace('%3D', '=').replace('%3d', '=')
+    # If it's a query-like string, prefer first matching segment
+    lower = s.lower()
+    if 'api_key=' in lower or 'user_id=' in lower or '&' in s:
+        parts = s.split('&')
+        for seg in parts:
+            seg_l = seg.lower().strip()
+            if seg_l.startswith('api_key=') or seg_l.startswith('user_id='):
+                return seg.split('=', 1)[1].strip()
+        # fallback: take the first segment before any '&'
+        s = parts[0].strip()
+    # Remove accidental prefixes if still present
+    for prefix in ('api_key=', 'user_id='):
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):].strip()
+    return s
+
+
+
+def _sanitize_gelbooru_compat_base_url(value: Optional[str]) -> str:
+    if not isinstance(value, str):
+        return ""
+    sanitized = value.strip()
+    if not sanitized:
+        return ""
+    if not re.match(r'^https?://', sanitized, re.IGNORECASE):
+        sanitized = f"https://{sanitized}"
+    return sanitized.rstrip('/')
 
 
 def _load_gelbooru_credentials_from_disk() -> Optional[Dict[str, str]]:
@@ -314,49 +331,53 @@ def get_original_post_url(post):
             return f"https://danbooru.donmai.us/posts/{pid}"
         if booru == 'gelbooru':
             return f"https://gelbooru.com/index.php?page=post&s=view&id={pid}"
+        if booru == 'gelbooru-compatible':
+            base = (post.get('source_base_url') or '').strip()
+            if base:
+                return f"{base.rstrip('/')}/index.php?page=post&s=view&id={pid}"
+            return None
         if booru == 'safebooru':
             return f"https://safebooru.org/index.php?page=post&s=view&id={pid}"
         if booru == 'rule34':
             return f"https://rule34.xxx/index.php?page=post&s=view&id={pid}"
         if booru == 'xbooru':
             return f"https://xbooru.com/index.php?page=post&s=view&id={pid}"
-        if booru == 'konachan' and post_id:
-            raise ValueError("Konachan does not support post IDs")
-        if booru == 'yande.re' and post_id:
-            raise ValueError("Yande.re does not support post IDs")
-        if booru == 'e621' and post_id:
-            raise ValueError("e621 does not support post IDs")
-        if booru == 'danbooru' and tags and len([t for t in tags.split(',') if t.strip()]) > 1:
-            raise ValueError("Danbooru API only supports one tag.")
+        if booru == 'konachan':
+            return f"https://konachan.com/post/show/{pid}"
+        if booru == 'yandere':
+            return f"https://yande.re/post/show/{pid}"
+        if booru == 'aibooru':
+            return f"https://aibooru.online/posts/{pid}"
+        if booru == 'e621':
+            return f"https://e621.net/posts/{pid}"
+        return None
+    except Exception:
+        return None
 
 
-    def resize_image(img, width, height, cropping=True):
-        if img is None:
-            return None
-        if width <= 0 or height <= 0:
-            print(f"[R] Warn: Invalid resize {width}x{height}")
-            return img
-        try:
-            if cropping:
-                img_aspect = img.width / img.height
-                target_aspect = width / height
-                if img_aspect > target_aspect:
-                    new_height = height
-                    new_width = int(new_height * img_aspect)
-                else:
-                    new_width = width
-                    new_height = int(new_width / img_aspect)
-                img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                left = (new_width - width) / 2
-                top = (new_height - height) / 2
-                right = (new_width + width) / 2
-                bottom = (new_height + height) / 2
-                return img_resized.crop((left, top, right, bottom))
-            else:
-                return img.resize((width, height), Image.Resampling.LANCZOS)
-        except Exception as e:
-            print(f"[R] Error resize: {e}")
-            return img
+def generate_chaos(pos_tags, neg_tags, chaos_amount):
+    pos_tag_list = [tag.strip() for tag in pos_tags.split(',') if tag.strip()]
+    neg_tag_list = [tag.strip() for tag in neg_tags.split(',') if tag.strip()]
+    chaos_list = list(set(pos_tag_list + neg_tag_list))
+    if not chaos_list:
+        return pos_tags, neg_tags
+    random.shuffle(chaos_list)
+    len_list = round(len(chaos_list) * chaos_amount)
+    neg_add = chaos_list[:len_list]
+    pos_add = chaos_list[len_list:]
+    final_pos = list(set(pos_tag_list) - set(neg_add)) + pos_add
+    final_neg = list(set(neg_tag_list) - set(pos_add)) + neg_add
+    return ','.join(list(dict.fromkeys(final_pos))), ','.join(list(dict.fromkeys(final_neg)))
+
+
+class BooruError(Exception):
+    pass
+
+
+class Booru():
+    def __init__(self, booru_name, base_api_url):
+        self.booru_name = booru_name
+        self.base_api_url = base_api_url
         self.headers = {'user-agent': f'Ranbooru Extension/{Script.version} for Forge'}
 
     def _fetch_data(self, query_url):
@@ -426,7 +447,6 @@ def get_original_post_url(post):
                 character_tags = tags_dict.get('character', [])
             if isinstance(tags_dict.get('copyright'), list):
                 copyright_tags = tags_dict.get('copyright', [])
-            # some APIs provide tag_string_artist / tag_string_character
         if 'tag_string_artist' in post_data:
             try:
                 artist_tags = [t for t in re.split(r'[\,\s]+', post_data.get('tag_string_artist', '').strip()) if t]
@@ -518,6 +538,158 @@ class Gelbooru(Booru):
         return [self._standardize_post(post) for post in all_fetched_posts]
 
 
+class GelbooruCompatible(Booru):
+    RETRIABLE_STATUS = {429, 500, 502, 503, 504}
+
+    def __init__(self, base_url: str, retries: int = 3, backoff: float = 1.5, log_diagnostics: bool = True):
+        sanitized = _sanitize_gelbooru_compat_base_url(base_url)
+        if not sanitized:
+            raise ValueError("Invalid Gelbooru-compatible base URL.")
+        self.base_url = sanitized
+        self.retries = max(1, retries)
+        self.backoff = max(0.5, backoff)
+        self.log_diagnostics = log_diagnostics
+        self._post_endpoint = f"{self.base_url}/index.php?page=dapi&s=post&q=index"
+        self._tag_endpoint = f"{self.base_url}/index.php?page=dapi&s=tag&q=index"
+        self._alias_endpoint = f"{self.base_url}/index.php?page=dapi&s=tag_alias&q=index"
+        super().__init__('Gelbooru-Compatible', self._post_endpoint)
+
+    def _perform_request(self, url: str) -> requests.Response:
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.retries + 1):
+            try:
+                response = requests.get(url, headers=self.headers, timeout=30)
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                self._log_retry(url, attempt, f"Request error: {exc}")
+            else:
+                if response.status_code in self.RETRIABLE_STATUS:
+                    last_error = BooruError(f"Status {response.status_code}")
+                    self._log_retry(url, attempt, f"Status {response.status_code}")
+                else:
+                    return response
+            time.sleep(min(self.backoff * attempt, 5.0))
+        raise BooruError(f"HTTP Error fetching from {self.booru_name}: {last_error}")
+
+    def _log_retry(self, url: str, attempt: int, message: str) -> None:
+        print(f"[R] {self.booru_name}: retry {attempt} for {url} - {message}")
+
+    def _log_snippet(self, response: requests.Response) -> None:
+        if not self.log_diagnostics:
+            return
+        snippet = response.text.strip().replace('\n', ' ')[:200]
+        print(f"[R] {self.booru_name}: {response.url} -> {snippet}")
+
+    def _parse_json_entities(self, payload, entity_key: str) -> Tuple[List[dict], Optional[int]]:
+        entries: List[dict] = []
+        approx = None
+        if isinstance(payload, dict):
+            possible = payload.get(entity_key)
+            if isinstance(possible, list):
+                entries = possible
+            elif isinstance(possible, dict):
+                entries = [possible]
+            attrs = payload.get('@attributes')
+            if isinstance(attrs, dict) and 'count' in attrs:
+                try:
+                    approx = int(attrs['count'])
+                except (TypeError, ValueError):
+                    approx = None
+        elif isinstance(payload, list):
+            entries = payload
+        return entries, approx
+
+    def _parse_xml_entities(self, text_payload: str, entity_key: str) -> Tuple[List[dict], Optional[int]]:
+        probe = (text_payload or '').lower()
+        if ('<posts' not in probe) and ('<post ' not in probe):
+            raise BooruError(
+                f"{self.booru_name} response does not look like DAPI XML."
+            )
+        try:
+            root = ET.fromstring(text_payload)
+        except ET.ParseError as exc:
+            raise BooruError(f"Failed to parse XML from {self.booru_name}: {exc}") from exc
+        entries = [element.attrib for element in root.findall(entity_key)]
+        if not entries and root.tag == entity_key:
+            entries = [root.attrib]
+        approx = None
+        count_attr = root.attrib.get('count') if hasattr(root, 'attrib') else None
+        if count_attr is not None:
+            try:
+                approx = int(count_attr)
+            except (TypeError, ValueError):
+                approx = None
+        if approx is None:
+            approx = len(entries)
+        return entries, approx
+
+    def _request_dapi(self, url_base: str, entity_key: str) -> Tuple[List[dict], int]:
+        json_url = f"{url_base}&json=1"
+        try:
+            response = self._perform_request(json_url)
+            self._log_snippet(response)
+            ct = (response.headers.get('content-type') or '').lower()
+            text_head = (response.text or '').lstrip()[:64].lower()
+            if 'html' in ct or text_head.startswith('<!doctype html') or text_head.startswith('<html'):
+                raise BooruError(
+                    f"{self.booru_name} returned HTML for JSON request. The site may be blocking API access or the base URL is not DAPI-compatible."
+                )
+            payload = response.json()
+            entries, approx = self._parse_json_entities(payload, entity_key)
+            if entries:
+                return entries, approx or len(entries)
+        except (ValueError, BooruError):
+            pass
+
+        response = self._perform_request(url_base)
+        self._log_snippet(response)
+        ct2 = (response.headers.get('content-type') or '').lower()
+        text2 = response.text or ''
+        text2_head = text2.lstrip()[:64].lower()
+        if 'html' in ct2 or text2_head.startswith('<!doctype html') or text2_head.startswith('<html'):
+            raise BooruError(
+                f"{self.booru_name} returned HTML. Expected DAPI XML/JSON. Verify the base URL (e.g., https://realbooru.com) or that the site allows API access."
+            )
+        entries, approx = self._parse_xml_entities(text2, entity_key)
+        return entries, approx
+
+    def get_posts(self, tags_query: str = "", max_pages: int = 10, post_id: Optional[int] = None):
+        global COUNT
+        COUNT = 0
+        posts: List[dict] = []
+        if post_id:
+            query_base = f"{self._post_endpoint}&limit={POST_AMOUNT}&id={post_id}{tags_query}"
+            posts, approx = self._request_dapi(query_base, 'post')
+            COUNT = approx
+            print(f"[R] Gelbooru-compatible: found {len(posts)} post(s) for ID: {post_id}")
+        else:
+            page = random.randint(0, max_pages - 1) if max_pages > 0 else 0
+            query_base = f"{self._post_endpoint}&limit={POST_AMOUNT}&pid={page}{tags_query}"
+            posts, approx = self._request_dapi(query_base, 'post')
+            COUNT = approx
+            print(f"[R] Gelbooru-compatible: fetched {len(posts)} posts from page {page}. Reported count={approx}")
+        standardized = []
+        for post in posts:
+            normalized = self._standardize_post(post)
+            normalized['source_base_url'] = self.base_url
+            standardized.append(normalized)
+        return standardized
+
+    def get_tags(self, name_pattern: Optional[str] = None, limit: int = 100) -> List[dict]:
+        query = f"{self._tag_endpoint}&limit={limit}"
+        if name_pattern:
+            query += f"&name_pattern={quote_plus(name_pattern)}"
+        tags, _ = self._request_dapi(query, 'tag')
+        return tags
+
+    def get_tag_aliases(self, name_pattern: Optional[str] = None, limit: int = 100) -> List[dict]:
+        query = f"{self._alias_endpoint}&limit={limit}"
+        if name_pattern:
+            query += f"&name_pattern={quote_plus(name_pattern)}"
+        aliases, _ = self._request_dapi(query, 'tag_alias')
+        return aliases
+
+
 class Danbooru(Booru):
     def __init__(self):
         super().__init__('Danbooru', f'https://danbooru.donmai.us/posts.json?limit={POST_AMOUNT}')
@@ -542,54 +714,6 @@ class Danbooru(Booru):
             COUNT = len(all_fetched_posts)
             print(f"[R] Fetched {COUNT} posts from page {page}.")
         return [self._standardize_post(post) for post in all_fetched_posts if post]
-
-
-class Scatbooru(Booru):
-    def __init__(self):
-        super().__init__('Scatbooru', f'https://scatbooru.com/posts.json?limit={POST_AMOUNT}')
-
-    def _fetch_data(self, query_url):
-        headers = self.headers.copy()
-        session_cookie = _get_scatbooru_cookie()
-        if session_cookie:
-            headers['Cookie'] = session_cookie
-        try:
-            resp = requests.get(query_url, headers=headers, timeout=30)
-            if resp.status_code == 429:
-                raise BooruError('Scatbooru rate limited the request. Provide RANBOORUX_SCATBOORU_COOKIE or place the cookie in user/cookies/scatbooru.cookie, then slow down requests.')
-            content_type = resp.headers.get('content-type', '')
-            if 'application/json' in content_type:
-                return resp.json()
-            # HTML normally indicates that the Cloudflare/anti-bot check blocked the request
-            raise BooruError('Scatbooru returned HTML instead of JSON. Provide a valid session cookie via RANBOORUX_SCATBOORU_COOKIE or user/cookies/scatbooru.cookie.')
-        except BooruError:
-            raise
-        except Exception as exc:
-            raise BooruError(f'Scatbooru fetch error: {exc}') from exc
-
-    def get_posts(self, tags_query="", max_pages=10, post_id=None):
-        global COUNT
-        COUNT = 0
-        all_fetched_posts = []
-        if post_id:
-            query_url = f"https://scatbooru.com/posts/{post_id}.json"
-            fetched_data = self._fetch_data(query_url)
-            if isinstance(fetched_data, dict) and 'id' in fetched_data:
-                all_fetched_posts = [fetched_data]
-            COUNT = len(all_fetched_posts)
-            print(f"[R] Fetched {COUNT} Scatbooru post(s) for ID {post_id}.")
-        else:
-            page = random.randint(1, max_pages)
-            query_url = f"{self.base_api_url}&page={page}{tags_query}"
-            fetched_data = self._fetch_data(query_url)
-            if isinstance(fetched_data, list):
-                all_fetched_posts = fetched_data
-            COUNT = len(all_fetched_posts)
-            print(f"[R] Fetched {COUNT} posts from Scatbooru (page {page}).")
-        return [self._standardize_post(post) for post in all_fetched_posts if post]
-
-
-
 
 
 class XBooru(Booru):
@@ -782,6 +906,7 @@ class Script(scripts.Script):
     def __init__(self):
         super().__init__()
         self._gelbooru_saved_credentials: Optional[Dict[str, str]] = _load_gelbooru_credentials_from_disk()
+        self._gelbooru_compat_base_url: str = ''
         self._gelbooru_effective_credentials: Optional[Dict[str, str]] = None
         self._personal_remove_tags: Set[str] = set()
         self._favorite_tags: Set[str] = set()
@@ -1218,8 +1343,20 @@ class Script(scripts.Script):
     def _get_saved_gelbooru_credentials(self) -> Optional[Dict[str, str]]:
         creds = self._gelbooru_saved_credentials
         if isinstance(creds, dict):
-            api_key = _sanitize_gelbooru_credential(creds.get('api_key'))
-            user_id = _sanitize_gelbooru_credential(creds.get('user_id'))
+            raw_api = creds.get('api_key')
+            raw_uid = creds.get('user_id')
+            api_key = _sanitize_gelbooru_credential(raw_api)
+            user_id = _sanitize_gelbooru_credential(raw_uid)
+            if (not api_key and isinstance(raw_uid, str)) or (not user_id and isinstance(raw_api, str)):
+                combined = f"{raw_api}&{raw_uid}"
+                for seg in str(combined).split('&'):
+                    segl = seg.lower().strip()
+                    if segl.startswith('api_key=') and not api_key:
+                        api_key = seg.split('=', 1)[1].strip()
+                    if segl.startswith('user_id=') and not user_id:
+                        user_id = seg.split('=', 1)[1].strip()
+            api_key = _sanitize_gelbooru_credential(api_key)
+            user_id = _sanitize_gelbooru_credential(user_id)
             if api_key and user_id:
                 return {'api_key': api_key, 'user_id': user_id}
         return None
@@ -1227,6 +1364,20 @@ class Script(scripts.Script):
     def _resolve_gelbooru_credentials(self, runtime_api_key: Optional[str], runtime_user_id: Optional[str]) -> Optional[Dict[str, str]]:
         runtime_api_key = _sanitize_gelbooru_credential(runtime_api_key)
         runtime_user_id = _sanitize_gelbooru_credential(runtime_user_id)
+        if (runtime_api_key and ('=' in runtime_api_key or '&' in runtime_api_key)) or (
+            runtime_user_id and ('=' in runtime_user_id or '&' in runtime_user_id)
+        ):
+            combined = f"{runtime_api_key}&{runtime_user_id}"
+            r_api = runtime_api_key
+            r_uid = runtime_user_id
+            for seg in str(combined).split('&'):
+                segl = seg.lower().strip()
+                if segl.startswith('api_key='):
+                    r_api = seg.split('=', 1)[1].strip()
+                elif segl.startswith('user_id='):
+                    r_uid = seg.split('=', 1)[1].strip()
+            runtime_api_key = _sanitize_gelbooru_credential(r_api)
+            runtime_user_id = _sanitize_gelbooru_credential(r_uid)
         if runtime_api_key and runtime_user_id:
             return {'api_key': runtime_api_key, 'user_id': runtime_user_id}
         saved = self._get_saved_gelbooru_credentials()
@@ -1244,7 +1395,7 @@ class Script(scripts.Script):
             warn = "⚠️ Please enter both API Key and User ID before saving."
             return (
                 gr.Markdown.update(value=warn, visible=True),
-                gr.Group.update(visible=True),
+                gr.update(visible=True),
                 gr.Button.update(visible=False),
                 gr.Textbox.update(value=api_key),
                 gr.Textbox.update(value=user_id),
@@ -1254,7 +1405,7 @@ class Script(scripts.Script):
             message = self._gelbooru_saved_message()
             return (
                 gr.Markdown.update(value=message, visible=True),
-                gr.Group.update(visible=False),
+                gr.update(visible=False),
                 gr.Button.update(visible=True),
                 gr.Textbox.update(value=""),
                 gr.Textbox.update(value=""),
@@ -1262,7 +1413,7 @@ class Script(scripts.Script):
         error = "⚠️ Failed to save Gelbooru credentials. Check console for details."
         return (
             gr.Markdown.update(value=error, visible=True),
-            gr.Group.update(visible=True),
+            gr.update(visible=True),
             gr.Button.update(visible=False),
             gr.Textbox.update(value=api_key),
             gr.Textbox.update(value=user_id),
@@ -1273,7 +1424,7 @@ class Script(scripts.Script):
             self._gelbooru_saved_credentials = None
             return (
                 gr.Markdown.update(value="🧹 Saved Gelbooru credentials cleared.", visible=True),
-                gr.Group.update(visible=True),
+                gr.update(visible=True),
                 gr.Button.update(visible=False),
                 gr.Textbox.update(value=""),
                 gr.Textbox.update(value=""),
@@ -1281,7 +1432,7 @@ class Script(scripts.Script):
         warn = "⚠️ Gelbooru credentials file could not be removed."
         return (
             gr.Markdown.update(value=warn, visible=True),
-            gr.Group.update(visible=False),
+            gr.update(visible=False),
             gr.Button.update(visible=True),
             gr.Textbox.update(value=""),
             gr.Textbox.update(value=""),
@@ -1294,14 +1445,14 @@ class Script(scripts.Script):
             if has_saved:
                 message = self._gelbooru_saved_message()
                 return (
-                    gr.Group.update(visible=False),
+                    gr.update(visible=False),
                     gr.Markdown.update(value=message, visible=True),
                     gr.Button.update(visible=True),
                     gr.Textbox.update(value=""),
                     gr.Textbox.update(value=""),
                 )
             return (
-                gr.Group.update(visible=True),
+                gr.update(visible=True),
                 gr.Markdown.update(value="", visible=False),
                 gr.Button.update(visible=False),
                 gr.Textbox.update(value=""),
@@ -1309,12 +1460,25 @@ class Script(scripts.Script):
             )
         # Hide for non-Gelbooru selections
         return (
-            gr.Group.update(visible=False),
+            gr.update(visible=False),
             gr.Markdown.update(value="", visible=False),
             gr.Button.update(visible=False),
             gr.Textbox.update(value=""),
             gr.Textbox.update(value=""),
         )
+
+    def _update_gelbooru_compat_visibility(self, booru_name: Optional[str]):
+        booru_name = (booru_name or "").strip().lower()
+        visible = booru_name == 'gelbooru-compatible'
+        return (
+            gr.update(visible=visible),
+            gr.Textbox.update(value=self._gelbooru_compat_base_url if visible else self._gelbooru_compat_base_url)
+        )
+
+    def _ui_set_gelbooru_compat_base_url(self, base_url: Optional[str]):
+        sanitized = _sanitize_gelbooru_compat_base_url(base_url)
+        self._gelbooru_compat_base_url = sanitized
+        return gr.Textbox.update(value=self._gelbooru_compat_base_url)
 
     def _build_legacy_bad_index(self, bad_tags: Iterable[str]) -> None:
         exact: Set[str] = set()
@@ -1911,9 +2075,7 @@ class Script(scripts.Script):
 
     def ui(self, is_img2img):
         with InputAccordion(False, label="RanbooruX", elem_id=self.elem_id("ra_enable")) as enabled:
-            booru_list = ["gelbooru", "danbooru", "xbooru", "rule34", "safebooru", "konachan", 'yande.re', 'aibooru', 'e621']
-            if has_scatbooru_access():
-                booru_list.insert(2, "scatbooru")
+            booru_list = ["danbooru", "gelbooru", "gelbooru-compatible", "xbooru", "rule34", "safebooru", "konachan", 'yande.re', 'aibooru', 'e621']
             booru = gr.Dropdown(booru_list, label="Booru", value="danbooru")
             with gr.Group(visible=False) as gelbooru_credentials_group:
                 gelbooru_api_key = gr.Textbox(label="Gelbooru API Key", type="password", placeholder="Enter your Gelbooru API key")
@@ -1921,6 +2083,8 @@ class Script(scripts.Script):
                 gelbooru_save_button = gr.Button("Save Credentials to Disk", variant="primary")
             gelbooru_saved_message = gr.Markdown("", visible=False)
             gelbooru_clear_button = gr.Button("Clear Saved Credentials", visible=False)
+            with gr.Group(visible=False) as gelbooru_compat_group:
+                gelbooru_compat_base_url = gr.Textbox(label="Gelbooru-compatible Base URL", placeholder="https://realbooru.com", value=self._gelbooru_compat_base_url)
             max_pages = gr.Slider(label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1)
             gr.Markdown("""## Post"""); post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
             gr.Markdown("""## Tags"""); tags = gr.Textbox(lines=1, label="Tags to Search (Pre)"); remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
@@ -2052,6 +2216,18 @@ class Script(scripts.Script):
                 outputs=[gelbooru_credentials_group, gelbooru_saved_message, gelbooru_clear_button, gelbooru_api_key, gelbooru_user_id],
                 queue=False,
             )
+            booru.change(
+                self._update_gelbooru_compat_visibility,
+                inputs=[booru],
+                outputs=[gelbooru_compat_group, gelbooru_compat_base_url],
+                queue=False,
+            )
+            gelbooru_compat_base_url.change(
+                fn=self._ui_set_gelbooru_compat_base_url,
+                inputs=[gelbooru_compat_base_url],
+                outputs=[gelbooru_compat_base_url],
+                queue=False,
+            )
             gelbooru_save_button.click(
                 fn=self._ui_save_gelbooru_credentials,
                 inputs=[gelbooru_api_key, gelbooru_user_id],
@@ -2138,7 +2314,7 @@ class Script(scripts.Script):
             queue=False
         )
 
-        return [enabled, tags, booru, gelbooru_api_key, gelbooru_user_id, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags, remove_furry_tags, remove_headwear_tags, preserve_hair_eye_colors, remove_series_tags, beta_filter_toggle]
+        return [enabled, tags, booru, gelbooru_api_key, gelbooru_user_id, gelbooru_compat_base_url, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags, remove_furry_tags, remove_headwear_tags, preserve_hair_eye_colors, remove_series_tags, beta_filter_toggle]
 
     def check_orientation(self, img):
         if img is None:
@@ -2262,6 +2438,14 @@ class Script(scripts.Script):
         return search_tags, bad_tags, initial_additions_str
 
     def _get_booru_api(self, booru_name, fringe_benefits, gelbooru_credentials: Optional[Dict[str, str]] = None):
+        booru_name = (booru_name or '').strip().lower()
+        if booru_name == 'gelbooru-compatible':
+            base_url = _sanitize_gelbooru_compat_base_url(getattr(self, '_gelbooru_compat_base_url', ''))
+            if not base_url:
+                raise ValueError("Please enter a Gelbooru-compatible Base URL (e.g., https://realbooru.com).")
+            self._gelbooru_compat_base_url = base_url
+            return GelbooruCompatible(base_url)
+
         booru_apis = {
             'gelbooru': Gelbooru(fringe_benefits, gelbooru_credentials),
             'danbooru': Danbooru(),
@@ -2273,10 +2457,6 @@ class Script(scripts.Script):
             'aibooru': AIBooru(),
             'e621': e621(),
         }
-        if has_scatbooru_access():
-            booru_apis['scatbooru'] = Scatbooru()
-        if booru_name == 'scatbooru' and not has_scatbooru_access():
-            raise ValueError('Scatbooru requires a valid session cookie. Set RANBOORUX_SCATBOORU_COOKIE or create user/cookies/scatbooru.cookie with the session value.')
         if booru_name not in booru_apis:
             raise ValueError(f"Booru '{booru_name}' not implemented.")
         return booru_apis.get(booru_name)
@@ -2921,7 +3101,7 @@ class Script(scripts.Script):
             self._current_processing_key = processing_key
 
             # Keep existing ordering stable for most outputs; new toggles are appended toward the end.
-            (enabled, tags, booru, gelbooru_api_key_ui, gelbooru_user_id_ui, remove_bad_tags_ui, max_pages, change_dash, same_prompt,
+            (enabled, tags, booru, gelbooru_api_key_ui, gelbooru_user_id_ui, gelbooru_compat_base_url_ui, remove_bad_tags_ui, max_pages, change_dash, same_prompt,
              fringe_benefits, remove_tags_ui, use_img2img, denoising, use_last_img,
              change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount,
              chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, sorting_order, mature_rating,
@@ -2967,6 +3147,12 @@ class Script(scripts.Script):
             self._gelbooru_effective_credentials = self._resolve_gelbooru_credentials(gelbooru_api_key_ui, gelbooru_user_id_ui)
         else:
             self._gelbooru_effective_credentials = None
+        if booru == 'gelbooru-compatible':
+            sanitized_base = _sanitize_gelbooru_compat_base_url(gelbooru_compat_base_url_ui)
+            if sanitized_base:
+                self._gelbooru_compat_base_url = sanitized_base
+            elif not self._gelbooru_compat_base_url:
+                print("[R Before] Warn: Gelbooru-compatible base URL is empty. Set a base URL in the UI before running.")
         if not self._reuse_cached_posts:
             self._last_post_urls = []
         self._posts_used_for_generation = []

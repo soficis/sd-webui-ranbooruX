@@ -29,7 +29,7 @@ See **[Comparison](COMPARISON.md)** for a precise, side‑by‑side with the ori
 
 ## Quick start
 
-1. Pick a **Booru** (e.g. `gelbooru`). If you choose Gelbooru, enter your API key and user ID when prompted—you can optionally save them for future sessions.  
+1. Pick a **Booru** (e.g. `gelbooru`). If you choose Gelbooru, enter your API key and user ID when prompted—you can optionally save them for future sessions. Note: Since Gelbooru is the default selection, you may need to choose a different booru first, then reselect Gelbooru to make the credential fields appear.  
 2. Click **Generate** to fetch tags and build a prompt.  
 3. (Optional) Enable **Use Image for Img2Img** and set **Denoising** for image‑to‑image.  
 4. (Optional) Toggle **Use Image for ControlNet (Unit 0)** to pass the same source image to ControlNet.  
@@ -39,7 +39,7 @@ You can stop here and it already works. The rest of the options are for finer co
 
 ## Features overview
 
-- **Booru Tagging** — Choose from: aibooru, danbooru, e621, gelbooru, konachan, rule34, safebooru, xbooru, yande.re
+- **Booru Tagging** — Choose from: aibooru, danbooru, e621, gelbooru, gelbooru-compatible, konachan, rule34, safebooru, xbooru, yande.re
 - **Gelbooru credential manager** — Enter API key & user ID inline, optionally save them to `user/gelbooru/credentials.json`, and clear them anytime.
 - **Granular filters** — Artist • Character • Series • Clothing • Furry/Pokémon • Headwear • Keep base hair/eye colors • Enforce subject count
 - **Prompt hygiene** — Remove common “bad” tags; strip commentary/metadata; shuffle; convert underscores
