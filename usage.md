@@ -14,7 +14,7 @@ This workflow fetches tags from a selected booru to generate a text prompt.
 **Steps:**
 
 1. **Select Booru**: Choose a source from the `Booru` dropdown (e.g., `danbooru`).
-   - **Note for Gelbooru**: As of June 2025, Gelbooru requires an API key and user ID for access. If you select Gelbooru (which is the default), the credential fields may not appear immediately. To make them visible, first select a different booru from the dropdown, then reselect Gelbooru. Enter your API key and user ID from your Gelbooru account, and optionally save them to disk for future sessions.
+   - **Note for Gelbooru**: As of recent updates, Gelbooru requires an API key and user ID for access. If you select Gelbooru (which is the default), the credential fields may not appear immediately. To make them visible, first select a different booru from the dropdown, then reselect Gelbooru. Enter your API key and user ID from your Gelbooru account, and optionally save them to disk for future sessions.
 2. **Add Search Tags**: In `Tags to Search (Pre)`, enter tags to filter posts, separated by commas.
    - *Example*: `1girl, solo, short_hair`
 3. **Configure Options (Optional)**:
