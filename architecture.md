@@ -261,9 +261,6 @@ ranbooruX/
 - Temporary file cleanup
 - Memory leak prevention in long-running sessions
 - CPU/GPU utilization balancing
- - Temporary file cleanup
- - Memory leak prevention in long-running sessions
- - CPU/GPU utilization balancing
 
 
 ## Detailed analysis: scripts/ranbooru.py
