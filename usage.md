@@ -205,10 +205,6 @@ Original post tags: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha),
 Final prompt: 1girl, solo, blue_eyes, blonde_hair
 ```
 
-```
-Original post tags: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name, score:150
-Final prompt: 1girl, solo, blue_eyes, blonde_hair, yagami_hayate_(nanoha), takamachi_nanoha, artist_name
-```
 
 *After enabling "Remove Artist tags" and "Remove Character tags":*
 
