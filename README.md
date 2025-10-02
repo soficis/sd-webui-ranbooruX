@@ -8,11 +8,11 @@ It pulls tags from popular boorus to build varied prompts, with robust **img2img
 > Tested primarily on **Forge**. Compatible with A1111.
 
 ## Why this fork?
-
 - Fix brittle img2img/ControlNet interactions and make them **reliable on Forge**.
 - Split the old “remove bad tags” into **clear, no‑surprise filters**.
 - Make installs **noob‑friendly** with `requirements.txt` and a bundled ControlNet helper.
 - Add **favorites**, **file‑driven prompts**, **logging**, and **sensible caching**.
+- ![UI screenshot](pics/image.png)
 
 See **[Comparison](COMPARISON.md)** for a precise, side‑by‑side with the original.
 
@@ -42,6 +42,7 @@ You can stop here and it already works. The rest of the options are for finer co
 - **Booru Tagging** — Choose from: aibooru, danbooru, e621, gelbooru, gelbooru-compatible, konachan, rule34, safebooru, xbooru, yande.re
 - **Gelbooru credential manager** — Enter API key & user ID inline, optionally save them to `user/gelbooru/credentials.json`, and clear them anytime.
 - **Granular filters** — Artist • Character • Series • Clothing • Furry/Pokémon • Headwear • Keep base hair/eye colors • Enforce subject count
+- ![Removal Filters UI](pics/filters.jpg)
 - **Prompt hygiene** — Remove common “bad” tags; strip commentary/metadata; shuffle; convert underscores
 - **Batch controls** — Same prompt/seed/image per batch; mix tags from multiple posts; chaos amount
 - **File inputs** — Add a line from `user/search/*.txt|csv`; remove via `user/remove/*.txt|csv`; import CSV/TXT; favorites

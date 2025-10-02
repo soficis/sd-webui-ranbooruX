@@ -141,6 +141,8 @@ RanbooruX offers several advanced modes to fine-tune and experiment with your pr
 
 RanbooruX includes advanced tag filtering capabilities to help you customize your prompts by removing unwanted tags.
 
+![Removal Filters UI](pics/filters.jpg)
+
 #### Artist Tag Removal
 
 - **Remove Artist tags from prompt**: When enabled, this feature automatically identifies and removes artist tags from the generated prompt
