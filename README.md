@@ -1,4 +1,4 @@
-# RanbooruX
+﻿# RanbooruX
 
 ![Logo](pics/ranbooru.png)
 
@@ -10,11 +10,9 @@ It pulls tags from popular boorus to build varied prompts, with robust **img2img
 ## Why this fork?
 - Fix brittle img2img/ControlNet interactions and make them **reliable on Forge**.
 - Split the old “remove bad tags” into **clear, no‑surprise filters**.
-- Make installs **noob‑friendly** with `requirements.txt` and a bundled ControlNet helper.
+- Make installs easy with `requirements.txt` and a bundled ControlNet helper.
 - Add **favorites**, **file‑driven prompts**, **logging**, and **sensible caching**.
 - ![UI screenshot](pics/image.png)
-
-See **[Comparison](COMPARISON.md)** for a precise, side‑by‑side with the original.
 
 ## Installation
 
