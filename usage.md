@@ -143,6 +143,17 @@ RanbooruX includes advanced tag filtering capabilities to help you customize you
 
 ![Removal Filters UI](pics/filters.jpg)
 
+#### Danbooru Tag Catalog mode (optional)
+
+Looking for more precise filtering than the legacy heuristics? You can feed RanbooruX a Danbooru tag catalog and let it drive alias normalization and category-based filtering. Download a CSV such as [Hugging Face: newtextdoc1111/danbooru-tag-csv](https://huggingface.co/datasets/newtextdoc1111/danbooru-tag-csv) and then:
+
+1. Open **Removal Filters** and enable **Use Danbooru Tag Catalog (optional)**.
+2. Paste the absolute path to the CSV. RanbooruX saves it to `user/tag_catalog.json` so you do it once.
+3. Press **Reload Catalog** anytime you edit or replace the file. The catalog will also hot-reload itself on the next search when the file timestamp changes.
+4. Expand **Tag Filtering Diagnostics** to see the active mode, how many tags were kept/dropped/normalised, and the top suggestions for mistyped tags.
+
+When the catalog is active, the `Remove series/character/text` toggles use real category IDs, hair/eye preservation inherits every colour in the dataset, and textual/meta tags are culled without touching colours or subjects. Disable the toggle to fall back to the original heuristics instantly.
+
 #### Artist Tag Removal
 
 - **Remove Artist tags from prompt**: When enabled, this feature automatically identifies and removes artist tags from the generated prompt

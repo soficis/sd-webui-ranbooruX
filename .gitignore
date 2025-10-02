@@ -52,3 +52,4 @@ tmp_*
 *backup*
 block.txt
 line241.txt
+tests/

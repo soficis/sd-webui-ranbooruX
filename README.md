@@ -41,12 +41,33 @@ You can stop here and it already works. The rest of the options are for finer co
 - **Gelbooru credential manager** — Enter API key & user ID inline, optionally save them to `user/gelbooru/credentials.json`, and clear them anytime.
 - **Granular filters** — Artist • Character • Series • Clothing • Furry/Pokémon • Headwear • Keep base hair/eye colors • Enforce subject count
 - ![Removal Filters UI](pics/filters.jpg)
+- **Danbooru Tag Catalog (optional)** - Bring your own `danbooru_tags.csv` to drive alias normalization, copyright/character filtering, and textual tag removal with live diagnostics. (Details in [Danbooru Tag Catalog](#danbooru-tag-catalog-optional).)
 - **Prompt hygiene** — Remove common “bad” tags; strip commentary/metadata; shuffle; convert underscores
 - **Batch controls** — Same prompt/seed/image per batch; mix tags from multiple posts; chaos amount
 - **File inputs** — Add a line from `user/search/*.txt|csv`; remove via `user/remove/*.txt|csv`; import CSV/TXT; favorites
 - **Pipelines** — Img2Img; ControlNet handoff; optional ADetailer pass
 - **Caching & Logging** — Cache API responses; optionally reuse fetched posts; write prompt/source logs
 - **LoRA helpers** — Lock previous LoRAs; random LoRA amount & weights
+
+## Danbooru Tag Catalog (optional)
+
+RanbooruX can consume a Danbooru tag catalog to drive alias normalization and category-aware filtering. The extension never bundles tag data, so you must supply your own CSV (for example [Hugging Face: newtextdoc1111/danbooru-tag-csv](https://huggingface.co/datasets/newtextdoc1111/danbooru-tag-csv)). When the catalog toggle is enabled you get:
+
+- **Alias awareness** – canonicalises booru aliases before filtering so prompt tags stay consistent.
+- **Category-driven filtering** – honours the existing “Remove series/character/text tags” toggles with real category IDs instead of heuristics.
+- **Hair/Eye preservation** – the `Preserve base hair & eye colors` option expands to every colour that appears in the catalog.
+- **Textual/meta cleanup** – drops watermark/commentary tags defined in the catalog without touching allowlisted hair/eye tags.
+- **Diagnostics panel** – shows ON/OFF status, counts of kept/dropped/normalised tags, and top suggestions for unknown tags.
+
+### Enabling the catalog
+
+1. Open **Removal Filters** and toggle **Use Danbooru Tag Catalog (optional)**.
+2. Paste the absolute path to your `danbooru_tags.csv`. The path is saved to `user/tag_catalog.json` for later sessions.
+3. Use **Reload Catalog** whenever you update the CSV. RanbooruX also hot-reloads on the next search if the file timestamp changes.
+4. Check the **Tag Filtering Diagnostics** accordion for a quick summary of what the catalog changed.
+
+Disable the toggle at any time to fall back to the legacy heuristics.
+
 
 ## All controls (explained)
 
@@ -58,6 +79,9 @@ You can stop here and it already works. The rest of the options are for finer co
 | `Save Credentials to Disk` | Button |  | Writes Gelbooru credentials to `user/gelbooru/credentials.json` so fields stay hidden next time. |
 | `Clear Saved Credentials` | Button |  | Deletes the saved Gelbooru credential file so you can re-enter new values. |
 | `Beta: New Tag Filtering` | Checkbox | true | Enable the normalized removal engine with personal lists and favorites guard. Disable to fall back to legacy behavior. |
+| `Use Danbooru Tag Catalog (optional)` | Checkbox | false | Toggle catalog-backed alias and category filtering. Requires a user-supplied `danbooru_tags.csv`. |
+| `CSV Path` | Textbox |  | Absolute path to your `danbooru_tags.csv`. Visible only when the catalog toggle is enabled and persisted between sessions. |
+| `Reload Catalog` | Button |  | Reloads the CSV immediately (otherwise it hot-reloads the next time you fetch tags). |
 | `Remove common 'bad' tags` | Checkbox | true | Cull frequent watermark, commentary, and UI text tags from prompts. |
 | `Remove tag/text/commentary metadata` | Checkbox | true | Strip speech bubbles, watermark text, and similar metadata from fetched prompts. |
 | `Remove artist tags` | Checkbox | false | Drop artist credits drawn from the source post. |

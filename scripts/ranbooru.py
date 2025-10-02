@@ -6,6 +6,7 @@ import modules.scripts as scripts
 import gradio as gr
 import os
 import json
+import csv
 import unicodedata
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from PIL import Image
@@ -16,6 +17,7 @@ import requests_cache
 import importlib
 import sys
 import traceback
+import difflib
 from datetime import datetime
 from urllib.parse import quote_plus
 
@@ -45,6 +47,7 @@ GELBOORU_CREDENTIALS_FILE = os.path.join(GELBOORU_CREDENTIALS_DIR, 'credentials.
 PERSONAL_REMOVE_FILE = os.path.join(USER_REMOVE_DIR, 'personal_remove.txt')
 FAVORITES_FILE = os.path.join(USER_SEARCH_DIR, 'favorites.txt')
 PROMPT_LOG_JSONL = os.path.join(LOG_DIR, 'prompt_sources.jsonl')
+TAG_CATALOG_CONFIG_FILE = os.path.join(USER_DATA_DIR, 'tag_catalog.json')
 
 REMOVAL_SYNONYM_GROUPS_RAW: Tuple[Set[str], ...] = (
     {'grayscale', 'greyscale', 'monochrome'},
@@ -902,6 +905,203 @@ class e621(Booru):
         return standardized_posts
 
 
+
+class TagCatalogProvider:
+    """Interface for optional tag catalog backends."""
+
+    def enabled(self) -> bool:
+        return False
+
+    def resolve_alias(self, tag: str) -> str:
+        return tag if isinstance(tag, str) else ''
+
+    def category(self, tag: str) -> Optional[int]:
+        return None
+
+    def is_textual(self, tag: str) -> bool:
+        return False
+
+    def is_hair(self, tag: str) -> bool:
+        return False
+
+    def is_eye(self, tag: str) -> bool:
+        return False
+
+    def canonical(self, tag: str) -> str:
+        return self.resolve_alias(tag)
+
+    def has(self, tag: str) -> bool:
+        return False
+
+    def suggestions(self, tag: str, limit: int = 3) -> List[str]:
+        return []
+
+
+class NoopCatalog(TagCatalogProvider):
+    pass
+
+
+class CsvCatalog(TagCatalogProvider):
+    _TEXTUAL_SEED: Set[str] = {
+        'text', 'english_text', 'japanese_text', 'chinese_text', 'korean_text', 'translated', 'translation',
+        'commentary', 'artist_commentary', 'author_commentary', 'publisher_commentary', 'speech_bubble',
+        'speech_bubbles', 'dialogue', 'dialog', 'subtitle', 'subtitles', 'caption', 'captions', 'watermark',
+        'logo', 'signature', 'url', 'filename', 'thought_bubble', 'thought_balloon', 'notice'
+    }
+    _TEXTUAL_KEYWORDS: Tuple[str, ...] = (
+        'text', 'commentary', 'speech_bubble', 'thought_bubble', 'watermark', 'logo', 'subtitle', 'caption',
+        'dialog', 'dialogue', 'filename', 'url', 'signature', 'credit'
+    )
+    _TEXTUAL_PREFIXES: Tuple[str, ...] = (
+        'translated_', 'translation_', 'english_', 'japanese_', 'korean_', 'chinese_'
+    )
+    _TEXTUAL_SUFFIXES: Tuple[str, ...] = (
+        '_text', '_commentary', '_logo', '_watermark', '_subtitle', '_caption', '_speech', '_bubble'
+    )
+    _HAIR_SUFFIXES: Tuple[str, ...] = ('_hair',)
+    _EYE_SUFFIXES: Tuple[str, ...] = ('_eyes', '_eye')
+
+    def __init__(self, path: str):
+        self._path = path
+        self._mtime = 0.0
+        self._aliases: Dict[str, str] = {}
+        self._cats: Dict[str, int] = {}
+        self._counts: Dict[str, int] = {}
+        self._textual: Set[str] = set()
+        self._hair: Set[str] = set()
+        self._eyes: Set[str] = set()
+        self._all_tags: Set[str] = set()
+        self._load()
+
+    @staticmethod
+    def _normalize_name(value: str) -> str:
+        if not isinstance(value, str):
+            return ''
+        cleaned = unicodedata.normalize('NFKC', value).strip().lower()
+        if not cleaned:
+            return ''
+        cleaned = cleaned.replace('-', '_').replace(' ', '_')
+        cleaned = re.sub(r'_+', '_', cleaned)
+        return cleaned
+
+    def _looks_textual(self, tag: str) -> bool:
+        if not tag:
+            return False
+        if tag in self._TEXTUAL_SEED:
+            return True
+        if any(keyword in tag for keyword in self._TEXTUAL_KEYWORDS):
+            return True
+        if any(tag.startswith(prefix) for prefix in self._TEXTUAL_PREFIXES):
+            return True
+        if any(tag.endswith(suffix) for suffix in self._TEXTUAL_SUFFIXES):
+            return True
+        return False
+
+    def _load(self) -> None:
+        if not os.path.isfile(self._path):
+            raise FileNotFoundError(self._path)
+        self._mtime = os.path.getmtime(self._path)
+        self._aliases.clear()
+        self._cats.clear()
+        self._counts.clear()
+        self._textual = set(self._TEXTUAL_SEED)
+        self._hair.clear()
+        self._eyes.clear()
+        self._all_tags.clear()
+        with open(self._path, newline='', encoding='utf-8') as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                raw_name = row.get('tag') or row.get('name') or ''
+                name = self._normalize_name(raw_name)
+                if not name:
+                    continue
+                try:
+                    cat_val = row.get('category')
+                    category = int(cat_val) if cat_val is not None and str(cat_val).strip() != '' else 0
+                except Exception:
+                    category = 0
+                try:
+                    count_val = row.get('count')
+                    count = int(count_val) if count_val is not None and str(count_val).strip() != '' else 0
+                except Exception:
+                    count = 0
+                self._cats[name] = category
+                self._counts[name] = count
+                self._all_tags.add(name)
+                if category == 0:
+                    if any(name.endswith(suffix) for suffix in self._HAIR_SUFFIXES):
+                        self._hair.add(name)
+                    if any(name.endswith(suffix) for suffix in self._EYE_SUFFIXES):
+                        self._eyes.add(name)
+                if self._looks_textual(name):
+                    self._textual.add(name)
+                alias_field = row.get('alias') or row.get('aliases') or ''
+                if alias_field:
+                    for alias_candidate in re.split(r'[\s,]+', alias_field):
+                        alias_name = self._normalize_name(alias_candidate)
+                        if not alias_name or alias_name == name:
+                            continue
+                        self._aliases[alias_name] = name
+        # Include alias forms for hair/eye lookup convenience
+        for alias, canonical in list(self._aliases.items()):
+            if canonical in self._hair:
+                self._hair.add(alias)
+            if canonical in self._eyes:
+                self._eyes.add(alias)
+
+    def maybe_reload(self) -> None:
+        try:
+            current = os.path.getmtime(self._path)
+        except OSError:
+            return
+        if current != self._mtime:
+            self._load()
+
+    def enabled(self) -> bool:
+        return True
+
+    def resolve_alias(self, tag: str) -> str:
+        normalized = self._normalize_name(tag)
+        if not normalized:
+            return ''
+        return self._aliases.get(normalized, normalized)
+
+    def category(self, tag: str) -> Optional[int]:
+        canonical = self.resolve_alias(tag)
+        return self._cats.get(canonical)
+
+    def is_textual(self, tag: str) -> bool:
+        canonical = self.resolve_alias(tag)
+        return canonical in self._textual or self._looks_textual(canonical)
+
+    def is_hair(self, tag: str) -> bool:
+        canonical = self.resolve_alias(tag)
+        return canonical in self._hair
+
+    def is_eye(self, tag: str) -> bool:
+        canonical = self.resolve_alias(tag)
+        return canonical in self._eyes
+
+    def canonical(self, tag: str) -> str:
+        return self.resolve_alias(tag)
+
+    def has(self, tag: str) -> bool:
+        canonical = self.resolve_alias(tag)
+        return canonical in self._cats
+
+    def suggestions(self, tag: str, limit: int = 3) -> List[str]:
+        if limit <= 0 or not self._all_tags:
+            return []
+        normalized = self._normalize_name(tag)
+        if not normalized:
+            return []
+        pool = list(self._all_tags)
+        matches = difflib.get_close_matches(normalized, pool, n=max(limit * 4, limit), cutoff=0.6)
+        if not matches:
+            return []
+        matches.sort(key=lambda name: (-self._counts.get(name, 0), name))
+        return matches[:limit]
+
 class Script(scripts.Script):
     def __init__(self):
         super().__init__()
@@ -938,6 +1138,16 @@ class Script(scripts.Script):
         self._strict_img2img_rejections: List[Dict[str, object]] = []
         self._strict_allowed_subjects: Set[str] = set()
         self._strict_initial_additions: str = ""
+        self._use_tag_catalog: bool = False
+        self._tag_catalog_path: str = ''
+        self._catalog: TagCatalogProvider = NoopCatalog()
+        self._tag_catalog_diag: Dict[str, object] = {}
+        self._catalog_status_md = None
+        self._tag_diag_md = None
+        self._tag_catalog_status_text: str = 'Catalog mode: OFF'
+        self._tag_catalog_linter_limit: int = 3
+        self._catalog_subject_anchors = None
+        self._load_tag_catalog_preferences()
 
     sorting_priority = 1  # Highest priority to run before ALL other extensions
     previous_loras = ''
@@ -1064,6 +1274,222 @@ class Script(scripts.Script):
             except Exception as e:
                 print(f"[R] Error resize: {e}")
                 return img
+    def _load_tag_catalog_preferences(self) -> None:
+        """Load persisted catalog toggle/path if available."""
+        try:
+            if os.path.isfile(TAG_CATALOG_CONFIG_FILE):
+                with open(TAG_CATALOG_CONFIG_FILE, 'r', encoding='utf-8') as handle:
+                    data = json.load(handle)
+                if isinstance(data, dict):
+                    self._use_tag_catalog = bool(data.get('enabled', False))
+                    stored_path = data.get('path')
+                    self._tag_catalog_path = stored_path.strip() if isinstance(stored_path, str) else ''
+        except Exception as exc:
+            print(f"[Ranbooru] Warn: Failed to load tag catalog preferences: {exc}")
+            self._use_tag_catalog = False
+            self._tag_catalog_path = ''
+        finally:
+            self._tag_catalog_status_text = (
+                f"Catalog mode: ON – Path set to {os.path.basename(self._tag_catalog_path)}"
+                if self._use_tag_catalog and self._tag_catalog_path
+                else ("Catalog mode: ON – No path set" if self._use_tag_catalog else "Catalog mode: OFF")
+            )
+
+    def _save_tag_catalog_preferences(self) -> None:
+        data = {
+            'enabled': bool(self._use_tag_catalog),
+            'path': self._tag_catalog_path,
+        }
+        try:
+            os.makedirs(os.path.dirname(TAG_CATALOG_CONFIG_FILE), exist_ok=True)
+            with open(TAG_CATALOG_CONFIG_FILE, 'w', encoding='utf-8') as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            print(f"[Ranbooru] Warn: Failed to save tag catalog preferences: {exc}")
+
+    def _update_catalog_status(self, message: Optional[str] = None) -> None:
+        if message:
+            self._tag_catalog_status_text = message
+        try:
+            if self._catalog_status_md is not None:
+                self._catalog_status_md.update(value=self._tag_catalog_status_text)
+        except Exception:
+            pass
+
+    def _active_catalog(self) -> Optional[TagCatalogProvider]:
+        if not getattr(self, '_use_tag_catalog', False):
+            return None
+        if not getattr(self, '_tag_catalog_path', '').strip():
+            return None
+        catalog = getattr(self, '_catalog', None)
+        if not isinstance(catalog, TagCatalogProvider) or not catalog.enabled():
+            ok, msg = self._load_tag_catalog()
+            self._update_catalog_status(msg)
+            catalog = getattr(self, '_catalog', None)
+            if not ok:
+                return None
+        try:
+            if hasattr(catalog, 'maybe_reload'):
+                catalog.maybe_reload()  # type: ignore[call-arg]
+        except Exception:
+            pass
+        return catalog if isinstance(catalog, TagCatalogProvider) and catalog.enabled() else None
+
+    def _load_tag_catalog(self) -> Tuple[bool, str]:
+        if not getattr(self, '_use_tag_catalog', False):
+            self._catalog = NoopCatalog()
+            return True, "Catalog mode: OFF"
+        path_value = (getattr(self, '_tag_catalog_path', '') or '').strip()
+        if not path_value:
+            self._catalog = NoopCatalog()
+            return False, "Catalog mode: ON – No path set"
+        try:
+            self._catalog = CsvCatalog(path_value)
+            return True, f"Catalog mode: ON – Loaded {os.path.basename(path_value)}"
+        except Exception as exc:
+            self._catalog = NoopCatalog()
+            return False, f"Catalog load failed: {exc} – Falling back to legacy"
+
+    def _render_tag_diag(self, diag: Dict[str, object]) -> str:
+        if not diag:
+            return "(run a search to populate)"
+        mode = diag.get('mode', 'legacy')
+        rules = diag.get('rules') or {}
+        kept = diag.get('kept') or []
+        dropped = diag.get('dropped') or []
+        normalized = diag.get('normalized') or []
+        unknown = diag.get('unknown') or []
+        lines = [f"**Mode:** {mode}"]
+        if isinstance(rules, dict) and rules:
+            active = [k for k, v in rules.items() if v]
+            lines.append(f"Active rules: {', '.join(active) if active else 'none'}")
+        lines.append(f"Kept: {len(kept)} | Dropped: {len(dropped)} | Normalized: {len(normalized)} | Unknown: {len(unknown)}")
+        if unknown:
+            sample = []
+            for entry in unknown[:3]:
+                if isinstance(entry, dict):
+                    tag = entry.get('tag') or entry.get('candidate')
+                    suggestions = entry.get('suggestions') or []
+                    if tag:
+                        sample.append(f"`{tag}` -> {', '.join(suggestions[:3]) if suggestions else 'no suggestions'}")
+            if sample:
+                lines.append("Hints:\n- " + "\n- ".join(sample))
+        return "\n".join(lines)
+
+    def _update_tag_diag(self) -> None:
+        try:
+            if self._tag_diag_md is not None:
+                self._tag_diag_md.update(value=self._render_tag_diag(self._tag_catalog_diag))
+        except Exception:
+            pass
+
+    def _apply_optional_catalog(
+        self,
+        tags: List[str],
+        *,
+        keep_hair_eye: bool,
+        drop_series: bool,
+        drop_characters: bool,
+        drop_textual: bool
+    ) -> Tuple[List[str], Dict[str, object]]:
+        diag: Dict[str, object] = {
+            'mode': 'legacy',
+            'rules': {
+                'drop_series': bool(drop_series),
+                'drop_characters': bool(drop_characters),
+                'drop_textual': bool(drop_textual),
+                'keep_hair_eye': bool(keep_hair_eye),
+            },
+            'kept': [],
+            'dropped': [],
+            'normalized': [],
+            'unknown': [],
+        }
+        catalog = self._active_catalog()
+        if not catalog:
+            self._tag_catalog_diag = diag
+            self._update_tag_diag()
+            return list(tags), diag
+        diag['mode'] = 'catalog'
+
+        subject_anchors = getattr(self, '_catalog_subject_anchors', None)
+        if subject_anchors is None:
+            subject_anchors = {s.replace(' ', '_') for s in getattr(self, '_SUBJECT_TAGS', set())}
+            self._catalog_subject_anchors = subject_anchors
+
+        kept: List[str] = []
+        seen: Set[str] = set()
+        normalized_records: List[Dict[str, str]] = []
+        dropped_records: List[Dict[str, str]] = []
+        unknown_records: List[Dict[str, object]] = []
+        preserved_hair_eye: Set[str] = set()
+        original_subjects: List[str] = []
+
+        for raw in tags:
+            tag = (raw or '').strip()
+            if not tag:
+                continue
+            negated = tag.startswith('-')
+            base = tag[1:] if negated else tag
+            base_compact = re.sub(r'\s+', '_', base.strip().lower())
+            base_compact = re.sub(r'_+', '_', base_compact)
+            if not base_compact:
+                continue
+            if ':' in base_compact:
+                canonical = base_compact
+            else:
+                canonical = catalog.resolve_alias(base_compact) or base_compact
+                if canonical != base_compact:
+                    normalized_records.append({'from': base_compact, 'to': canonical})
+            final_tag = f"-{canonical}" if negated else canonical
+            if final_tag in seen:
+                continue
+            seen.add(final_tag)
+
+            category = catalog.category(canonical)
+            is_hair = catalog.is_hair(canonical)
+            is_eye = catalog.is_eye(canonical)
+            if canonical in subject_anchors:
+                original_subjects.append(canonical)
+
+            reason: Optional[str] = None
+            if drop_series and category == 3:
+                reason = 'series'
+            elif drop_characters and category == 4:
+                reason = 'character'
+            elif drop_textual and catalog.is_textual(canonical):
+                reason = 'textual'
+
+            if reason and not (keep_hair_eye and (is_hair or is_eye)):
+                dropped_records.append({'tag': final_tag, 'reason': reason})
+                continue
+
+            if keep_hair_eye and (is_hair or is_eye):
+                preserved_hair_eye.add(final_tag)
+
+            if not catalog.has(canonical) and ':' not in canonical:
+                suggestions = catalog.suggestions(canonical, self._tag_catalog_linter_limit)
+                unknown_records.append({'tag': canonical, 'suggestions': suggestions})
+
+            kept.append(final_tag)
+
+        if original_subjects and not any(t.lstrip('-') in subject_anchors for t in kept):
+            kept.append(original_subjects[0])
+
+        diag['kept'] = kept
+        diag['dropped'] = dropped_records
+        diag['normalized'] = normalized_records
+        diag['unknown'] = unknown_records
+        if preserved_hair_eye:
+            diag['preserved'] = sorted(preserved_hair_eye)
+
+        self._tag_catalog_diag = diag
+        self._update_tag_diag()
+        print(
+            f"[TagCatalog] mode={diag['mode']} kept={len(kept)} dropped={len(dropped_records)} unknown={len(unknown_records)}"
+        )
+        return kept, diag
+
     def _load_personal_lists(self) -> Tuple[Set[str], Set[str]]:
         personal = set(self._read_list_file(PERSONAL_REMOVE_FILE))
         favorites = set(self._read_list_file(FAVORITES_FILE))
@@ -1075,6 +1501,13 @@ class Script(scripts.Script):
         if tag in cache:
             return cache[tag]
         normalized = self._normalize_tag(tag)
+        if normalized:
+            catalog = self._active_catalog()
+            if catalog:
+                catalog_token = normalized.replace(' ', '_')
+                canonical = catalog.resolve_alias(catalog_token)
+                if canonical and canonical != catalog_token:
+                    normalized = canonical.replace('_', ' ')
         cache[tag] = normalized
         return normalized
 
@@ -1552,12 +1985,22 @@ class Script(scripts.Script):
         normalized = (self._normalize_tag(tag) or '').strip().lower()
         if not normalized:
             normalized = self._canonicalize_raw_tag(tag)
+        if not normalized:
+            return False
+        catalog = self._active_catalog()
+        if catalog and catalog.is_hair(normalized.replace(' ', '_')):
+            return True
         return normalized in self._HAIR_COLOR_TAGS_NORMALIZED
 
     def _is_eye_color_tag(self, tag: str) -> bool:
         normalized = (self._normalize_tag(tag) or '').strip().lower()
         if not normalized:
             normalized = self._canonicalize_raw_tag(tag)
+        if not normalized:
+            return False
+        catalog = self._active_catalog()
+        if catalog and catalog.is_eye(normalized.replace(' ', '_')):
+            return True
         return normalized in self._EYE_COLOR_TAGS_NORMALIZED
 
     def _is_series_tag(self, tag: str) -> bool:
@@ -1566,6 +2009,9 @@ class Script(scripts.Script):
             normalized = self._canonicalize_raw_tag(tag)
         if not normalized:
             return False
+        catalog = self._active_catalog()
+        if catalog and catalog.category(normalized.replace(' ', '_')) == 3:
+            return True
         raw_lower = (tag or '').strip().lower()
         if any(keyword in normalized for keyword in self._SERIES_KEYWORDS_NORMALIZED):
             return True
@@ -1580,6 +2026,7 @@ class Script(scripts.Script):
         eye_tags: set[str] = set()
         if not text or not isinstance(text, str):
             return hair_tags, eye_tags
+        catalog = self._active_catalog()
         tokens = [token.strip() for token in re.split(r'[\s,]+', text) if token.strip()]
         for token in tokens:
             normalized = (self._normalize_tag(token) or '').strip().lower()
@@ -1587,6 +2034,14 @@ class Script(scripts.Script):
                 normalized = self._canonicalize_raw_tag(token)
             if not normalized:
                 continue
+            if catalog:
+                token_key = normalized.replace(' ', '_')
+                if catalog.is_hair(token_key):
+                    canonical = catalog.resolve_alias(token_key)
+                    hair_tags.add(canonical.replace('_', ' ') if canonical else normalized)
+                if catalog.is_eye(token_key):
+                    canonical = catalog.resolve_alias(token_key)
+                    eye_tags.add(canonical.replace('_', ' ') if canonical else normalized)
             if normalized in self._HAIR_COLOR_TAGS_NORMALIZED:
                 hair_tags.add(normalized)
             if normalized in self._EYE_COLOR_TAGS_NORMALIZED:
@@ -1609,6 +2064,9 @@ class Script(scripts.Script):
         normalized = self._normalize_tag(tag)
         if not normalized:
             return False
+        catalog = self._active_catalog()
+        if catalog and catalog.is_textual(normalized.replace(' ', '_')):
+            return True
         if normalized in self._TEXTUAL_TAGS:
             return True
         if ' text' in normalized or normalized.endswith(' text') or normalized.startswith('text '):
@@ -2091,11 +2549,51 @@ class Script(scripts.Script):
             mature_rating = gr.Radio(list(RATINGS.get('gelbooru', RATING_TYPES['none'])), label="Mature Rating", value="All")
             with gr.Accordion("Removal Filters", open=False):
                 beta_filter_toggle = gr.Checkbox(
+
                     label="Beta: New Tag Filtering",
+
                     value=True,
+
                     info="Enable the normalized removal engine with personal lists and favorites guard. Disable to fall back to legacy behavior."
+
                 )
-                gr.Markdown("**Quick Presets** — apply common filter combinations with one click.")
+
+                with gr.Group():
+
+                    gr.Markdown("**Danbooru Tag Catalog**")
+
+                    use_tag_catalog = gr.Checkbox(
+
+                        label="Use Danbooru Tag Catalog (optional)",
+
+                        value=bool(self._use_tag_catalog),
+
+                        info="Load danbooru_tags.csv to drive alias normalization and category-aware filtering."
+
+                    )
+
+                    catalog_path = gr.Textbox(
+
+                        label="CSV Path",
+
+                        value=self._tag_catalog_path,
+
+                        placeholder="/path/to/danbooru_tags.csv",
+
+                        visible=bool(self._use_tag_catalog),
+
+                    )
+
+                    reload_catalog = gr.Button("Reload Catalog", visible=bool(self._use_tag_catalog))
+
+                    catalog_status = gr.Markdown(self._tag_catalog_status_text or "Catalog mode: OFF")
+
+                    self._catalog_status_md = catalog_status
+
+                gr.Markdown("**Quick Presets** � apply common filter combinations with one click.")
+
+
+
                 with gr.Row():
                     preset_strip_series = gr.Button("Strip Series/Character")
                     preset_remove_text = gr.Button("Remove Text-like Tags")
@@ -2182,7 +2680,7 @@ class Script(scripts.Script):
                             personal_dedupe_btn = gr.Button("De-duplicate")
                         with gr.Row():
                             personal_import_file = gr.File(label="Import CSV/TXT", file_types=['.txt', '.csv'], visible=True)
-                            personal_export_btn = gr.DownloadButton("Export", file_name="personal_remove.txt")
+                            personal_export_btn = gr.DownloadButton("Export")
                     with gr.Column():
                         gr.Markdown("**Favorites List**")
                         favorites_dropdown = gr.Dropdown(
@@ -2199,7 +2697,7 @@ class Script(scripts.Script):
                             favorites_dedupe_btn = gr.Button("De-duplicate")
                         with gr.Row():
                             favorites_import_file = gr.File(label="Import CSV/TXT", file_types=['.txt', '.csv'], visible=True)
-                            favorites_export_btn = gr.DownloadButton("Export", file_name="favorites.txt")
+                            favorites_export_btn = gr.DownloadButton("Export")
             shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
             change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
             same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
@@ -2288,6 +2786,78 @@ class Script(scripts.Script):
         favorites_import_file.upload(fn=self._ui_import_favorite_list, inputs=[favorites_import_file], outputs=[favorites_dropdown, favorites_import_file], queue=False)
         favorites_export_btn.click(fn=self._ui_export_favorite_list, inputs=[], outputs=None, queue=False)
 
+        def _ui_toggle_catalog(enabled: bool):
+            self._use_tag_catalog = bool(enabled)
+            if not self._use_tag_catalog:
+                self._catalog = NoopCatalog()
+                self._tag_catalog_diag = {}
+                message = "Catalog mode: OFF"
+            else:
+                if not (self._tag_catalog_path or '').strip():
+                    self._catalog = NoopCatalog()
+                    message = "Catalog mode: ON - No path set"
+                else:
+                    ok, message = self._load_tag_catalog()
+                    if not ok:
+                        self._catalog = NoopCatalog()
+            self._tag_catalog_status_text = message
+            self._save_tag_catalog_preferences()
+            if not self._use_tag_catalog:
+                self._update_tag_diag()
+            return (
+                gr.Textbox.update(visible=self._use_tag_catalog, value=self._tag_catalog_path),
+                gr.Button.update(visible=self._use_tag_catalog),
+                gr.Markdown.update(value=message),
+            )
+
+        def _ui_set_catalog_path(path_value: str):
+            self._tag_catalog_path = (path_value or '').strip()
+            if self._use_tag_catalog:
+                if self._tag_catalog_path:
+                    ok, message = self._load_tag_catalog()
+                    if not ok:
+                        self._catalog = NoopCatalog()
+                else:
+                    self._catalog = NoopCatalog()
+                    message = "Catalog mode: ON - No path set"
+            else:
+                self._catalog = NoopCatalog()
+                message = "Catalog mode: OFF"
+            self._tag_catalog_status_text = message
+            self._save_tag_catalog_preferences()
+            self._update_tag_diag()
+            return (
+                gr.Textbox.update(value=self._tag_catalog_path, visible=self._use_tag_catalog),
+                gr.Markdown.update(value=message),
+            )
+
+        def _ui_reload_catalog():
+            ok, message = self._load_tag_catalog()
+            if not ok:
+                self._catalog = NoopCatalog()
+            self._tag_catalog_status_text = message
+            self._update_tag_diag()
+            return gr.Markdown.update(value=message)
+
+        use_tag_catalog.change(
+            fn=_ui_toggle_catalog,
+            inputs=[use_tag_catalog],
+            outputs=[catalog_path, reload_catalog, catalog_status],
+            queue=False,
+        )
+        catalog_path.change(
+            fn=_ui_set_catalog_path,
+            inputs=[catalog_path],
+            outputs=[catalog_path, catalog_status],
+            queue=False,
+        )
+        reload_catalog.click(
+            fn=_ui_reload_catalog,
+            inputs=None,
+            outputs=[catalog_status],
+            queue=False,
+        )
+
         preset_strip_series.click(
             fn=lambda: (
                 gr.Checkbox.update(value=True),
@@ -2314,7 +2884,7 @@ class Script(scripts.Script):
             queue=False
         )
 
-        return [enabled, tags, booru, gelbooru_api_key, gelbooru_user_id, gelbooru_compat_base_url, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags, remove_furry_tags, remove_headwear_tags, preserve_hair_eye_colors, remove_series_tags, beta_filter_toggle]
+        return [enabled, tags, booru, gelbooru_api_key, gelbooru_user_id, gelbooru_compat_base_url, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags, remove_furry_tags, remove_headwear_tags, preserve_hair_eye_colors, remove_series_tags, beta_filter_toggle, use_tag_catalog, catalog_path]
 
     def check_orientation(self, img):
         if img is None:
@@ -2472,6 +3042,14 @@ class Script(scripts.Script):
             if rating_tag != "All":
                 add_tags_list.append(f"rating:{rating_tag}")
         add_tags_list.append('-animated')
+        if add_tags_list:
+            add_tags_list, _ = self._apply_optional_catalog(
+                add_tags_list,
+                keep_hair_eye=bool(getattr(self, '_preserve_hair_eye_colors', False)),
+                drop_series=bool(getattr(self, '_remove_series_tags', False)),
+                drop_characters=bool(getattr(self, '_remove_character_tags', False)),
+                drop_textual=bool(getattr(self, '_remove_text_tags', False)),
+            )
         tags_query = f"&tags={'+'.join(add_tags_list)}" if add_tags_list else ""
         print(f"[R] Query Tags: '{tags_query}' (post_id={post_id})")
         try:
@@ -3110,7 +3688,7 @@ class Script(scripts.Script):
              choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn,
              crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources_ui,
              remove_artist_tags_ui, remove_character_tags_ui, remove_clothing_tags_ui, remove_text_tags_ui, restrict_subject_tags_ui,
-             remove_furry_tags_ui, remove_headwear_tags_ui, preserve_hair_eye_colors_ui, remove_series_tags_ui, beta_filter_toggle_ui) = args
+             remove_furry_tags_ui, remove_headwear_tags_ui, preserve_hair_eye_colors_ui, remove_series_tags_ui, beta_filter_toggle_ui, use_tag_catalog_ui, tag_catalog_path_ui) = args
         except Exception as e:
             print(f"[R Before] CRITICAL Error unpack args: {e}. Aborting.")
             traceback.print_exc()
@@ -3228,6 +3806,25 @@ class Script(scripts.Script):
             print(f"[R Before] Detected !refresh command - forcing new image fetch")
             print(f"[R Before] Original tags: '{original_tags}' -> Cleaned: '{tags}'")
 
+        self._use_tag_catalog = bool(use_tag_catalog_ui)
+        self._tag_catalog_path = (tag_catalog_path_ui or '').strip()
+        if self._use_tag_catalog:
+            if self._tag_catalog_path:
+                ok, message = self._load_tag_catalog()
+                if not ok:
+                    self._catalog = NoopCatalog()
+            else:
+                self._catalog = NoopCatalog()
+                message = 'Catalog mode: ON - No path set'
+        else:
+            self._catalog = NoopCatalog()
+            self._tag_catalog_diag = {}
+            self._update_tag_diag()
+            message = 'Catalog mode: OFF'
+        self._tag_catalog_status_text = message
+        self._save_tag_catalog_preferences()
+        self._update_catalog_status(message)
+
         personal_remove_tags, favorites_tags = self._load_personal_lists()
 
         current_search_key = f"{booru}_{tags}_{post_id}_{mature_rating}_{sorting_order}"
@@ -3326,6 +3923,10 @@ class Script(scripts.Script):
                     bool(preserve_hair_eye_colors_ui),
                     bool(remove_series_tags_ui),
                 )
+                self._remove_series_tags = bool(remove_series_tags_ui)
+                self._remove_character_tags = bool(remove_character_tags_ui)
+                self._remove_text_tags = bool(remove_text_tags_ui)
+                self._preserve_hair_eye_colors = bool(preserve_hair_eye_colors_ui)
                 base_colors_tuple = (set(base_hair_colors), set(base_eye_colors))
 
                 api = self._get_booru_api(booru, fringe_benefits, getattr(self, '_gelbooru_effective_credentials', None))
@@ -7038,5 +7639,6 @@ class Script(scripts.Script):
             print(f"[R Nuclear Pipeline] Error removing ADetailer from pipeline: {e}")
             import traceback
             traceback.print_exc()
+
 
 
