@@ -1,175 +1,115 @@
 # RanbooruX
 
-![Alt text](pics/ranbooru.png)
+![Logo](pics/ranbooru.png)
 
-RanbooruX is an extension for the [automatic111 Stable Diffusion UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui) and Forge. It adds a panel that fetches tags (and optionally source images) from multiple boorus to quickly generate varied prompts and test models.
+**RanbooruX** is an enhanced fork of the Ranbooru extension for the Automatic1111/Forge Stable Diffusion WebUI.  
+It pulls tags from popular boorus to build varied prompts, with robust **img2img**, **optional ControlNet handoff**, and **optional ADetailer** post‑processing.
 
-## About This Fork
-The primary purpose of this fork is to resolve core **img2img** and **ControlNet** integration issues present in the original Ranbooru repository. **RanbooruX** enables their seamless combination while incorporating extensive refactoring and custom Forge UI scripts to supplant the original ones, addressing critical bugs and performance errors.
+> Tested primarily on **Forge**. Compatible with A1111.
 
-### Technical Enhancements
-RanbooruX is not just a bugfix; it's a complete architectural overhaul designed for stability, maintainability, and modern development practices.
+## Why this fork?
+- Fix brittle img2img/ControlNet interactions and make them **reliable on Forge**.
+- Split the old “remove bad tags” into **clear, no‑surprise filters**.
+- Make installs **noob‑friendly** with `requirements.txt` and a bundled ControlNet helper.
+- Add **favorites**, **file‑driven prompts**, **logging**, and **sensible caching**.
+- ![UI screenshot](pics/image.png)
 
-#### 1. Core Script Refactoring
-The original procedural `ranbooru.py` script was fully refactored into an Object-Oriented architecture.
--   **API Abstraction**: A base `Booru` class now manages common API request logic, error handling, and caching. Each specific booru (e.g., `Gelbooru`, `Danbooru`) inherits from this class, drastically reducing code duplication and making it easier to add new boorus.
--   **Robust Error Handling**: Network timeouts, HTTP errors, and invalid API responses are now gracefully handled with `try...except` blocks and a custom `BooruError` exception, preventing silent failures.
--   **Improved Readability**: The code is organized into smaller, single-responsibility functions with consistent logging (`[R] ...`) for easier debugging.
+See **[Comparison](COMPARISON.md)** for a precise, side‑by‑side with the original.
 
-*   **Robust Data Fetching in RanbooruX:**
-    ```python
-    class Booru():
-        # ...
-        def _fetch_data(self, query_url):
-            print(f"[R] Querying {self.booru_name}: {query_url}")
-            try:
-                res = requests.get(query_url, headers=self.headers, timeout=30)
-                res.raise_for_status()
-                # ...
-            except requests.exceptions.RequestException as e:
-                print(f"[R] Error fetching data from {self.booru_name}: {e}")
-                raise BooruError(f"HTTP Error fetching from {self.booru_name}: {e}") from e
-    ```
-
-#### 2. Stable ControlNet Integration for SD Forge
-RanbooruX features a stable, built-in integration with ControlNet that isolates it from breaking changes in the main ControlNet extension.
--   **Bundled ControlNet Module**: A self-contained copy of the necessary ControlNet API files is included in the `sd_forge_controlnet` directory. This ensures that RanbooruX's core functionality remains stable even if the user's main ControlNet extension is updated or changed.
--   **Structured API Interaction**: The integration uses a `ControlNetUnit` data class (`lib_controlnet/external_code.py`) as a structured payload to reliably send the fetched image and settings to a ControlNet unit.
-
-#### 3. Modernized Installation and Dependency Management
-The installation process was updated to follow modern Python best practices.
--   **From Hardcoded to `requirements.txt`**: The original `install.py` performed a single, hardcoded dependency check. The new version reads dependencies from `requirements.txt`, allowing for version pinning and easier management of multiple packages for both the main extension and the bundled ControlNet module.
-
-*   **Modernized `install.py` in RanbooruX:**
-    ```python
-    import os
-    import launch
-    # ...
-    def _install_req(path, desc):
-        if os.path.exists(path):
-            try:
-                launch.run_pip(f"install -r \"{path}\"", desc)
-            # ...
-    _install_req(os.path.join(ext_root, "requirements.txt"), "RanbooruX requirements")
-    _install_req(os.path.join(ext_root, "sd_forge_controlnet", "requirements.txt"), "...")
-    ```
-
-For a full list of user-facing changes, see the [CHANGELOG.md](CHANGELOG.md).
 ## Installation
-- Clone or copy this repo into your Stable Diffusion WebUI extensions directory (Forge or A1111 compatible).
-- Dependencies are installed automatically by `install.py` (or run `pip install -r requirements.txt`).
-- Restart the WebUI and look for the "RanbooruX" panel.
 
-## Features
-The extension is now divided into two main functionalities that can be used together or separately:
-### RanbooruX
-This is the main part of the extension. It gets a random set of tags from boorus pictures.  
-Here's an explanation of all the parameters:
-- **Booru**: The booru to get the tags from. Right now Gelbooru, Rule34, Safebooru, yande.re, konachan, aibooru, danbooru and xbooru are implemented. You can easily add more creating a class for the booru and adding it to the booru list in the script.
+1. **Clone or copy** this repo into your WebUI’s extensions folder:  
+   `extensions/sd-webui-ranbooruX`
+2. Start/reload the WebUI. The installer will run:
+   - RanbooruX dependencies via **`requirements.txt`**  
+   - (Optional) bundled **ControlNet helper** requirements
+3. Look for the **“RanbooruX”** panel in the UI.
 
-### Supported Boorus and API Details
-`gelbooru`, `danbooru`, `xbooru`, `rule34`, `safebooru`, `konachan`, `yande.re`, `aibooru`, `e621`.
+> Advanced: You can point RanbooruX at a specific Forge ControlNet install with `SD_FORGE_CONTROLNET_PATH` or `RANBOORUX_CN_PATH` before launch.
 
-#### API Compatibility Matrix
+## Quick start
 
-| Booru | Multi-Tag Search | Post ID Support | Rating System | Tag Categorization | Special Features |
-|-------|------------------|-----------------|---------------|-------------------|------------------|
-| **Danbooru** | ❌ Single tag only | ✅ Full | 4-tier custom | ✅ Structured | High-quality art |
-| **Gelbooru** | ✅ Complex queries | ✅ Full | 3-tier standard | Manual parsing | Fringe Benefits option |
-| **Safebooru** | ✅ Multi-tag | ✅ Full | None (SFW only) | Directory-based | SFW content focus |
-| **Rule34.xxx** | ✅ Multi-tag | ✅ Full | 3-tier standard | Flat strings | Adult content |
-| **Konachan** | ✅ Multi-tag | ❌ Not supported | 3-tier standard | ✅ Structured | High-quality curated |
-| **Yande.re** | ✅ Multi-tag | ❌ Not supported | 3-tier standard | ✅ Structured | High-quality curated |
-| **e621** | ✅ Complex queries | ❌ Not supported | Custom | ✅ Highly structured | Furry/anthro focus |
-| **AIBooru** | ✅ Multi-tag | ❌ Not supported | 3-tier standard | Flat strings | AI-generated focus |
-| **XBooru** | ✅ Multi-tag | ✅ Full | 3-tier standard | Directory-based | Alternative to Gelbooru |
+1. Pick a **Booru** (e.g. `gelbooru`). If you choose Gelbooru, enter your API key and user ID when prompted—you can optionally save them for future sessions. Note: Since Gelbooru is the default selection, you may need to choose a different booru first, then reselect Gelbooru to make the credential fields appear.  
+2. Click **Generate** to fetch tags and build a prompt.  
+3. (Optional) Enable **Use Image for Img2Img** and set **Denoising** for image‑to‑image.  
+4. (Optional) Toggle **Use Image for ControlNet (Unit 0)** to pass the same source image to ControlNet.  
+5. (Optional) Enable **ADetailer support** to post‑process each result.
 
-#### Important API Limitations
-- **Post ID Restrictions**: `konachan`, `yande.re`, and `e621` APIs don't support direct post ID lookups
-- **Danbooru Tag Limit**: Only single tags supported (e.g., "1girl" works, "1girl solo" fails)
-- **Rate Limiting**: All boorus implement rate limiting; RanbooruX uses intelligent caching to minimize API calls
-- **Authentication**: All endpoints are public; no authentication required but some may have stricter limits
+You can stop here and it already works. The rest of the options are for finer control.
 
-- **Max Pages**: Maximum pages considered when selecting random posts.
-- **Post ID**: Here you can specify the ID of the post to get the tags from. If you leave it blank, the extension will get a random post (or more than one) from the random page.
-- **Tags to Search (Pre)**: This add the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) to the search query. This is useful if you want to get tags from a specific category, like "1girl" or "solo". Add `!refresh` to force fetch new images instead of reusing cached ones (e.g., `1girl,solo,short_hair,!refresh`).
-- **Tags to Remove (Post)**: This remove the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) from the result query. This is useful if you want to remove tags that are too generic, like "1girl" or "solo". You can also use * with any tag to remove every tags which contains the related word. e.g: *hair will remove every tag that contains the word "hair".
-- **Mature Rating**: This sets the mature rating of the booru. This is useful if you want to get only SFW or NSFW tags. It only works on supported boorus (right now it has been tested only on Gelbooru).
-- **Remove Bad Tags**: This remove tags that you usually don't need (watermarks,text,censor)
-- **Remove Artist tags from prompt**: Automatically removes artist tags (like artist names) from the generated prompt
-- **Remove Character tags from prompt**: Automatically removes character tags (like character names from series) from the generated prompt
-- **Shuffle Tags**: This shuffle the tags before adding them to the text.
-- **Convert** "_" to Spaces": This convert _ to spaces in the tags.
-- **Use the same prompt for all images**: This use the same prompt for all the generated images in the same batch. If not selected, each image will have a different prompt.
-- **Limit Tags**: Limit number of tags by percent or absolute maximum.
-- **Max Tags**: Cap the number of tags used.
-- **Change Background**: "Add Detail", "Force Simple", "Force Transparent/White".
-- **Change Color**: "Force Color", "Force Monochrome".
-- **Sorting Order**: "Random", "Score Descending", "Score Ascending" (post-fetch ordering).
-- **Use img2img**: Use the source image with a separate Img2Img pass.
-- **Send to ControlNet**: Sends image to ControlNet Unit 0 (uses ControlNet external API with automatic p.script_args fallback).
-- **Denoising Strength**: Strength for Img2Img / ControlNet weight.
-- **Use last image as img2img**: Reuse same source image across the batch.
-- **Crop Center**: Center crop before Img2Img.
-- **Use Deepbooru**: Tag fetched images with Deepbooru, with merge mode (Add Before/After/Replace).
-- **Use tags_search.txt** / **Use tags_remove.txt**: Read additional tags from `extensions/<this>/user/search` and `user/remove`.
-- **Mix Prompts** and **Mix Amount**: Mix tags from multiple posts.
-- **Chaos Mode** and **Chaos Amount**: Shuffle tags toward negative (Shuffle All / Shuffle Negative).
-- **Use Same Seed**: Repeat seed across batch.
-- **Use Cache**: Cache API responses with `requests-cache`.
+## Features overview
 
-### LoRAnado
-Pick random LoRAs from a folder and add them to the prompt:
-- **Lock Previous LoRAs**: Uses the same LoRAs of the previous generation. This is useful if you've found an interesting combination and you want to test it with different tags.
-- **LoRAs Subfolder**: The subfolder of the LoRAs folder to use. This is required.
-- **LoRAs Amount**: The amount of LoRAs to use.
-- **Min LoRAs Weight**: The minimum weight of the LoRAs to use in the prompt.
-- **Max LoRAs Weight**: The maximum weight of the LoRAs to use in the prompt.
-- **LoRAs Custom Weights**: Here you can specify the weight to use with the random LoRAs (separated by commas). If you leave it blank, the extension will use the min and max weights. Example: if you have 3 LoRAs you can write: 0.2,0.3,0.5.
+- **Booru Tagging** — Choose from: aibooru, danbooru, e621, gelbooru, gelbooru-compatible, konachan, rule34, safebooru, xbooru, yande.re
+- **Gelbooru credential manager** — Enter API key & user ID inline, optionally save them to `user/gelbooru/credentials.json`, and clear them anytime.
+- **Granular filters** — Artist • Character • Series • Clothing • Furry/Pokémon • Headwear • Keep base hair/eye colors • Enforce subject count
+- ![Removal Filters UI](pics/filters.jpg)
+- **Prompt hygiene** — Remove common “bad” tags; strip commentary/metadata; shuffle; convert underscores
+- **Batch controls** — Same prompt/seed/image per batch; mix tags from multiple posts; chaos amount
+- **File inputs** — Add a line from `user/search/*.txt|csv`; remove via `user/remove/*.txt|csv`; import CSV/TXT; favorites
+- **Pipelines** — Img2Img; ControlNet handoff; optional ADetailer pass
+- **Caching & Logging** — Cache API responses; optionally reuse fetched posts; write prompt/source logs
+- **LoRA helpers** — Lock previous LoRAs; random LoRA amount & weights
 
-### Advanced Features
-RanbooruX includes several advanced features for more granular control over prompt generation and batch processing.
+## All controls (explained)
 
--   **Advanced Prompt Manipulation**: Fine-tune prompts with features like mixing tags from multiple posts, introducing controlled chaos by shuffling tags between positive and negative prompts, and using file-based tag collections for easy reuse.
--   **LoRAnado**: Automatically select and apply LoRAs from a specified subfolder with customizable weights, making it easy to experiment with different model combinations.
--   **Enhanced Batch Processing**: Ensure consistency across batches with options to use the same prompt, source image, and seed for all generated images.
--   **Image Caching and Refresh**: RanbooruX automatically caches fetched images and posts to improve performance. Add `!refresh` to your search tags to force fetch new images instead of reusing cached ones. The cache is automatically invalidated when search parameters change.
--   **Photopea Integration**: The bundled ControlNet module includes a direct integration with Photopea, allowing for in-browser editing of ControlNet input images without leaving the Stable Diffusion UI.
+| Control | Type | Default | What it does |
+|---|---|---|---|
+| `Booru` | Dropdown | gelbooru | Select which booru API to fetch tags from. |
+| `Gelbooru API Key` | Textbox |  | Visible only when Gelbooru is selected; enter the API key from your Gelbooru account (required). |
+| `Gelbooru User ID` | Textbox |  | Visible only when Gelbooru is selected; enter your Gelbooru user ID (required). |
+| `Save Credentials to Disk` | Button |  | Writes Gelbooru credentials to `user/gelbooru/credentials.json` so fields stay hidden next time. |
+| `Clear Saved Credentials` | Button |  | Deletes the saved Gelbooru credential file so you can re-enter new values. |
+| `Beta: New Tag Filtering` | Checkbox | true | Enable the normalized removal engine with personal lists and favorites guard. Disable to fall back to legacy behavior. |
+| `Remove common 'bad' tags` | Checkbox | true | Cull frequent watermark, commentary, and UI text tags from prompts. |
+| `Remove tag/text/commentary metadata` | Checkbox | true | Strip speech bubbles, watermark text, and similar metadata from fetched prompts. |
+| `Remove artist tags` | Checkbox | false | Drop artist credits drawn from the source post. |
+| `Remove character tags` | Checkbox | false | Filter character/franchise tags sourced from metadata. |
+| `Remove series / franchise tags` | Checkbox | false | Ignore franchise/game/anime tags to keep prompts generic. |
+| `Remove clothing tags` | Checkbox | false | Omit apparel/accessory tags introduced by the booru. |
+| `Filter furry/pokémon tags` | Checkbox | false | Remove furry, pokémon, and animal trait tags. |
+| `Filter headwear / halo tags` | Checkbox | false | Strip hats, halos, and similar head accessories. |
+| `Preserve base hair & eye colors` | Checkbox | false | Keep your prompt's hair/eye colors while removing conflicting imports. |
+| `Keep only subject counts` | Checkbox | false | UI control carried over from Ranbooru with the same general purpose. |
+| `Removal Tags` | Dropdown | personal_choices | UI control carried over from Ranbooru with the same general purpose. |
+| `Add tags` | Textbox |  | UI control carried over from Ranbooru with the same general purpose. |
+| `Import CSV/TXT` | File |  | UI control carried over from Ranbooru with the same general purpose. |
+| `Favorite Tags` | Dropdown | favorite_choices | Manage a list of favorite tags that can be appended or protected from removal. |
+| `Add favorites` | Textbox |  | Manage a list of favorite tags that can be appended or protected from removal. |
+| `Import CSV/TXT` | File |  | UI control carried over from Ranbooru with the same general purpose. |
+| `Shuffle tags` | Checkbox | true | Randomizes the order of collected tags before building the prompt. |
+| `Convert "_" to spaces` | Checkbox | false | Replaces underscores with spaces in tags in the final prompt. |
+| `Use same prompt for batch` | Checkbox | false | Uses exactly the same prompt for every image in the batch. |
+| `Gelbooru: Fringe Benefits` | Checkbox | true | Gelbooru-only option that enables the site’s 'fringe benefits' behavior for broader tag results. |
+| `Limit tags by %` | Slider | 1.0 | Limits the number of tags included in the final prompt. |
+| `Change Background` | Radio | "Don't | Apply simple color/background overrides to tags that support them. |
+| `Change Color` | Radio | "Don't | Apply simple color/background overrides to tags that support them. |
+| `Use Image for Img2Img` | Checkbox | false | Sends the source image to the selected pipeline (Img2Img or ControlNet). |
+| `Img2Img Denoising / CN Weight` | Slider | 0.75 | Sends the source image to the selected pipeline (Img2Img or ControlNet). |
+| `Use same image for batch` | Checkbox | false | UI control carried over from Ranbooru with the same general purpose. |
+| `Crop image to fit target` | Checkbox | false | Center-crops the image to the target resolution/aspect. |
+| `Use Deepbooru on image` | Checkbox | false | Runs Deepbooru on the source image and injects the predicted tags. |
+| `DB Tags Position` | Radio | "Add | Where to place Deepbooru tags in relation to the Ranbooru tags. |
+| `Enable RanbooruX ADetailer support` | Checkbox | false | Run RanbooruX's manual ADetailer integration after img2img when enabled. |
+| `Reuse cached booru posts` | Checkbox | false | Leave disabled to fetch fresh images every generation. Enable when you want RanbooruX to reuse the previously cached posts. |
+| `Add line from Search File` | Checkbox | false | Appends one random line from your `user/search/*.txt` or `.csv` file to the prompt. |
+| `Add tags from Remove File` | Checkbox | false | Removes this category of tags from fetched prompts. |
+| `Mix tags from multiple posts` | Checkbox | false | Build prompts by mixing tags pulled from multiple different posts. |
+| `Posts to mix` | Slider | 2 | How many distinct posts to mix together when building a prompt. |
+| `Chaos Amount %` | Slider | 0.5 | Adds randomness to tag selection; higher values increase variation. |
+| `Use same seed for batch` | Checkbox | false | Uses the same seed for all images in the batch for reproducibility. |
+| `Cache Booru API requests` | Checkbox | true | Caches booru API responses to reduce network calls. |
+| `Log image sources/prompts to txt` | Checkbox | false | When enabled, RanbooruX appends a log entry mapping seeds and prompts to the source posts. |
+| `Lock previous LoRAs` | Checkbox | false | Prevents new LoRAs from replacing already-loaded ones. |
+| `LoRAs Subfolder` | Textbox |  | UI control carried over from Ranbooru with the same general purpose. |
+| `LoRAs Amount` | Slider | 1 | How many random LoRAs to load (if any). |
+| `Min LoRAs Weight` | Slider | 0.6 | Weight range for randomly picked LoRAs. |
+| `Max LoRAs Weight` | Slider | 1.0 | Weight range for randomly picked LoRAs. |
 
-For more details on these features, see the [usage.md](usage.md) file.
-## How to Use
-For step-by-step examples and detailed guides, please refer to [usage.md](usage.md).
-### Bundled processing scripts
-- `Comments` (now bundled): removes `#`, `//`, and `/* */` comments from prompts and negative prompts before other scripts run. It is shipped inside this extension (`scripts/comments.py`) so Forge/A1111 will load it automatically with RanbooruX enabled. Note: While bundled with RanbooruX, this script may not be necessary for all users depending on their workflow and other extensions.
+## Known issues (Inherited from Ranbooru, no fixes made)
 
-### Bundled ControlNet and paths
-- `sd_forge_controlnet/` is bundled for compatibility. RanbooruX will try to use Forge’s built‑in ControlNet first, then this bundled copy if needed. During install, its requirements are auto‑installed.
-- You can explicitly point to a ControlNet install by setting one of these env vars before launch:
-  - `SD_FORGE_CONTROLNET_PATH` or `RANBOORUX_CN_PATH` → folder containing `lib_controlnet/external_code.py` (for example your Forge built‑in `extensions-builtin/sd_forge_controlnet`).
+- Chaos/negative modes may error with batch counts > 1 in some setups; retrying usually works.
+- `sd-dynamic-prompts` can conflict with the multiple prompts option — disable that extension if you see odd prompts.
 
-#### Optional: enable full Img2Img + ControlNet on Forge
-If your Forge build does not pass the Img2Img source image to ControlNet Unit 0 by default, you can use the modified ControlNet script bundled with RanbooruX:
+## Credits
 
-1. Make a backup of your original file:
-   - `webui\extensions-builtin\sd_forge_controlnet\scripts\controlnet.py`
-2. Copy the bundled file over it:
-   - From `extensions\sd-webui-ranbooruX\sd_forge_controlnet\scripts\controlnet.py`
-   - To `webui\extensions-builtin\sd_forge_controlnet\scripts\controlnet.py`
-3. Restart the WebUI.
-
-Note: Overwriting is optional and only needed if your current Forge ControlNet does not pick up Img2Img inputs properly with RanbooruX. Keep your backup so you can restore the original at any time.
-
-### ControlNet behavior on Forge
-- Forge’s ControlNet does not expose the A1111 helper functions RanbooruX would use to update units programmatically.
-- As a result, RanbooruX uses the reliable fallback (p.script_args) to pass the image and weight to Unit 0 when you enable “Use Image for ControlNet”. This is expected and working.
-- You’ll see a concise log indicating which path was taken:
-  - External API path: `[R Before] ControlNet configured via external_code.`
-  - Fallback path: `[R Before] ControlNet using fallback p.script_args hack.`
-
-## Known Issues
-- The chaos mode and negative mode can return an error when using a batch size greater than 1 combined with a batch count greater than 1. Rerunning the batch usually fixes the issue.
-- "sd-dynamic-prompts" creates problems with the multiple prompts option. Disabling the extension is the only solution for now.
-- Right now to run the img2img the extension creates an img with 1 step before creating the actual image. I don't know how to fix this, if someone want to help me with this I'd be grateful.
-- Send to controlnet needs an dummy image to work.
----
-## Original Repo by Inzaniak
+- Original Ranbooru by **Inzaniak**  

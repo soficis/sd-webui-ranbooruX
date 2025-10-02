@@ -37,4 +37,18 @@ docs/
 
 # Other
 deploy.ps1
+user
+ranbooru.before_revert.py
 cleancode.md
+docs/
+
+# Development artifacts
+.pytest_cache/
+*.egg-info/
+
+# Personal documents and temp files
+temp_*
+tmp_*
+*backup*
+block.txt
+line241.txt
