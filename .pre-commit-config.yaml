@@ -1,0 +1,26 @@
+repos:
+  - repo: local
+    hooks:
+      - id: no-gradio-update
+        name: Block gr.Component.update
+        entry: python tools/check_no_gradio_update.py
+        language: system
+        pass_filenames: false
+
+      - id: ruff-check
+        name: Ruff
+        entry: python -m ruff check ranboorux tests tools install.py
+        language: system
+        pass_filenames: false
+
+      - id: black-check
+        name: Black
+        entry: python -m black --check ranboorux tests tools install.py
+        language: system
+        pass_filenames: false
+
+      - id: mypy-ranboorux
+        name: Mypy (ranboorux)
+        entry: python -m mypy ranboorux --warn-return-any --warn-unused-ignores
+        language: system
+        pass_filenames: false

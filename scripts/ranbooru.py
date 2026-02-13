@@ -14,19 +14,28 @@ import xml.etree.ElementTree as ET
 import time
 import numpy as np
 import requests_cache
-import importlib
 import sys
 import traceback
 import difflib
+import logging
+import shutil
 from datetime import datetime
 from urllib.parse import quote_plus
+from contextlib import contextmanager
 
 from modules.processing import process_images, StableDiffusionProcessingImg2Img, StableDiffusionProcessing
 from modules import shared
-from modules.sd_hijack import model_hijack
-from modules import deepbooru
-from modules.ui_components import InputAccordion
+try:
+    from modules.ui_components import InputAccordion
+except ImportError:
+    InputAccordion = gr.Accordion
 from modules.scripts import basedir
+from ranboorux import prompting as rb_prompting
+from ranboorux import image_ops as rb_image_ops
+from ranboorux import io_lists as rb_io_lists
+from ranboorux import catalog as rb_catalog
+from ranboorux.integrations import controlnet as rb_controlnet_integration
+from ranboorux.integrations import adetailer as rb_adetailer_integration
 
 # --- Constants and Paths ---
 EXTENSION_ROOT = basedir()
@@ -48,6 +57,10 @@ PERSONAL_REMOVE_FILE = os.path.join(USER_REMOVE_DIR, 'personal_remove.txt')
 FAVORITES_FILE = os.path.join(USER_SEARCH_DIR, 'favorites.txt')
 PROMPT_LOG_JSONL = os.path.join(LOG_DIR, 'prompt_sources.jsonl')
 TAG_CATALOG_CONFIG_FILE = os.path.join(USER_DATA_DIR, 'tag_catalog.json')
+BUNDLED_CATALOG_DIR = os.path.join(EXTENSION_ROOT, 'data', 'catalogs')
+BUNDLED_CATALOG_PATH = os.path.join(BUNDLED_CATALOG_DIR, 'danbooru_tags.csv')
+USER_CATALOGS_DIR = os.path.join(USER_DATA_DIR, 'catalogs')
+os.makedirs(USER_CATALOGS_DIR, exist_ok=True)
 
 REMOVAL_SYNONYM_GROUPS_RAW: Tuple[Set[str], ...] = (
     {'grayscale', 'greyscale', 'monochrome'},
@@ -84,6 +97,8 @@ POST_AMOUNT = 100
 COUNT = 100
 DEBUG = False
 
+_ranbooru_logger = logging.getLogger("ranboorux")
+
 FURRY_CORE_TAGS = {
     'anthro', 'furry', 'feral', 'feral_focus', 'feral_only', 'scalie', 'avian', 'hooved_animal', 'digitigrade',
     'taur', 'mythological_creature', 'kemono', 'beastman', 'beastgirl', 'beastboy', 'kemonomimi', 'fur', 'fur_focus'
@@ -114,6 +129,7 @@ EYE_COLOR_TAGS = {
     'heterochromia', 'multicolored_eyes', 'gradient_eyes'
 }
 
+
 SERIES_KEYWORDS = {
     'franchise', 'series', 'canon', 'official_media', 'gacha_game', 'anime', 'manga_franchise', 'visual_novel'
 }
@@ -140,15 +156,56 @@ RATINGS = {
 
 STRICT_IMG2IMG_EXTRA_ROUNDS = 2
 STRICT_IMG2IMG_LOG_SAMPLE = 5
+_TAG_SPLIT_RE = re.compile(r"[,\s]+")
+_LORANADO_PONY_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r'(?<![a-z0-9])pony(?![a-z0-9])'),
+    re.compile(r'(?<![a-z0-9])pony[ _-]*xl(?![a-z0-9])'),
+    re.compile(r'(?<![a-z0-9])pony[ _-]*diffusion(?:[ _-]*xl)?(?![a-z0-9])'),
+    re.compile(r'(?<![a-z0-9])ponydiffusion(?:xl)?(?![a-z0-9])'),
+    re.compile(r'(?<![a-z0-9])pdxl(?![a-z0-9])'),
+    re.compile(r'(?<![a-z0-9])xlp(?![a-z0-9])'),
+)
+_LORANADO_PONY_METADATA_KEY_HINTS: Tuple[str, ...] = (
+    'base_model',
+    'base model',
+    'sd_model',
+    'modelspec.architecture',
+    'modelspec.title',
+    'modelspec.description',
+    'architecture',
+    'model_version',
+)
+
+
+def _log(message: object) -> None:
+    if isinstance(message, str) and not message.startswith("[R]"):
+        message = f"[R] {message}"
+    print(message)
+
+
+def _gr_component_update(component_or_class, **kwargs):
+    """Gradio 3/4 compatibility helper for component updates."""
+    update_method = getattr(component_or_class, 'update', None)
+    if callable(update_method):
+        return update_method(**kwargs)
+    return component_or_class(**kwargs)
+
+
+def _gr_update(**kwargs):
+    """Compatibility wrapper for gr.update() and fallback dict semantics."""
+    update_fn = getattr(gr, 'update', None)
+    if callable(update_fn):
+        return update_fn(**kwargs)
+    return kwargs
 
 
 def get_available_ratings(booru):
     choices = list(RATINGS.get(booru, RATING_TYPES['none']).keys())
-    return gr.Radio.update(choices=choices, value="All", visible=True)
+    return _gr_component_update(gr.Radio, choices=choices, value="All", visible=True)
 
 
 def show_fringe_benefits(booru):
-    return gr.Checkbox.update(visible=(booru == 'gelbooru'), value=True)
+    return _gr_component_update(gr.Checkbox, visible=(booru == 'gelbooru'), value=True)
 
 
 def _sanitize_gelbooru_credential(value: Optional[str]) -> str:
@@ -206,7 +263,7 @@ def _load_gelbooru_credentials_from_disk() -> Optional[Dict[str, str]]:
         if api_key and user_id:
             return {'api_key': api_key, 'user_id': user_id}
     except Exception as exc:
-        print(f"[R] Warn: Failed to read Gelbooru credentials: {exc}")
+        _log(f"Warn: Failed to read Gelbooru credentials: {exc}")
     return None
 
 
@@ -222,7 +279,7 @@ def _save_gelbooru_credentials_to_disk(api_key: str, user_id: str) -> bool:
             json.dump(payload, handle)
         return True
     except Exception as exc:
-        print(f"[R] Error: Unable to save Gelbooru credentials: {exc}")
+        _log(f"Error: Unable to save Gelbooru credentials: {exc}")
         return False
 
 
@@ -232,96 +289,101 @@ def _clear_gelbooru_credentials_from_disk() -> bool:
             os.remove(GELBOORU_CREDENTIALS_FILE)
         return True
     except Exception as exc:
-        print(f"[R] Warn: Failed to clear Gelbooru credentials: {exc}")
+        _log(f"Warn: Failed to clear Gelbooru credentials: {exc}")
         return False
 
 
+POST_ID_UNSUPPORTED_ERRORS = {
+    "konachan": "Konachan does not support post IDs",
+    "yande.re": "Yande.re does not support post IDs",
+    "e621": "e621 does not support post IDs",
+}
+
+
 def check_booru_exceptions(booru, post_id, tags):
-    if booru == 'konachan' and post_id:
-        raise ValueError("Konachan does not support post IDs")
-    if booru == 'yande.re' and post_id:
-        raise ValueError("Yande.re does not support post IDs")
-    if booru == 'e621' and post_id:
-        raise ValueError("e621 does not support post IDs")
+    if post_id and booru in POST_ID_UNSUPPORTED_ERRORS:
+        raise ValueError(POST_ID_UNSUPPORTED_ERRORS[booru])
     if booru == 'danbooru' and tags and len([t for t in tags.split(',') if t.strip()]) > 1:
         raise ValueError("Danbooru API only supports one tag.")
 
 
 def resize_image(img, width, height, cropping=True):
-    if img is None:
-        return None
-    if width <= 0 or height <= 0:
-        print(f"[R] Warn: Invalid resize {width}x{height}")
-        return img
     try:
-        if cropping:
-            img_aspect = img.width / img.height
-            target_aspect = width / height
-            if img_aspect > target_aspect:
-                new_height = height
-                new_width = int(new_height * img_aspect)
-            else:
-                new_width = width
-                new_height = int(new_width / img_aspect)
-            img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            left = (new_width - width) / 2
-            top = (new_height - height) / 2
-            right = (new_width + width) / 2
-            bottom = (new_height + height) / 2
-            return img_resized.crop((left, top, right, bottom))
-        else:
-            return img.resize((width, height), Image.Resampling.LANCZOS)
+        return rb_image_ops.resize_image(img, width, height, cropping=cropping)
     except Exception as e:
-        print(f"[R] Error resize: {e}")
+        _log(f"Error resize: {e}")
         return img
 
 
-def modify_prompt(prompt, tagged_prompt, type_deepbooru):
-    prompt_tags = [tag.strip() for tag in prompt.split(',') if tag.strip()]
-    tagged_tags = [tag.strip() for tag in tagged_prompt.split(',') if tag.strip()]
-    if type_deepbooru == 'Add Before':
-        combined_tags = tagged_tags + prompt_tags
-    elif type_deepbooru == 'Add After':
-        combined_tags = prompt_tags + tagged_tags
-    elif type_deepbooru == 'Replace':
-        combined_tags = tagged_tags
-    else:
-        combined_tags = prompt_tags + tagged_tags
-    return ','.join(list(dict.fromkeys(combined_tags)))
+def _split_prompt_tags(prompt: str) -> List[str]:
+    return [tag.strip() for tag in prompt.split(',') if tag.strip()]
+
+
+def _dedupe_keep_order(tags: Iterable[str]) -> List[str]:
+    return list(dict.fromkeys(tags))
+
+
+def _split_tag_string(value: Optional[str]) -> List[str]:
+    if not isinstance(value, str):
+        return []
+    return [tag for tag in _TAG_SPLIT_RE.split(value.strip()) if tag]
+
+
+def _coerce_multiselect_values(value: object) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if isinstance(value, (list, tuple, set)):
+        values: List[str] = []
+        for item in value:
+            if item is None:
+                continue
+            cleaned = str(item).strip()
+            if cleaned:
+                values.append(cleaned)
+        return values
+    cleaned = str(value).strip()
+    return [cleaned] if cleaned else []
+
+
+def _split_tag_string_override(value: object) -> Optional[List[str]]:
+    if value is None or not isinstance(value, str):
+        return None
+    return _split_tag_string(value)
 
 
 def remove_repeated_tags(prompt):
-    if not prompt or not isinstance(prompt, str):
-        return ""
-    tags = [tag.strip() for tag in prompt.split(',') if tag.strip()]
-    if not tags:
-        return ""
     try:
-        unique_tags_string = ','.join(list(dict.fromkeys(tags)))
-        return unique_tags_string if unique_tags_string is not None else ""
+        return rb_prompting.remove_repeated_tags(prompt)
     except Exception as e:
-        print(f"[R] Error remove_repeated: {e}. Input: '{prompt}'")
+        _log(f"Error remove_repeated: {e}. Input: '{prompt}'")
         return ""
 
 
 def limit_prompt_tags(prompt, limit_val, mode):
-    tags = [tag.strip() for tag in prompt.split(',') if tag.strip()]
-    if not tags:
-        return ""
     try:
-        if mode == 'Limit':
-            keep_count = max(1, int(len(tags) * float(limit_val)))
-        elif mode == 'Max':
-            keep_count = max(1, int(limit_val))
-        else:
-            return prompt
-        return ','.join(tags[:keep_count])
+        return rb_prompting.limit_prompt_tags(prompt, limit_val, mode)
     except ValueError:
-        print(f"[R] Error limiting tags: Invalid limit value '{limit_val}'")
+        _log(f"Error limiting tags: Invalid limit value '{limit_val}'")
         return prompt
     except Exception as e:
-        print(f"[R] Error limiting tags: {e}")
+        _log(f"Error limiting tags: {e}")
         return prompt
+
+
+POST_URL_TEMPLATES = {
+    "danbooru": "https://danbooru.donmai.us/posts/{pid}",
+    "gelbooru": "https://gelbooru.com/index.php?page=post&s=view&id={pid}",
+    "safebooru": "https://safebooru.org/index.php?page=post&s=view&id={pid}",
+    "rule34": "https://rule34.xxx/index.php?page=post&s=view&id={pid}",
+    "xbooru": "https://xbooru.com/index.php?page=post&s=view&id={pid}",
+    "konachan": "https://konachan.com/post/show/{pid}",
+    "yandere": "https://yande.re/post/show/{pid}",
+    "aibooru": "https://aibooru.online/posts/{pid}",
+    "e621": "https://e621.net/posts/{pid}",
+}
 
 
 def get_original_post_url(post):
@@ -330,37 +392,22 @@ def get_original_post_url(post):
         pid = post.get('id')
         if not pid:
             return None
-        if booru == 'danbooru':
-            return f"https://danbooru.donmai.us/posts/{pid}"
-        if booru == 'gelbooru':
-            return f"https://gelbooru.com/index.php?page=post&s=view&id={pid}"
         if booru == 'gelbooru-compatible':
             base = (post.get('source_base_url') or '').strip()
             if base:
                 return f"{base.rstrip('/')}/index.php?page=post&s=view&id={pid}"
             return None
-        if booru == 'safebooru':
-            return f"https://safebooru.org/index.php?page=post&s=view&id={pid}"
-        if booru == 'rule34':
-            return f"https://rule34.xxx/index.php?page=post&s=view&id={pid}"
-        if booru == 'xbooru':
-            return f"https://xbooru.com/index.php?page=post&s=view&id={pid}"
-        if booru == 'konachan':
-            return f"https://konachan.com/post/show/{pid}"
-        if booru == 'yandere':
-            return f"https://yande.re/post/show/{pid}"
-        if booru == 'aibooru':
-            return f"https://aibooru.online/posts/{pid}"
-        if booru == 'e621':
-            return f"https://e621.net/posts/{pid}"
+        template = POST_URL_TEMPLATES.get(booru)
+        if template:
+            return template.format(pid=pid)
         return None
     except Exception:
         return None
 
 
 def generate_chaos(pos_tags, neg_tags, chaos_amount):
-    pos_tag_list = [tag.strip() for tag in pos_tags.split(',') if tag.strip()]
-    neg_tag_list = [tag.strip() for tag in neg_tags.split(',') if tag.strip()]
+    pos_tag_list = _split_prompt_tags(pos_tags)
+    neg_tag_list = _split_prompt_tags(neg_tags)
     chaos_list = list(set(pos_tag_list + neg_tag_list))
     if not chaos_list:
         return pos_tags, neg_tags
@@ -370,7 +417,7 @@ def generate_chaos(pos_tags, neg_tags, chaos_amount):
     pos_add = chaos_list[len_list:]
     final_pos = list(set(pos_tag_list) - set(neg_add)) + pos_add
     final_neg = list(set(neg_tag_list) - set(pos_add)) + neg_add
-    return ','.join(list(dict.fromkeys(final_pos))), ','.join(list(dict.fromkeys(final_neg)))
+    return ','.join(_dedupe_keep_order(final_pos)), ','.join(_dedupe_keep_order(final_neg))
 
 
 class BooruError(Exception):
@@ -384,25 +431,25 @@ class Booru():
         self.headers = {'user-agent': f'Ranbooru Extension/{Script.version} for Forge'}
 
     def _fetch_data(self, query_url):
-        print(f"[R] Querying {self.booru_name}: {query_url}")
+        _log(f"Querying {self.booru_name}: {query_url}")
         try:
             res = requests.get(query_url, headers=self.headers, timeout=30)
             res.raise_for_status()
             if 'application/json' not in res.headers.get('content-type', ''):
-                print(f"[R] Warn: Unexpected content type '{res.headers.get('content-type')}' from {self.booru_name}. Expected JSON.")
+                _log(f"Warn: Unexpected content type '{res.headers.get('content-type')}' from {self.booru_name}. Expected JSON.")
                 try:
                     return res.json()
                 except requests.exceptions.JSONDecodeError:
                     return None
             return res.json()
         except requests.exceptions.Timeout:
-            print(f"[R] Error: Timeout fetching data from {self.booru_name}.")
+            _log(f"Error: Timeout fetching data from {self.booru_name}.")
             raise BooruError(f"Timeout connecting to {self.booru_name}") from None
         except requests.exceptions.RequestException as e:
-            print(f"[R] Error fetching data from {self.booru_name}: {e}")
+            _log(f"Error fetching data from {self.booru_name}: {e}")
             raise BooruError(f"HTTP Error fetching from {self.booru_name}: {e}") from e
         except Exception as e:
-            print(f"[R] Error processing response from {self.booru_name}: {e}")
+            _log(f"Error processing response from {self.booru_name}: {e}")
             raise BooruError(f"Error processing response from {self.booru_name}: {e}") from e
 
     def _is_direct_image_url(self, url):
@@ -451,25 +498,22 @@ class Booru():
             if isinstance(tags_dict.get('copyright'), list):
                 copyright_tags = tags_dict.get('copyright', [])
         if 'tag_string_artist' in post_data:
-            try:
-                artist_tags = [t for t in re.split(r'[\,\s]+', post_data.get('tag_string_artist', '').strip()) if t]
-            except Exception:
-                pass
+            parsed = _split_tag_string_override(post_data.get('tag_string_artist'))
+            if parsed is not None:
+                artist_tags = parsed
         if 'tag_string_character' in post_data:
-            try:
-                character_tags = [t for t in re.split(r'[\,\s]+', post_data.get('tag_string_character', '').strip()) if t]
-            except Exception:
-                pass
+            parsed = _split_tag_string_override(post_data.get('tag_string_character'))
+            if parsed is not None:
+                character_tags = parsed
         if 'tag_string_copyright' in post_data:
-            try:
-                copyright_tags = [t for t in re.split(r'[\,\s]+', post_data.get('tag_string_copyright', '').strip()) if t]
-            except Exception:
-                pass
+            parsed = _split_tag_string_override(post_data.get('tag_string_copyright'))
+            if parsed is not None:
+                copyright_tags = parsed
 
         # For boorus that don't provide categorized tags, try to extract character tags from the main tag string
         # This handles cases like Gelbooru/Danbooru where character tags are mixed with other tags
         if not character_tags and isinstance(raw_tags, str):
-            all_tags = [t.strip() for t in re.split(r'[\,\s]+', raw_tags) if t.strip()]
+            all_tags = _split_tag_string(raw_tags)
             for tag in all_tags:
                 # Common patterns for character tags: contains parentheses (series name) or ends with specific patterns
                 if ('(' in tag and ')' in tag) or tag.endswith(r'_\(series\)') or tag.endswith(r'_\(character\)'):
@@ -515,7 +559,7 @@ class Gelbooru(Booru):
         COUNT = 0
         all_fetched_posts = []
         if not self.api_key or not self.user_id:
-            raise BooruError("Gelbooru requires an API key and user ID. Set them under RanbooruX → Gelbooru settings.")
+            raise BooruError("Gelbooru requires an API key and user ID. Set them under RanbooruX ? Gelbooru settings.")
         credentials_query = f"&api_key={quote_plus(self.api_key)}&user_id={quote_plus(self.user_id)}"
         if post_id:
             query_url = f"{self.base_api_url}{credentials_query}&id={post_id}{tags_query}"
@@ -575,13 +619,13 @@ class GelbooruCompatible(Booru):
         raise BooruError(f"HTTP Error fetching from {self.booru_name}: {last_error}")
 
     def _log_retry(self, url: str, attempt: int, message: str) -> None:
-        print(f"[R] {self.booru_name}: retry {attempt} for {url} - {message}")
+        _log(f"{self.booru_name}: retry {attempt} for {url} - {message}")
 
     def _log_snippet(self, response: requests.Response) -> None:
         if not self.log_diagnostics:
             return
         snippet = response.text.strip().replace('\n', ' ')[:200]
-        print(f"[R] {self.booru_name}: {response.url} -> {snippet}")
+        _log(f"{self.booru_name}: {response.url} -> {snippet}")
 
     def _parse_json_entities(self, payload, entity_key: str) -> Tuple[List[dict], Optional[int]]:
         entries: List[dict] = []
@@ -997,6 +1041,57 @@ class CsvCatalog(TagCatalogProvider):
             return True
         return False
 
+    def _process_row(self, row: List[str], columns: Optional[Dict[str, int]] = None) -> None:
+        def _safe_get(idx: Optional[int]) -> str:
+            if idx is None:
+                return ''
+            if idx < 0 or idx >= len(row):
+                return ''
+            return row[idx]
+
+        if columns:
+            raw_name = _safe_get(columns.get('tag'))
+            if not raw_name:
+                raw_name = _safe_get(columns.get('name'))
+            cat_val = _safe_get(columns.get('category'))
+            count_val = _safe_get(columns.get('count'))
+            alias_field = _safe_get(columns.get('alias'))
+            if not alias_field:
+                alias_field = _safe_get(columns.get('aliases'))
+        else:
+            raw_name = row[0] if len(row) > 0 else ''
+            cat_val = row[1] if len(row) > 1 else ''
+            count_val = row[2] if len(row) > 2 else ''
+            alias_field = row[3] if len(row) > 3 else ''
+
+        name = self._normalize_name(raw_name)
+        if not name:
+            return
+        try:
+            category = int(cat_val) if cat_val is not None and str(cat_val).strip() != '' else 0
+        except Exception:
+            category = 0
+        try:
+            count = int(count_val) if count_val is not None and str(count_val).strip() != '' else 0
+        except Exception:
+            count = 0
+        self._cats[name] = category
+        self._counts[name] = count
+        self._all_tags.add(name)
+        if category == 0:
+            if any(name.endswith(suffix) for suffix in self._HAIR_SUFFIXES):
+                self._hair.add(name)
+            if any(name.endswith(suffix) for suffix in self._EYE_SUFFIXES):
+                self._eyes.add(name)
+        if self._looks_textual(name):
+            self._textual.add(name)
+        if alias_field:
+            for alias_candidate in re.split(r'[\s,]+', alias_field):
+                alias_name = self._normalize_name(alias_candidate)
+                if not alias_name or alias_name == name:
+                    continue
+                self._aliases[alias_name] = name
+
     def _load(self) -> None:
         if not os.path.isfile(self._path):
             raise FileNotFoundError(self._path)
@@ -1009,39 +1104,18 @@ class CsvCatalog(TagCatalogProvider):
         self._eyes.clear()
         self._all_tags.clear()
         with open(self._path, newline='', encoding='utf-8') as handle:
-            reader = csv.DictReader(handle)
+            reader = csv.reader(handle)
+            first_row = next(reader, None)
+            if first_row is None:
+                raise ValueError("CSV file is empty")
+            header_map: Optional[Dict[str, int]] = None
+            lowered = [str(cell or '').strip().lower() for cell in first_row]
+            if len(lowered) >= 3 and lowered[0] in ('tag', 'name') and lowered[1] == 'category':
+                header_map = {name: idx for idx, name in enumerate(lowered)}
+            else:
+                self._process_row(first_row, None)
             for row in reader:
-                raw_name = row.get('tag') or row.get('name') or ''
-                name = self._normalize_name(raw_name)
-                if not name:
-                    continue
-                try:
-                    cat_val = row.get('category')
-                    category = int(cat_val) if cat_val is not None and str(cat_val).strip() != '' else 0
-                except Exception:
-                    category = 0
-                try:
-                    count_val = row.get('count')
-                    count = int(count_val) if count_val is not None and str(count_val).strip() != '' else 0
-                except Exception:
-                    count = 0
-                self._cats[name] = category
-                self._counts[name] = count
-                self._all_tags.add(name)
-                if category == 0:
-                    if any(name.endswith(suffix) for suffix in self._HAIR_SUFFIXES):
-                        self._hair.add(name)
-                    if any(name.endswith(suffix) for suffix in self._EYE_SUFFIXES):
-                        self._eyes.add(name)
-                if self._looks_textual(name):
-                    self._textual.add(name)
-                alias_field = row.get('alias') or row.get('aliases') or ''
-                if alias_field:
-                    for alias_candidate in re.split(r'[\s,]+', alias_field):
-                        alias_name = self._normalize_name(alias_candidate)
-                        if not alias_name or alias_name == name:
-                            continue
-                        self._aliases[alias_name] = name
+                self._process_row(row, header_map)
         # Include alias forms for hair/eye lookup convenience
         for alias, canonical in list(self._aliases.items()):
             if canonical in self._hair:
@@ -1138,8 +1212,10 @@ class Script(scripts.Script):
         self._strict_img2img_rejections: List[Dict[str, object]] = []
         self._strict_allowed_subjects: Set[str] = set()
         self._strict_initial_additions: str = ""
-        self._use_tag_catalog: bool = False
+        self._use_tag_catalog: bool = True
+        self._catalog_source: str = 'bundled'
         self._tag_catalog_path: str = ''
+        self._custom_catalog_path: str = ''
         self._catalog: TagCatalogProvider = NoopCatalog()
         self._tag_catalog_diag: Dict[str, object] = {}
         self._catalog_status_md = None
@@ -1147,6 +1223,8 @@ class Script(scripts.Script):
         self._tag_catalog_status_text: str = 'Catalog mode: OFF'
         self._tag_catalog_linter_limit: int = 3
         self._catalog_subject_anchors = None
+        self._use_legacy_filter_engine: bool = False
+        self._loranado_scan_cache: Dict[str, Dict[str, object]] = {}
         self._load_tag_catalog_preferences()
 
     sorting_priority = 1  # Highest priority to run before ALL other extensions
@@ -1163,6 +1241,7 @@ class Script(scripts.Script):
     _manual_adetailer_prev_enabled = False
     _DASH_UNDERSCORE_RE = re.compile(r'[_\-]+')
     _WHITESPACE_RE = re.compile(r'\s+')
+    _LORANADO_MAX_HEADER_BYTES = 4 * 1024 * 1024
     _USER_LIST_PATHS = {
         'personal': PERSONAL_REMOVE_FILE,
         'favorites': FAVORITES_FILE,
@@ -1201,7 +1280,6 @@ class Script(scripts.Script):
     _EYE_COLOR_TAGS_NORMALIZED = {tag.replace('_', ' ') for tag in EYE_COLOR_TAGS}
     _SERIES_KEYWORDS_NORMALIZED = {tag.replace('_', ' ') for tag in SERIES_KEYWORDS}
     _SERIES_SUFFIXES_NORMALIZED = tuple(suffix.replace('_', ' ') for suffix in SERIES_SUFFIXES)
-
     @staticmethod
     def _canonicalize_raw_tag(tag: str) -> str:
         if not isinstance(tag, str):
@@ -1225,80 +1303,67 @@ class Script(scripts.Script):
 
     def _ensure_user_file(self, path: str) -> None:
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            if not os.path.isfile(path):
-                with open(path, 'w', encoding='utf-8') as handle:
-                    handle.write('')
+            rb_io_lists.ensure_user_file(path)
         except Exception as exc:
             print(f"[R Files] Failed to ensure file {path}: {exc}")
 
     def _read_list_file(self, path: str) -> List[str]:
-        self._ensure_user_file(path)
         try:
-            with open(path, 'r', encoding='utf-8') as handle:
-                contents = handle.read()
+            return rb_io_lists.read_list_file(path, normalize_tag=self._normalize_tag)
         except Exception as exc:
             print(f"[R Files] Failed to read list file {path}: {exc}")
             return []
-        if not contents:
-            return []
-        parts = [segment.strip() for segment in re.split(r'[\n,]+', contents) if segment.strip()]
-        seen: Set[str] = set()
-        ordered: List[str] = []
-        for part in parts:
-            key = self._normalize_tag(part) or part.casefold()
 
-            if img is None:
-                return None
-            if width <= 0 or height <= 0:
-                print(f"[R] Warn: Invalid resize {width}x{height}")
-                return img
-            try:
-                if cropping:
-                    img_aspect = img.width / img.height
-                    target_aspect = width / height
-                    if img_aspect > target_aspect:
-                        new_height = height
-                        new_width = int(new_height * img_aspect)
-                    else:
-                        new_width = width
-                        new_height = int(new_width / img_aspect)
-                    img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                    left = (new_width - width) / 2
-                    top = (new_height - height) / 2
-                    right = (new_width + width) / 2
-                    bottom = (new_height + height) / 2
-                    return img_resized.crop((left, top, right, bottom))
-                else:
-                    return img.resize((width, height), Image.Resampling.LANCZOS)
-            except Exception as e:
-                print(f"[R] Error resize: {e}")
-                return img
-    def _load_tag_catalog_preferences(self) -> None:
-        """Load persisted catalog toggle/path if available."""
+    def _write_list_file(self, path: str, tags: Iterable[str]) -> None:
         try:
-            if os.path.isfile(TAG_CATALOG_CONFIG_FILE):
-                with open(TAG_CATALOG_CONFIG_FILE, 'r', encoding='utf-8') as handle:
-                    data = json.load(handle)
-                if isinstance(data, dict):
-                    self._use_tag_catalog = bool(data.get('enabled', False))
-                    stored_path = data.get('path')
-                    self._tag_catalog_path = stored_path.strip() if isinstance(stored_path, str) else ''
+            rb_io_lists.write_list_file(path, tags, normalize_tag=self._normalize_tag)
+        except Exception as exc:
+            print(f"[R Files] Failed to write list file {path}: {exc}")
+
+    def _load_tag_catalog_preferences(self) -> None:
+        """Load persisted catalog settings (supports v1 path migration)."""
+        self._use_tag_catalog = True
+        self._catalog_source = 'bundled'
+        self._custom_catalog_path = ''
+        self._tag_catalog_path = ''
+        try:
+            if not os.path.isfile(TAG_CATALOG_CONFIG_FILE):
+                self._tag_catalog_status_text = self._format_catalog_status()
+                return
+            with open(TAG_CATALOG_CONFIG_FILE, 'r', encoding='utf-8') as handle:
+                data = json.load(handle)
+            if not isinstance(data, dict):
+                self._tag_catalog_status_text = self._format_catalog_status()
+                return
+            # v1 -> v2 migration
+            if 'source' not in data:
+                legacy_path = data.get('path', '')
+                legacy_clean = legacy_path.strip() if isinstance(legacy_path, str) else ''
+                if legacy_clean and os.path.isfile(legacy_clean):
+                    data['source'] = 'custom'
+                    data['custom_path'] = legacy_clean
+                else:
+                    data['source'] = 'bundled'
+                    data['custom_path'] = ''
+            self._use_tag_catalog = bool(data.get('enabled', True))
+            source = str(data.get('source', 'bundled')).strip().lower()
+            self._catalog_source = source if source in ('bundled', 'custom') else 'bundled'
+            custom_path = data.get('custom_path', '')
+            self._custom_catalog_path = custom_path.strip() if isinstance(custom_path, str) else ''
+            self._tag_catalog_path = self._custom_catalog_path
         except Exception as exc:
             print(f"[Ranbooru] Warn: Failed to load tag catalog preferences: {exc}")
-            self._use_tag_catalog = False
+            self._use_tag_catalog = True
+            self._catalog_source = 'bundled'
+            self._custom_catalog_path = ''
             self._tag_catalog_path = ''
-        finally:
-            self._tag_catalog_status_text = (
-                f"Catalog mode: ON – Path set to {os.path.basename(self._tag_catalog_path)}"
-                if self._use_tag_catalog and self._tag_catalog_path
-                else ("Catalog mode: ON – No path set" if self._use_tag_catalog else "Catalog mode: OFF")
-            )
+        self._tag_catalog_status_text = self._format_catalog_status()
 
     def _save_tag_catalog_preferences(self) -> None:
         data = {
             'enabled': bool(self._use_tag_catalog),
-            'path': self._tag_catalog_path,
+            'source': self._catalog_source,
+            'custom_path': self._custom_catalog_path,
         }
         try:
             os.makedirs(os.path.dirname(TAG_CATALOG_CONFIG_FILE), exist_ok=True)
@@ -1310,16 +1375,92 @@ class Script(scripts.Script):
     def _update_catalog_status(self, message: Optional[str] = None) -> None:
         if message:
             self._tag_catalog_status_text = message
+        else:
+            self._tag_catalog_status_text = self._format_catalog_status()
         try:
             if self._catalog_status_md is not None:
                 self._catalog_status_md.update(value=self._tag_catalog_status_text)
         except Exception:
             pass
 
+    def _resolve_catalog_path(self) -> str:
+        if self._catalog_source == 'bundled':
+            legacy_override = (self._tag_catalog_path or '').strip()
+            if legacy_override and os.path.isfile(legacy_override):
+                return legacy_override
+            return BUNDLED_CATALOG_PATH
+        if self._catalog_source == 'custom':
+            return (self._custom_catalog_path or '').strip()
+        return ''
+
+    def _set_catalog_source(self, source: str) -> str:
+        source_value = (source or '').strip().lower()
+        if source_value not in ('bundled', 'custom'):
+            source_value = 'bundled'
+        self._catalog_source = source_value
+        if source_value == 'bundled':
+            self._tag_catalog_path = ''
+        else:
+            self._tag_catalog_path = self._custom_catalog_path
+        self._save_tag_catalog_preferences()
+        return self._catalog_source
+
+    def _catalog_path_from_upload(self, uploaded: object) -> str:
+        if isinstance(uploaded, str):
+            return uploaded
+        if isinstance(uploaded, dict):
+            for key in ('name', 'path', 'orig_name'):
+                value = uploaded.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ''
+
+    def _validate_csv_format(self, path: str) -> Tuple[bool, str]:
+        return rb_catalog.validate_catalog_csv(path)
+
+    def _import_custom_catalog(self, uploaded: object, path_hint: str = '') -> Tuple[bool, str]:
+        source_path = (path_hint or '').strip() or self._catalog_path_from_upload(uploaded)
+        ok, validation_message = self._validate_csv_format(source_path)
+        if not ok:
+            return False, f"Invalid CSV: {validation_message}"
+        try:
+            os.makedirs(USER_CATALOGS_DIR, exist_ok=True)
+            source_name = os.path.basename(source_path) or "catalog.csv"
+            safe_name = re.sub(r'[^\w\-.]', '_', source_name)
+            destination = os.path.join(USER_CATALOGS_DIR, safe_name)
+            shutil.copy2(source_path, destination)
+            self._catalog_source = 'custom'
+            self._custom_catalog_path = destination
+            self._tag_catalog_path = destination
+            self._use_tag_catalog = True
+            self._save_tag_catalog_preferences()
+            loaded, load_message = self._load_tag_catalog()
+            if loaded:
+                return True, self._format_catalog_status()
+            return False, load_message
+        except Exception as exc:
+            return False, f"Failed to import custom catalog: {exc}"
+
+    def _format_catalog_status(self) -> str:
+        if not self._use_tag_catalog:
+            return "Catalog mode: OFF"
+        catalog = getattr(self, '_catalog', None)
+        if not isinstance(catalog, CsvCatalog):
+            selected = self._resolve_catalog_path()
+            if not selected:
+                return "Catalog mode: ON - No catalog selected"
+            source_label = "Bundled" if self._catalog_source == 'bundled' else "Custom"
+            return f"Catalog mode: ON - {source_label}: {os.path.basename(selected)} (not loaded)"
+        source_label = "Bundled" if self._catalog_source == 'bundled' else "Custom"
+        filename = os.path.basename(catalog._path)
+        tag_count = len(getattr(catalog, "_all_tags", set()))
+        alias_count = len(getattr(catalog, "_aliases", {}))
+        return f"Catalog mode: ON - {source_label}: {filename}\nTags: {tag_count:,} | Aliases: {alias_count:,}"
+
     def _active_catalog(self) -> Optional[TagCatalogProvider]:
         if not getattr(self, '_use_tag_catalog', False):
             return None
-        if not getattr(self, '_tag_catalog_path', '').strip():
+        if not self._resolve_catalog_path():
             return None
         catalog = getattr(self, '_catalog', None)
         if not isinstance(catalog, TagCatalogProvider) or not catalog.enabled():
@@ -1339,16 +1480,21 @@ class Script(scripts.Script):
         if not getattr(self, '_use_tag_catalog', False):
             self._catalog = NoopCatalog()
             return True, "Catalog mode: OFF"
-        path_value = (getattr(self, '_tag_catalog_path', '') or '').strip()
+        path_value = self._resolve_catalog_path()
         if not path_value:
             self._catalog = NoopCatalog()
-            return False, "Catalog mode: ON – No path set"
+            return False, "Catalog mode: ON - No path set"
+        valid, validation_msg = self._validate_csv_format(path_value)
+        if not valid:
+            self._catalog = NoopCatalog()
+            return False, f"Catalog load failed: {validation_msg}"
         try:
             self._catalog = CsvCatalog(path_value)
-            return True, f"Catalog mode: ON – Loaded {os.path.basename(path_value)}"
+            self._tag_catalog_status_text = self._format_catalog_status()
+            return True, self._tag_catalog_status_text
         except Exception as exc:
             self._catalog = NoopCatalog()
-            return False, f"Catalog load failed: {exc} – Falling back to legacy"
+            return False, f"Catalog load failed: {exc} - Falling back to legacy"
 
     def _render_tag_diag(self, diag: Dict[str, object]) -> str:
         if not diag:
@@ -1382,6 +1528,18 @@ class Script(scripts.Script):
                 self._tag_diag_md.update(value=self._render_tag_diag(self._tag_catalog_diag))
         except Exception:
             pass
+
+    def _log_patch_event(self, level: str, message: str) -> None:
+        logger_fn = getattr(_ranbooru_logger, level, None)
+        if callable(logger_fn):
+            logger_fn(message)
+        else:
+            _ranbooru_logger.info(message)
+
+    def _verify_patch_target(self, target: object, method_name: str, *, require_callable: bool = True) -> bool:
+        ok, message = rb_adetailer_integration.verify_patch_target(target, method_name, require_callable=require_callable)
+        self._log_patch_event("info" if ok else "warning", message)
+        return ok
 
     def _apply_optional_catalog(
         self,
@@ -1703,23 +1861,23 @@ class Script(scripts.Script):
         selection = additions or self._coerce_selection(current_selection)
         selection = [tag for tag in selection if tag in new_list]
         return (
-            gr.Dropdown.update(choices=new_list, value=selection),
-            gr.Textbox.update(value="")
+            _gr_component_update(gr.Dropdown,choices=new_list, value=selection),
+            _gr_component_update(gr.Textbox,value="")
         )
 
     def _ui_remove_personal_tags(self, selected: Optional[object]):
         removals = self._coerce_selection(selected)
         new_list = self._apply_list_operation('personal', removals=removals) if removals else self._read_list_file(PERSONAL_REMOVE_FILE)
-        return gr.Dropdown.update(choices=new_list, value=[])
+        return _gr_component_update(gr.Dropdown,choices=new_list, value=[])
 
     def _ui_dedupe_personal_list(self):
         new_list = self._apply_list_operation('personal', dedupe=True)
-        return gr.Dropdown.update(choices=new_list, value=new_list)
+        return _gr_component_update(gr.Dropdown,choices=new_list, value=new_list)
 
     def _ui_import_personal_list(self, uploaded_file: Optional[dict]):
         if not uploaded_file:
             current = self._read_list_file(PERSONAL_REMOVE_FILE)
-            return gr.Dropdown.update(choices=current, value=current), gr.File.update(value=None)
+            return _gr_component_update(gr.Dropdown,choices=current, value=current), _gr_component_update(gr.File,value=None)
         data = uploaded_file.get('data') if isinstance(uploaded_file, dict) else None
         text = ''
         if isinstance(data, bytes):
@@ -1730,7 +1888,7 @@ class Script(scripts.Script):
         additions = self._parse_user_tags(text)
         new_list = self._apply_list_operation('personal', additions=additions)
         selection = [tag for tag in additions if tag in new_list]
-        return gr.Dropdown.update(choices=new_list, value=selection), gr.File.update(value=None)
+        return _gr_component_update(gr.Dropdown,choices=new_list, value=selection), _gr_component_update(gr.File,value=None)
 
     def _ui_export_personal_list(self):
         return PERSONAL_REMOVE_FILE
@@ -1741,23 +1899,23 @@ class Script(scripts.Script):
         selection = additions or self._coerce_selection(current_selection)
         selection = [tag for tag in selection if tag in new_list]
         return (
-            gr.Dropdown.update(choices=new_list, value=selection),
-            gr.Textbox.update(value="")
+            _gr_component_update(gr.Dropdown,choices=new_list, value=selection),
+            _gr_component_update(gr.Textbox,value="")
         )
 
     def _ui_remove_favorite_tags(self, selected: Optional[object]):
         removals = self._coerce_selection(selected)
         new_list = self._apply_list_operation('favorites', removals=removals) if removals else self._read_list_file(FAVORITES_FILE)
-        return gr.Dropdown.update(choices=new_list, value=[])
+        return _gr_component_update(gr.Dropdown,choices=new_list, value=[])
 
     def _ui_dedupe_favorite_list(self):
         new_list = self._apply_list_operation('favorites', dedupe=True)
-        return gr.Dropdown.update(choices=new_list, value=new_list)
+        return _gr_component_update(gr.Dropdown,choices=new_list, value=new_list)
 
     def _ui_import_favorite_list(self, uploaded_file: Optional[dict]):
         if not uploaded_file:
             current = self._read_list_file(FAVORITES_FILE)
-            return gr.Dropdown.update(choices=current, value=current), gr.File.update(value=None)
+            return _gr_component_update(gr.Dropdown,choices=current, value=current), _gr_component_update(gr.File,value=None)
         data = uploaded_file.get('data') if isinstance(uploaded_file, dict) else None
         text = ''
         if isinstance(data, bytes):
@@ -1768,7 +1926,7 @@ class Script(scripts.Script):
         additions = self._parse_user_tags(text)
         new_list = self._apply_list_operation('favorites', additions=additions)
         selection = [tag for tag in additions if tag in new_list]
-        return gr.Dropdown.update(choices=new_list, value=selection), gr.File.update(value=None)
+        return _gr_component_update(gr.Dropdown,choices=new_list, value=selection), _gr_component_update(gr.File,value=None)
 
     def _ui_export_favorite_list(self):
         return FAVORITES_FILE
@@ -1819,56 +1977,56 @@ class Script(scripts.Script):
         return None
 
     def _gelbooru_saved_message(self) -> str:
-        return f"✅ Using saved Gelbooru credentials from `{GELBOORU_CREDENTIALS_FILE}`."
+        return f"? Using saved Gelbooru credentials from `{GELBOORU_CREDENTIALS_FILE}`."
 
     def _ui_save_gelbooru_credentials(self, api_key: Optional[str], user_id: Optional[str]):
         api_key = _sanitize_gelbooru_credential(api_key)
         user_id = _sanitize_gelbooru_credential(user_id)
         if not api_key or not user_id:
-            warn = "⚠️ Please enter both API Key and User ID before saving."
+            warn = "Please enter both API Key and User ID before saving."
             return (
-                gr.Markdown.update(value=warn, visible=True),
-                gr.update(visible=True),
-                gr.Button.update(visible=False),
-                gr.Textbox.update(value=api_key),
-                gr.Textbox.update(value=user_id),
+                _gr_component_update(gr.Markdown,value=warn, visible=True),
+                _gr_update(visible=True),
+                _gr_component_update(gr.Button,visible=False),
+                _gr_component_update(gr.Textbox,value=api_key),
+                _gr_component_update(gr.Textbox,value=user_id),
             )
         if _save_gelbooru_credentials_to_disk(api_key, user_id):
             self._gelbooru_saved_credentials = {'api_key': api_key, 'user_id': user_id}
             message = self._gelbooru_saved_message()
             return (
-                gr.Markdown.update(value=message, visible=True),
-                gr.update(visible=False),
-                gr.Button.update(visible=True),
-                gr.Textbox.update(value=""),
-                gr.Textbox.update(value=""),
+                _gr_component_update(gr.Markdown,value=message, visible=True),
+                _gr_update(visible=False),
+                _gr_component_update(gr.Button,visible=True),
+                _gr_component_update(gr.Textbox,value=""),
+                _gr_component_update(gr.Textbox,value=""),
             )
-        error = "⚠️ Failed to save Gelbooru credentials. Check console for details."
+        error = "Failed to save Gelbooru credentials. Check console for details."
         return (
-            gr.Markdown.update(value=error, visible=True),
-            gr.update(visible=True),
-            gr.Button.update(visible=False),
-            gr.Textbox.update(value=api_key),
-            gr.Textbox.update(value=user_id),
+            _gr_component_update(gr.Markdown,value=error, visible=True),
+            _gr_update(visible=True),
+            _gr_component_update(gr.Button,visible=False),
+            _gr_component_update(gr.Textbox,value=api_key),
+            _gr_component_update(gr.Textbox,value=user_id),
         )
 
     def _ui_clear_gelbooru_credentials(self):
         if _clear_gelbooru_credentials_from_disk():
             self._gelbooru_saved_credentials = None
             return (
-                gr.Markdown.update(value="🧹 Saved Gelbooru credentials cleared.", visible=True),
-                gr.update(visible=True),
-                gr.Button.update(visible=False),
-                gr.Textbox.update(value=""),
-                gr.Textbox.update(value=""),
+                _gr_component_update(gr.Markdown,value="Saved Gelbooru credentials cleared.", visible=True),
+                _gr_update(visible=True),
+                _gr_component_update(gr.Button,visible=False),
+                _gr_component_update(gr.Textbox,value=""),
+                _gr_component_update(gr.Textbox,value=""),
             )
-        warn = "⚠️ Gelbooru credentials file could not be removed."
+        warn = "Gelbooru credentials file could not be removed."
         return (
-            gr.Markdown.update(value=warn, visible=True),
-            gr.update(visible=False),
-            gr.Button.update(visible=True),
-            gr.Textbox.update(value=""),
-            gr.Textbox.update(value=""),
+            _gr_component_update(gr.Markdown,value=warn, visible=True),
+            _gr_update(visible=False),
+            _gr_component_update(gr.Button,visible=True),
+            _gr_component_update(gr.Textbox,value=""),
+            _gr_component_update(gr.Textbox,value=""),
         )
 
     def _update_gelbooru_ui_visibility(self, booru_name: Optional[str]):
@@ -1877,41 +2035,37 @@ class Script(scripts.Script):
         if booru_name == 'gelbooru':
             if has_saved:
                 message = self._gelbooru_saved_message()
-                return (
-                    gr.update(visible=False),
-                    gr.Markdown.update(value=message, visible=True),
-                    gr.Button.update(visible=True),
-                    gr.Textbox.update(value=""),
-                    gr.Textbox.update(value=""),
+                return (_gr_update(visible=False),
+                    _gr_component_update(gr.Markdown,value=message, visible=True),
+                    _gr_component_update(gr.Button,visible=True),
+                    _gr_component_update(gr.Textbox,value=""),
+                    _gr_component_update(gr.Textbox,value=""),
                 )
-            return (
-                gr.update(visible=True),
-                gr.Markdown.update(value="", visible=False),
-                gr.Button.update(visible=False),
-                gr.Textbox.update(value=""),
-                gr.Textbox.update(value=""),
+            return (_gr_update(visible=True),
+                _gr_component_update(gr.Markdown,value="", visible=False),
+                _gr_component_update(gr.Button,visible=False),
+                _gr_component_update(gr.Textbox,value=""),
+                _gr_component_update(gr.Textbox,value=""),
             )
         # Hide for non-Gelbooru selections
-        return (
-            gr.update(visible=False),
-            gr.Markdown.update(value="", visible=False),
-            gr.Button.update(visible=False),
-            gr.Textbox.update(value=""),
-            gr.Textbox.update(value=""),
+        return (_gr_update(visible=False),
+            _gr_component_update(gr.Markdown,value="", visible=False),
+            _gr_component_update(gr.Button,visible=False),
+            _gr_component_update(gr.Textbox,value=""),
+            _gr_component_update(gr.Textbox,value=""),
         )
 
     def _update_gelbooru_compat_visibility(self, booru_name: Optional[str]):
         booru_name = (booru_name or "").strip().lower()
         visible = booru_name == 'gelbooru-compatible'
-        return (
-            gr.update(visible=visible),
-            gr.Textbox.update(value=self._gelbooru_compat_base_url if visible else self._gelbooru_compat_base_url)
+        return (_gr_update(visible=visible),
+            _gr_component_update(gr.Textbox,value=self._gelbooru_compat_base_url if visible else self._gelbooru_compat_base_url)
         )
 
     def _ui_set_gelbooru_compat_base_url(self, base_url: Optional[str]):
         sanitized = _sanitize_gelbooru_compat_base_url(base_url)
         self._gelbooru_compat_base_url = sanitized
-        return gr.Textbox.update(value=self._gelbooru_compat_base_url)
+        return _gr_component_update(gr.Textbox,value=self._gelbooru_compat_base_url)
 
     def _build_legacy_bad_index(self, bad_tags: Iterable[str]) -> None:
         exact: Set[str] = set()
@@ -1981,7 +2135,24 @@ class Script(scripts.Script):
             return True
         return False
 
+    def _is_girl_suffix_tag(self, tag: str) -> bool:
+        """Check if tag ends with _girl pattern (e.g., demon_girl, cat_girl, angel_girl)."""
+        normalized = (self._normalize_tag(tag) or '').strip().lower()
+        if not normalized:
+            normalized = self._canonicalize_raw_tag(tag)
+        if not normalized:
+            return False
+        # Check for _girl or " girl" suffix pattern (but not just "girl" alone or common subject tags)
+        excluded = {'girl', '1girl', '2girls', '3girls', '4girls', '5girls', '6+girls', 'multiple girls'}
+        if normalized in excluded:
+            return False
+        if normalized.endswith(' girl') or normalized.endswith('_girl'):
+            return True
+        return False
+
     def _is_hair_color_tag(self, tag: str) -> bool:
+
+
         normalized = (self._normalize_tag(tag) or '').strip().lower()
         if not normalized:
             normalized = self._canonicalize_raw_tag(tag)
@@ -2142,7 +2313,7 @@ class Script(scripts.Script):
         post: Optional[Dict[str, object]],
         *,
         filter_ctx: Optional[Dict[str, object]],
-        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool],
+        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool],
         base_colors: Tuple[Set[str], Set[str]],
         allowed_subjects: Set[str],
         cache: Dict[str, str],
@@ -2156,6 +2327,7 @@ class Script(scripts.Script):
             restrict_subject,
             remove_furry,
             remove_headwear,
+            remove_girl_suffix,
             preserve_hair_eye,
             remove_series,
         ) = toggles
@@ -2212,6 +2384,9 @@ class Script(scripts.Script):
                 if remove_headwear and self._is_headwear_tag(raw_tag):
                     return True, {**reason_base, 'rule': 'headwear'}
 
+                if remove_girl_suffix and self._is_girl_suffix_tag(raw_tag):
+                    return True, {**reason_base, 'rule': 'girl-suffix'}
+
                 if preserve_hair_eye:
                     if base_hair and self._is_hair_color_tag(raw_tag) and canonical_tag not in base_hair:
                         return True, {**reason_base, 'rule': 'hair-color-conflict'}
@@ -2244,7 +2419,7 @@ class Script(scripts.Script):
         num_images_needed: int,
         max_pages: int,
         filter_ctx: Optional[Dict[str, object]],
-        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool],
+        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool],
         base_colors: Tuple[Set[str], Set[str]],
         allowed_subjects: Set[str],
     ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], bool, bool]:
@@ -2448,66 +2623,45 @@ class Script(scripts.Script):
             pass
 
     def _load_cn_external_code(self):
-        candidates = [
-            'sd_forge_controlnet.lib_controlnet.external_code',
-            'extensions.sd_forge_controlnet.lib_controlnet.external_code',
-            'extensions.sd-webui-controlnet.scripts.external_code',
+        return rb_controlnet_integration.load_external_code(EXTENSION_ROOT)
+
+    def _render_platform_diagnostics(self) -> str:
+        gradio_version = getattr(gr, "__version__", "unknown")
+        input_accordion_source = "modules.ui_components.InputAccordion"
+        if InputAccordion is gr.Accordion:
+            input_accordion_source = "gr.Accordion fallback"
+        controlnet_ok = False
+        controlnet_error = ""
+        try:
+            self._load_cn_external_code()
+            controlnet_ok = True
+        except Exception as exc:
+            controlnet_error = str(exc)
+        try:
+            adetailer_detected = bool(self._native_adetailer_detected())
+        except Exception:
+            adetailer_detected = False
+
+        lines = [
+            f"**Gradio Version:** {gradio_version}",
+            f"**InputAccordion Source:** {input_accordion_source}",
+            f"**ControlNet External Code:** {'available' if controlnet_ok else 'missing'}",
+            f"**ADetailer Detected:** {'yes' if adetailer_detected else 'no'}",
+            "**Optional Autotagger:** removed from RanbooruX",
         ]
-        errors = []
-        for mod in candidates:
-            try:
-                return importlib.import_module(mod)
-            except Exception as e:
-                errors.append(f"{mod}: {e}")
-        # Environment-provided ControlNet path
-        try:
-            env_root = os.environ.get('SD_FORGE_CONTROLNET_PATH') or os.environ.get('RANBOORUX_CN_PATH')
-            if env_root:
-                env_path = os.path.join(env_root, 'lib_controlnet', 'external_code.py')
-                if os.path.isfile(env_path):
-                    import importlib.util
-                    spec = importlib.util.spec_from_file_location('sd_forge_controlnet.lib_controlnet.external_code', env_path)
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)  # type: ignore
-                    return module
-                else:
-                    errors.append(f"env:{env_path}: not found")
-        except Exception as e:
-            errors.append(f"env_load: {e}")
-        # WebUI built-in extensions path (Forge)
-        try:
-            webui_root = None
-            try:
-                from modules import paths as webui_paths  # type: ignore
-                webui_root = getattr(webui_paths, 'script_path', None)
-            except Exception as e:
-                errors.append(f"modules.paths.script_path: {e}")
-            if webui_root:
-                builtin_path = os.path.join(webui_root, 'extensions-builtin', 'sd_forge_controlnet', 'lib_controlnet', 'external_code.py')
-                if os.path.isfile(builtin_path):
-                    import importlib.util
-                    spec = importlib.util.spec_from_file_location('sd_forge_controlnet.lib_controlnet.external_code', builtin_path)
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)  # type: ignore
-                    return module
-                else:
-                    errors.append(f"builtin:{builtin_path}: not found")
-        except Exception as e:
-            errors.append(f"builtin_load: {e}")
-        # Filesystem fallback (directly load from this extension folder)
-        try:
-            ext_path = os.path.join(EXTENSION_ROOT, 'sd_forge_controlnet', 'lib_controlnet', 'external_code.py')
-            if os.path.isfile(ext_path):
-                import importlib.util
-                spec = importlib.util.spec_from_file_location('sd_forge_controlnet.lib_controlnet.external_code', ext_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)  # type: ignore
-                return module
-            else:
-                errors.append(f"file://{ext_path}: not found")
-        except Exception as e:
-            errors.append(f"file_fallback: {e}")
-        raise ImportError("Unable to import ControlNet external_code. Attempts: " + "; ".join(errors))
+        if controlnet_error:
+            lines.append(f"**ControlNet Detail:** `{controlnet_error}`")
+        return "\n\n".join(lines)
+
+    def _toggle_platform_diagnostics(self, currently_visible: bool):
+        new_visible = not bool(currently_visible)
+        button_text = "Hide Platform Diagnostics" if new_visible else "Show Platform Diagnostics"
+        body = self._render_platform_diagnostics() if new_visible else ""
+        return (
+            new_visible,
+            _gr_component_update(gr.Markdown, value=body, visible=new_visible),
+            _gr_component_update(gr.Button, value=button_text),
+        )
 
     def get_files(self, path):
         files = []
@@ -2526,10 +2680,10 @@ class Script(scripts.Script):
         return scripts.AlwaysVisible
 
     def refresh_ser(self):
-        return gr.update(choices=self.get_files(USER_SEARCH_DIR))
+        return _gr_update(choices=self.get_files(USER_SEARCH_DIR))
 
     def refresh_rem(self):
-        return gr.update(choices=self.get_files(USER_REMOVE_DIR))
+        return _gr_update(choices=self.get_files(USER_REMOVE_DIR))
 
     def ui(self, is_img2img):
         with InputAccordion(False, label="RanbooruX", elem_id=self.elem_id("ra_enable")) as enabled:
@@ -2548,49 +2702,40 @@ class Script(scripts.Script):
             gr.Markdown("""## Tags"""); tags = gr.Textbox(lines=1, label="Tags to Search (Pre)"); remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
             mature_rating = gr.Radio(list(RATINGS.get('gelbooru', RATING_TYPES['none'])), label="Mature Rating", value="All")
             with gr.Accordion("Removal Filters", open=False):
-                beta_filter_toggle = gr.Checkbox(
-
-                    label="Beta: New Tag Filtering",
-
-                    value=True,
-
-                    info="Enable the normalized removal engine with personal lists and favorites guard. Disable to fall back to legacy behavior."
-
-                )
-
                 with gr.Group():
-
                     gr.Markdown("**Danbooru Tag Catalog**")
 
                     use_tag_catalog = gr.Checkbox(
-
-                        label="Use Danbooru Tag Catalog (optional)",
-
+                        label="Use Danbooru Tag Catalog",
                         value=bool(self._use_tag_catalog),
-
-                        info="Load danbooru_tags.csv to drive alias normalization and category-aware filtering."
-
+                        info="Enable category-aware filtering and alias resolution.",
                     )
 
-                    catalog_path = gr.Textbox(
-
-                        label="CSV Path",
-
-                        value=self._tag_catalog_path,
-
-                        placeholder="/path/to/danbooru_tags.csv",
-
+                    catalog_source = gr.Radio(
+                        ["Bundled", "Custom file"],
+                        label="Catalog Source",
+                        value=("Custom file" if self._catalog_source == 'custom' else "Bundled"),
                         visible=bool(self._use_tag_catalog),
-
                     )
+
+                    with gr.Group(visible=bool(self._use_tag_catalog and self._catalog_source == 'custom')) as custom_catalog_group:
+                        catalog_upload = gr.File(label="Upload CSV", file_types=['.csv'], file_count='single')
+                        catalog_path = gr.Textbox(
+                            label="Custom CSV Path",
+                            value=self._custom_catalog_path,
+                            placeholder="/path/to/custom_catalog.csv",
+                        )
+                        with gr.Row():
+                            catalog_import_btn = gr.Button("Import Custom Catalog")
+                            catalog_validate_btn = gr.Button("Validate CSV")
 
                     reload_catalog = gr.Button("Reload Catalog", visible=bool(self._use_tag_catalog))
-
                     catalog_status = gr.Markdown(self._tag_catalog_status_text or "Catalog mode: OFF")
 
                     self._catalog_status_md = catalog_status
+                    self._tag_diag_md = None
 
-                gr.Markdown("**Quick Presets** � apply common filter combinations with one click.")
+                gr.Markdown("**Quick Presets**: apply common filter combinations with one click.")
 
 
 
@@ -2598,6 +2743,7 @@ class Script(scripts.Script):
                     preset_strip_series = gr.Button("Strip Series/Character")
                     preset_remove_text = gr.Button("Remove Text-like Tags")
                     preset_preserve_colors = gr.Button("Preserve Base Colors")
+                    preset_quick_strip = gr.Button("Quick Strip")
                 with gr.Group():
                     gr.Markdown("**Text & Metadata**")
                     remove_bad_tags = gr.Checkbox(
@@ -2637,9 +2783,9 @@ class Script(scripts.Script):
                 with gr.Group():
                     gr.Markdown("**Furry & Headwear**")
                     remove_furry_tags = gr.Checkbox(
-                        label="Filter furry/pokémon tags",
+                        label="Filter furry/pokemon tags",
                         value=False,
-                        info="Remove furry, pokémon, and animal trait tags."
+                        info="Remove furry, pokemon, and animal trait tags."
                     )
                     remove_headwear_tags = gr.Checkbox(
                         label="Filter headwear / halo tags",
@@ -2647,6 +2793,14 @@ class Script(scripts.Script):
                         info="Strip hats, halos, and similar head accessories."
                     )
                 with gr.Group():
+                    gr.Markdown("**Girl Suffix**")
+                    remove_girl_suffix_tags = gr.Checkbox(
+                        label="Filter _girl suffix tags",
+                        value=False,
+                        info="Remove demon_girl, cat_girl, angel_girl and similar *_girl tags (keeps 1girl, 2girls, etc.)."
+                    )
+                with gr.Group():
+
                     gr.Markdown("**Colors & Traits**")
                     preserve_hair_eye_colors = gr.Checkbox(
                         label="Preserve base hair & eye colors",
@@ -2659,6 +2813,13 @@ class Script(scripts.Script):
                         label="Keep only subject counts",
                         value=False,
                         info="Maintain your subject count (e.g., solo/1girl) by removing mismatched tags."
+                    )
+                with gr.Group():
+                    gr.Markdown("**Advanced**")
+                    legacy_filter_toggle = gr.Checkbox(
+                        label="Legacy Tag Filtering (fallback)",
+                        value=False,
+                        info="Use the older removal engine. Leave disabled to use the default normalized filter engine."
                     )
             personal_choices = self._read_list_file(PERSONAL_REMOVE_FILE)
             favorite_choices = self._read_list_file(FAVORITES_FILE)
@@ -2701,7 +2862,7 @@ class Script(scripts.Script):
             shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
             change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
             same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
-            fringe_benefits = gr.Checkbox(label="Gelbooru: Fringe Benefits", value=True, visible=True)
+            fringe_benefits = gr.Checkbox(label="Gelbooru: Fringe Benefits", value=True, visible=False)
             limit_tags = gr.Slider(value=1.0, label="Limit tags by %", minimum=0.05, maximum=1.0, step=0.05); max_tags = gr.Slider(value=0, label="Max tags (0=disabled)", minimum=0, maximum=300, step=1)
             change_background = gr.Radio(["Don't Change", "Add Detail", "Force Simple", "Force Transparent/White"], label="Change Background", value="Don't Change")
             change_color = gr.Radio(["Don't Change", "Force Color", "Force Monochrome"], label="Change Color", value="Don't Change")
@@ -2747,8 +2908,6 @@ class Script(scripts.Script):
                     denoising = gr.Slider(value=0.75, label="Img2Img Denoising / CN Weight", minimum=0.0, maximum=1.0, step=0.05)
                     use_last_img = gr.Checkbox(label="Use same image for batch", value=False)
                     crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
-                    use_deepbooru = gr.Checkbox(label="Use Deepbooru on image", value=False)
-                    type_deepbooru = gr.Radio(["Add Before", "Add After", "Replace"], label="DB Tags Position", value="Add Before")
                     enable_adetailer_support = gr.Checkbox(
                         label="Enable RanbooruX ADetailer support",
                         value=False,
@@ -2769,9 +2928,46 @@ class Script(scripts.Script):
                     with gr.Box(): mix_prompt = gr.Checkbox(label="Mix tags from multiple posts", value=False); mix_amount = gr.Slider(value=2, label="Posts to mix", minimum=2, maximum=10, step=1)
                     with gr.Box(): chaos_mode = gr.Radio(["None", "Shuffle All", "Shuffle Negative"], label="Tag Shuffling (Chaos)", value="None"); chaos_amount = gr.Slider(value=0.5, label="Chaos Amount %", minimum=0.1, maximum=1.0, step=0.05)
                     with gr.Box(): use_same_seed = gr.Checkbox(label="Use same seed for batch", value=False); use_cache = gr.Checkbox(label="Cache Booru API requests", value=True); log_prompt_sources = gr.Checkbox(label="Log image sources/prompts to txt", value=False, info="When enabled, RanbooruX appends a log entry mapping seeds and prompts to the source posts.")
+        initial_lora_scan = self._scan_loranado_candidates('')
+        initial_lora_choices = initial_lora_scan.get('detected_names') or initial_lora_scan.get('all_names') or []
+        initial_lora_status = initial_lora_scan.get('message', "No LoRAs found.")
+        if initial_lora_scan.get('all_names'):
+            if initial_lora_scan.get('detected_names'):
+                initial_lora_status = (
+                    f"Detected {len(initial_lora_scan['detected_names'])} PonyXL-compatible LoRAs."
+                )
+            else:
+                initial_lora_status = (
+                    f"No PonyXL markers detected; using all {len(initial_lora_scan['all_names'])} LoRAs."
+                )
+
         with InputAccordion(False, label="LoRAnado", elem_id=self.elem_id("lo_enable")) as lora_enabled:
             with gr.Box(): lora_lock_prev = gr.Checkbox(label="Lock previous LoRAs", value=False); lora_folder = gr.Textbox(lines=1, label="LoRAs Subfolder", placeholder="e.g., 'Characters' or empty"); lora_amount = gr.Slider(value=1, label="LoRAs Amount", minimum=1, maximum=10, step=1)
             with gr.Box(): lora_min = gr.Slider(value=0.6, label="Min LoRAs Weight", minimum=-1.0, maximum=1.5, step=0.1); lora_max = gr.Slider(value=1.0, label="Max LoRAs Weight", minimum=-1.0, maximum=1.5, step=0.1); lora_custom_weights = gr.Textbox(lines=1, label="Custom Weights (optional)", placeholder="e.g., 0.8, 0.5, 1.0")
+            with gr.Box():
+                lora_auto_detect_pony = gr.Checkbox(
+                    label="Auto-detect PonyXL-compatible LoRAs",
+                    value=True,
+                    info="Scans LoRA filenames and safetensors metadata for PonyXL markers."
+                )
+                with gr.Row():
+                    lora_scan_btn = gr.Button("Scan LoRAs")
+                    lora_select_all_btn = gr.Button("Select All Compatible")
+                lora_detected_loras = gr.Dropdown(
+                    choices=initial_lora_choices,
+                    value=initial_lora_choices,
+                    multiselect=True,
+                    label="Detected LoRAs (toggle enabled)",
+                    info="Only selected entries are eligible for LoRAnado when auto-detect is enabled."
+                )
+                lora_blacklist = gr.Dropdown(
+                    choices=initial_lora_choices,
+                    value=[],
+                    multiselect=True,
+                    label="LoRAnado blacklist",
+                    info="Blacklisted LoRAs are excluded from random selection."
+                )
+                lora_detect_status = gr.Markdown(initial_lora_status)
         search_refresh_btn.click(fn=self.refresh_ser, inputs=[], outputs=[choose_search_txt])
         remove_refresh_btn.click(fn=self.refresh_rem, inputs=[], outputs=[choose_remove_txt])
         personal_add_btn.click(fn=self._ui_add_personal_tags, inputs=[personal_remove_input, personal_remove_dropdown], outputs=[personal_remove_dropdown, personal_remove_input], queue=False)
@@ -2788,67 +2984,154 @@ class Script(scripts.Script):
 
         def _ui_toggle_catalog(enabled: bool):
             self._use_tag_catalog = bool(enabled)
-            if not self._use_tag_catalog:
+            message = "Catalog mode: OFF"
+            if self._use_tag_catalog:
+                ok, message = self._load_tag_catalog()
+                if not ok:
+                    self._catalog = NoopCatalog()
+            else:
                 self._catalog = NoopCatalog()
                 self._tag_catalog_diag = {}
-                message = "Catalog mode: OFF"
-            else:
-                if not (self._tag_catalog_path or '').strip():
-                    self._catalog = NoopCatalog()
-                    message = "Catalog mode: ON - No path set"
-                else:
-                    ok, message = self._load_tag_catalog()
-                    if not ok:
-                        self._catalog = NoopCatalog()
-            self._tag_catalog_status_text = message
-            self._save_tag_catalog_preferences()
-            if not self._use_tag_catalog:
                 self._update_tag_diag()
+            self._tag_catalog_status_text = message if self._use_tag_catalog else self._format_catalog_status()
+            self._save_tag_catalog_preferences()
             return (
-                gr.Textbox.update(visible=self._use_tag_catalog, value=self._tag_catalog_path),
-                gr.Button.update(visible=self._use_tag_catalog),
-                gr.Markdown.update(value=message),
+                _gr_component_update(gr.Radio, visible=self._use_tag_catalog, value=("Custom file" if self._catalog_source == 'custom' else "Bundled")),
+                _gr_component_update(gr.Group, visible=bool(self._use_tag_catalog and self._catalog_source == 'custom')),
+                _gr_component_update(gr.Textbox, visible=bool(self._use_tag_catalog and self._catalog_source == 'custom'), value=self._custom_catalog_path),
+                _gr_component_update(gr.Button,visible=self._use_tag_catalog),
+                _gr_component_update(gr.Markdown,value=self._tag_catalog_status_text),
+            )
+
+        def _ui_set_catalog_source(source_label: str):
+            source = 'custom' if (source_label or '') == "Custom file" else 'bundled'
+            self._set_catalog_source(source)
+            if self._use_tag_catalog:
+                ok, message = self._load_tag_catalog()
+                if not ok:
+                    self._catalog = NoopCatalog()
+                    self._tag_catalog_status_text = message
+                else:
+                    self._tag_catalog_status_text = self._format_catalog_status()
+            else:
+                self._tag_catalog_status_text = self._format_catalog_status()
+            self._save_tag_catalog_preferences()
+            self._update_tag_diag()
+            return (
+                _gr_component_update(gr.Group, visible=bool(self._use_tag_catalog and self._catalog_source == 'custom')),
+                _gr_component_update(gr.Textbox, visible=bool(self._use_tag_catalog and self._catalog_source == 'custom'), value=self._custom_catalog_path),
+                _gr_component_update(gr.Markdown, value=self._tag_catalog_status_text),
             )
 
         def _ui_set_catalog_path(path_value: str):
-            self._tag_catalog_path = (path_value or '').strip()
-            if self._use_tag_catalog:
-                if self._tag_catalog_path:
+            self._custom_catalog_path = (path_value or '').strip()
+            self._tag_catalog_path = self._custom_catalog_path
+            if self._use_tag_catalog and self._catalog_source == 'custom':
+                if self._custom_catalog_path:
                     ok, message = self._load_tag_catalog()
                     if not ok:
                         self._catalog = NoopCatalog()
+                        self._tag_catalog_status_text = message
+                    else:
+                        self._tag_catalog_status_text = self._format_catalog_status()
                 else:
                     self._catalog = NoopCatalog()
-                    message = "Catalog mode: ON - No path set"
+                    self._tag_catalog_status_text = "Catalog mode: ON - No path set"
             else:
-                self._catalog = NoopCatalog()
-                message = "Catalog mode: OFF"
-            self._tag_catalog_status_text = message
+                self._tag_catalog_status_text = self._format_catalog_status()
             self._save_tag_catalog_preferences()
             self._update_tag_diag()
             return (
-                gr.Textbox.update(value=self._tag_catalog_path, visible=self._use_tag_catalog),
-                gr.Markdown.update(value=message),
+                _gr_component_update(gr.Textbox,value=self._custom_catalog_path, visible=bool(self._use_tag_catalog and self._catalog_source == 'custom')),
+                _gr_component_update(gr.Markdown,value=self._tag_catalog_status_text),
             )
 
         def _ui_reload_catalog():
-            ok, message = self._load_tag_catalog()
-            if not ok:
-                self._catalog = NoopCatalog()
-            self._tag_catalog_status_text = message
+            if self._use_tag_catalog:
+                ok, message = self._load_tag_catalog()
+                if not ok:
+                    self._catalog = NoopCatalog()
+                    self._tag_catalog_status_text = message
+                else:
+                    self._tag_catalog_status_text = self._format_catalog_status()
+            else:
+                self._tag_catalog_status_text = self._format_catalog_status()
+            self._save_tag_catalog_preferences()
             self._update_tag_diag()
-            return gr.Markdown.update(value=message)
+            return _gr_component_update(gr.Markdown,value=self._tag_catalog_status_text)
+
+        def _ui_catalog_upload(uploaded):
+            guessed_path = self._catalog_path_from_upload(uploaded)
+            if guessed_path:
+                self._custom_catalog_path = guessed_path
+                self._tag_catalog_path = guessed_path
+                self._save_tag_catalog_preferences()
+                msg = f"Selected custom catalog file: {os.path.basename(guessed_path)}"
+            else:
+                msg = self._tag_catalog_status_text
+            return (
+                _gr_component_update(gr.Textbox, value=self._custom_catalog_path, visible=bool(self._use_tag_catalog and self._catalog_source == 'custom')),
+                _gr_component_update(gr.Markdown, value=msg),
+            )
+
+        def _ui_validate_catalog(path_value, uploaded):
+            candidate = (path_value or '').strip() or self._catalog_path_from_upload(uploaded)
+            ok, message = self._validate_csv_format(candidate)
+            status = f"Validation passed: {message}" if ok else f"Validation failed: {message}"
+            return _gr_component_update(gr.Markdown, value=status)
+
+        def _ui_import_custom_catalog(uploaded, path_value):
+            ok, message = self._import_custom_catalog(uploaded, path_hint=path_value)
+            if not ok:
+                return (
+                    _gr_component_update(gr.Radio, value=("Custom file" if self._catalog_source == 'custom' else "Bundled")),
+                    _gr_component_update(gr.Group, visible=bool(self._use_tag_catalog and self._catalog_source == 'custom')),
+                    _gr_component_update(gr.Textbox, value=self._custom_catalog_path, visible=bool(self._use_tag_catalog and self._catalog_source == 'custom')),
+                    _gr_component_update(gr.Markdown, value=message),
+                )
+            self._tag_catalog_status_text = self._format_catalog_status()
+            self._update_tag_diag()
+            return (
+                _gr_component_update(gr.Radio, value="Custom file"),
+                _gr_component_update(gr.Group, visible=True),
+                _gr_component_update(gr.Textbox, value=self._custom_catalog_path, visible=True),
+                _gr_component_update(gr.Markdown, value=self._tag_catalog_status_text),
+            )
 
         use_tag_catalog.change(
             fn=_ui_toggle_catalog,
             inputs=[use_tag_catalog],
-            outputs=[catalog_path, reload_catalog, catalog_status],
+            outputs=[catalog_source, custom_catalog_group, catalog_path, reload_catalog, catalog_status],
+            queue=False,
+        )
+        catalog_source.change(
+            fn=_ui_set_catalog_source,
+            inputs=[catalog_source],
+            outputs=[custom_catalog_group, catalog_path, catalog_status],
             queue=False,
         )
         catalog_path.change(
             fn=_ui_set_catalog_path,
             inputs=[catalog_path],
             outputs=[catalog_path, catalog_status],
+            queue=False,
+        )
+        catalog_upload.upload(
+            fn=_ui_catalog_upload,
+            inputs=[catalog_upload],
+            outputs=[catalog_path, catalog_status],
+            queue=False,
+        )
+        catalog_validate_btn.click(
+            fn=_ui_validate_catalog,
+            inputs=[catalog_path, catalog_upload],
+            outputs=[catalog_status],
+            queue=False,
+        )
+        catalog_import_btn.click(
+            fn=_ui_import_custom_catalog,
+            inputs=[catalog_upload, catalog_path],
+            outputs=[catalog_source, custom_catalog_group, catalog_path, catalog_status],
             queue=False,
         )
         reload_catalog.click(
@@ -2860,9 +3143,9 @@ class Script(scripts.Script):
 
         preset_strip_series.click(
             fn=lambda: (
-                gr.Checkbox.update(value=True),
-                gr.Checkbox.update(value=True),
-                gr.Checkbox.update(value=True)
+                _gr_component_update(gr.Checkbox,value=True),
+                _gr_component_update(gr.Checkbox,value=True),
+                _gr_component_update(gr.Checkbox,value=True)
             ),
             inputs=[],
             outputs=[remove_series_tags, remove_character_tags, remove_artist_tags],
@@ -2870,21 +3153,325 @@ class Script(scripts.Script):
         )
         preset_remove_text.click(
             fn=lambda: (
-                gr.Checkbox.update(value=True),
-                gr.Checkbox.update(value=True)
+                _gr_component_update(gr.Checkbox,value=True),
+                _gr_component_update(gr.Checkbox,value=True)
             ),
             inputs=[],
             outputs=[remove_text_tags, remove_bad_tags],
             queue=False
         )
         preset_preserve_colors.click(
-            fn=lambda: gr.Checkbox.update(value=True),
+            fn=lambda: _gr_component_update(gr.Checkbox,value=True),
             inputs=[],
             outputs=[preserve_hair_eye_colors],
             queue=False
         )
+        preset_quick_strip.click(
+            fn=lambda: tuple(_gr_component_update(gr.Checkbox, value=True) for _ in range(11)),
+            inputs=[],
+            outputs=[
+                remove_bad_tags,
+                remove_text_tags,
+                remove_artist_tags,
+                remove_character_tags,
+                remove_series_tags,
+                remove_clothing_tags,
+                remove_furry_tags,
+                remove_headwear_tags,
+                remove_girl_suffix_tags,
+                preserve_hair_eye_colors,
+                restrict_subject_tags,
+            ],
+            queue=False,
+        )
 
-        return [enabled, tags, booru, gelbooru_api_key, gelbooru_user_id, gelbooru_compat_base_url, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags, remove_furry_tags, remove_headwear_tags, preserve_hair_eye_colors, remove_series_tags, beta_filter_toggle, use_tag_catalog, catalog_path]
+        lora_folder.change(
+            fn=self._ui_refresh_loranado_controls,
+            inputs=[lora_folder, lora_auto_detect_pony, lora_detected_loras, lora_blacklist],
+            outputs=[lora_detected_loras, lora_blacklist, lora_detect_status],
+            queue=False,
+        )
+        lora_auto_detect_pony.change(
+            fn=self._ui_refresh_loranado_controls,
+            inputs=[lora_folder, lora_auto_detect_pony, lora_detected_loras, lora_blacklist],
+            outputs=[lora_detected_loras, lora_blacklist, lora_detect_status],
+            queue=False,
+        )
+        lora_scan_btn.click(
+            fn=self._ui_refresh_loranado_controls,
+            inputs=[lora_folder, lora_auto_detect_pony, lora_detected_loras, lora_blacklist],
+            outputs=[lora_detected_loras, lora_blacklist, lora_detect_status],
+            queue=False,
+        )
+        lora_select_all_btn.click(
+            fn=self._ui_select_all_loranado,
+            inputs=[lora_folder, lora_auto_detect_pony, lora_blacklist],
+            outputs=[lora_detected_loras, lora_detect_status],
+            queue=False,
+        )
+
+        diagnostics_visible_state = gr.State(False)
+        diagnostics_toggle_btn = gr.Button("Show Platform Diagnostics")
+        diagnostics_md = gr.Markdown("", visible=False)
+        diagnostics_toggle_btn.click(
+            fn=self._toggle_platform_diagnostics,
+            inputs=[diagnostics_visible_state],
+            outputs=[diagnostics_visible_state, diagnostics_md, diagnostics_toggle_btn],
+            queue=False,
+        )
+
+        return [enabled, tags, booru, gelbooru_api_key, gelbooru_user_id, gelbooru_compat_base_url, remove_bad_tags, max_pages, change_dash, same_prompt, fringe_benefits, remove_tags, use_img2img, denoising, use_last_img, change_background, change_color, shuffle_tags, post_id, mix_prompt, mix_amount, chaos_mode, chaos_amount, limit_tags, max_tags, sorting_order, mature_rating, lora_folder, lora_amount, lora_min, lora_max, lora_enabled, lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt, choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn, crop_center, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources, remove_artist_tags, remove_character_tags, remove_clothing_tags, remove_text_tags, restrict_subject_tags, remove_furry_tags, remove_headwear_tags, remove_girl_suffix_tags, preserve_hair_eye_colors, remove_series_tags, legacy_filter_toggle, use_tag_catalog, catalog_path, lora_auto_detect_pony, lora_detected_loras, lora_blacklist]
+
+    def _normalize_lora_name(self, value: object) -> str:
+        if value is None:
+            return ''
+        text = str(value).strip()
+        if not text:
+            return ''
+        return os.path.splitext(text)[0].strip().lower()
+
+    def _get_lora_base_dir(self) -> str:
+        cmd_opts = getattr(shared, 'cmd_opts', None)
+        base_dir = getattr(cmd_opts, 'lora_dir', '') if cmd_opts is not None else ''
+        if not isinstance(base_dir, str):
+            base_dir = str(base_dir) if base_dir is not None else ''
+        return base_dir
+
+    def _resolve_lora_target_folder(self, lora_folder: Optional[str]) -> str:
+        lora_dir = self._get_lora_base_dir()
+        folder = (lora_folder or '').strip()
+        return os.path.join(lora_dir, folder) if folder else lora_dir
+
+    def _read_safetensors_metadata(self, file_path: str) -> Dict[str, object]:
+        try:
+            with open(file_path, 'rb') as handle:
+                header_len_raw = handle.read(8)
+                if len(header_len_raw) != 8:
+                    return {}
+                header_len = int.from_bytes(header_len_raw, 'little', signed=False)
+                if header_len <= 2 or header_len > self._LORANADO_MAX_HEADER_BYTES:
+                    return {}
+                header_blob = handle.read(header_len)
+                if len(header_blob) != header_len:
+                    return {}
+            header_data = json.loads(header_blob.decode('utf-8', errors='ignore'))
+            metadata = header_data.get('__metadata__', {}) if isinstance(header_data, dict) else {}
+            return metadata if isinstance(metadata, dict) else {}
+        except Exception:
+            return {}
+
+    def _matches_ponyxl_marker(self, text: object) -> bool:
+        if text is None:
+            return False
+        haystack = str(text).strip().lower()
+        if not haystack:
+            return False
+        return any(pattern.search(haystack) for pattern in _LORANADO_PONY_PATTERNS)
+
+    def _is_relevant_pony_metadata_key(self, key: object) -> bool:
+        if key is None:
+            return False
+        normalized = str(key).strip().lower()
+        if not normalized:
+            return False
+        return any(hint in normalized for hint in _LORANADO_PONY_METADATA_KEY_HINTS)
+
+    def _iter_metadata_values(self, value: object) -> Iterable[str]:
+        pending: List[object] = [value]
+        while pending:
+            current = pending.pop()
+            if current is None:
+                continue
+            if isinstance(current, (str, int, float, bool)):
+                normalized = str(current).strip().lower()
+                if normalized:
+                    yield normalized
+                continue
+            if isinstance(current, dict):
+                pending.extend(current.values())
+                continue
+            if isinstance(current, (list, tuple, set)):
+                pending.extend(current)
+
+    def _is_ponyxl_lora(self, file_name: str, metadata: Dict[str, object]) -> bool:
+        stem = os.path.splitext(file_name or '')[0]
+        if self._matches_ponyxl_marker(stem):
+            return True
+        if not isinstance(metadata, dict):
+            return False
+
+        for key, value in metadata.items():
+            if not self._is_relevant_pony_metadata_key(key):
+                continue
+            for text in self._iter_metadata_values(value):
+                if self._matches_ponyxl_marker(text):
+                    return True
+        return False
+
+    def _scan_loranado_candidates(self, lora_folder: Optional[str]) -> Dict[str, object]:
+        target_folder = self._resolve_lora_target_folder(lora_folder)
+        if not target_folder:
+            return {
+                'target_folder': '',
+                'all_files': [],
+                'all_names': [],
+                'detected_files': [],
+                'detected_names': [],
+                'message': "LoRA directory is not configured.",
+            }
+        if not os.path.isdir(target_folder):
+            return {
+                'target_folder': target_folder,
+                'all_files': [],
+                'all_names': [],
+                'detected_files': [],
+                'detected_names': [],
+                'message': f"LoRA folder not found: {target_folder}",
+            }
+        try:
+            all_files = sorted(
+                file_name
+                for file_name in os.listdir(target_folder)
+                if file_name.lower().endswith('.safetensors')
+            )
+        except Exception as exc:
+            return {
+                'target_folder': target_folder,
+                'all_files': [],
+                'all_names': [],
+                'detected_files': [],
+                'detected_names': [],
+                'message': f"Could not scan LoRA folder: {exc}",
+            }
+
+        if not all_files:
+            return {
+                'target_folder': target_folder,
+                'all_files': [],
+                'all_names': [],
+                'detected_files': [],
+                'detected_names': [],
+                'message': f"No .safetensors files found in {target_folder}",
+            }
+
+        snapshot: List[Tuple[str, float, int]] = []
+        for file_name in all_files:
+            full_path = os.path.join(target_folder, file_name)
+            try:
+                stat = os.stat(full_path)
+                snapshot.append((file_name, stat.st_mtime, stat.st_size))
+            except OSError:
+                snapshot.append((file_name, 0.0, 0))
+        snapshot_key = tuple(snapshot)
+
+        cached = self._loranado_scan_cache.get(target_folder)
+        if cached and cached.get('snapshot') == snapshot_key:
+            result = cached.get('result')
+            if isinstance(result, dict):
+                return dict(result)
+
+        detected_files: List[str] = []
+        for file_name in all_files:
+            metadata = self._read_safetensors_metadata(os.path.join(target_folder, file_name))
+            if self._is_ponyxl_lora(file_name, metadata):
+                detected_files.append(file_name)
+
+        result = {
+            'target_folder': target_folder,
+            'all_files': all_files,
+            'all_names': [os.path.splitext(file_name)[0] for file_name in all_files],
+            'detected_files': detected_files,
+            'detected_names': [os.path.splitext(file_name)[0] for file_name in detected_files],
+            'message': f"Scanned {len(all_files)} LoRA(s) in {target_folder}",
+        }
+        self._loranado_scan_cache[target_folder] = {
+            'snapshot': snapshot_key,
+            'result': dict(result),
+        }
+        return result
+
+    def _prepare_loranado_choice_state(
+        self,
+        lora_folder: Optional[str],
+        auto_detect_pony: bool,
+        enabled_loras: object,
+        blacklist_loras: object,
+    ) -> Tuple[List[str], List[str], str]:
+        scan = self._scan_loranado_candidates(lora_folder)
+        all_names = list(scan.get('all_names') or [])
+        detected_names = list(scan.get('detected_names') or [])
+        if auto_detect_pony:
+            choice_names = detected_names or all_names
+            if detected_names:
+                status = (
+                    f"Detected {len(detected_names)} PonyXL-compatible LoRAs in `{scan.get('target_folder', '')}`."
+                )
+            elif all_names:
+                status = (
+                    f"No PonyXL markers detected in `{scan.get('target_folder', '')}`. "
+                    f"Falling back to all {len(all_names)} LoRAs."
+                )
+            else:
+                status = scan.get('message') or "No LoRAs found."
+        else:
+            choice_names = all_names
+            if all_names:
+                status = f"Auto-detect disabled. {len(all_names)} LoRAs available in `{scan.get('target_folder', '')}`."
+            else:
+                status = scan.get('message') or "No LoRAs found."
+
+        chosen = [name for name in _coerce_multiselect_values(enabled_loras) if name in choice_names]
+        blacklisted = [name for name in _coerce_multiselect_values(blacklist_loras) if name in choice_names]
+        blacklisted_set = set(blacklisted)
+
+        if not chosen and choice_names:
+            chosen = list(choice_names)
+        if blacklisted_set:
+            chosen = [name for name in chosen if name not in blacklisted_set]
+        if not chosen and choice_names:
+            chosen = [name for name in choice_names if name not in blacklisted_set]
+
+        if choice_names:
+            status = f"{status}\nEnabled: {len(chosen)} | Blacklisted: {len(blacklisted)}"
+        return choice_names, chosen, status
+
+    def _ui_refresh_loranado_controls(
+        self,
+        lora_folder: Optional[str],
+        auto_detect_pony: bool,
+        enabled_loras: object,
+        blacklist_loras: object,
+    ):
+        choices, enabled_values, status = self._prepare_loranado_choice_state(
+            lora_folder=lora_folder,
+            auto_detect_pony=bool(auto_detect_pony),
+            enabled_loras=enabled_loras,
+            blacklist_loras=blacklist_loras,
+        )
+        blacklisted = [name for name in _coerce_multiselect_values(blacklist_loras) if name in choices]
+        return (
+            _gr_component_update(gr.Dropdown, choices=choices, value=enabled_values),
+            _gr_component_update(gr.Dropdown, choices=choices, value=blacklisted),
+            _gr_component_update(gr.Markdown, value=status),
+        )
+
+    def _ui_select_all_loranado(
+        self,
+        lora_folder: Optional[str],
+        auto_detect_pony: bool,
+        blacklist_loras: object,
+    ):
+        choices, enabled_values, status = self._prepare_loranado_choice_state(
+            lora_folder=lora_folder,
+            auto_detect_pony=bool(auto_detect_pony),
+            enabled_loras=[],
+            blacklist_loras=blacklist_loras,
+        )
+        return (
+            _gr_component_update(gr.Dropdown, choices=choices, value=enabled_values),
+            _gr_component_update(gr.Markdown, value=status),
+        )
+
 
     def check_orientation(self, img):
         if img is None:
@@ -3141,7 +3728,7 @@ class Script(scripts.Script):
     def _process_single_prompt(self, index, raw_prompt, base_positive, base_negative, initial_additions, settings):
         (
             shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash,
-            use_deepbooru, type_deepbooru, remove_artist_tags, remove_character_tags,
+            remove_artist_tags, remove_character_tags,
             remove_clothing_tags, remove_text_tags, restrict_subject_tags,
             remove_furry_tags, remove_headwear_tags, preserve_hair_eye_colors, remove_series_tags
         ) = settings
@@ -3186,7 +3773,7 @@ class Script(scripts.Script):
                 allowed_subjects.update(self._extract_subject_tags(base_positive))
                 allowed_subjects.update(self._extract_subject_tags(initial_additions))
                 allowed_subjects.update(self._extract_subject_tags(getattr(self, 'original_prompt', '')))
-            use_new_filter = getattr(self, '_beta_filter_enabled', True)
+            use_new_filter = not getattr(self, '_use_legacy_filter_engine', False)
             filter_ctx = getattr(self, '_removal_context', None) if use_new_filter else None
             favorites_guard: Set[str] = set()
             if use_new_filter and filter_ctx:
@@ -3267,22 +3854,26 @@ class Script(scripts.Script):
         if change_dash:
             current_prompt = current_prompt.replace("_", " ")
             current_negative = current_negative.replace("_", " ")
-        if use_deepbooru and index < len(self.last_img) and self.last_img[index] is not None:
-            print(f"[R] Running DB for {index}...")
-            try:
-                if not deepbooru.model.model:
-                    deepbooru.model.start()
-                db_tags = deepbooru.model.tag_multi(self.last_img[index])
-                current_prompt = modify_prompt(current_prompt, db_tags, type_deepbooru)
-            except Exception as e:
-                print(f"[R] Error DB {index}: {e}")
         if base_positive:
             current_prompt = f"{base_positive}, {current_prompt}" if current_prompt else base_positive
         current_prompt = remove_repeated_tags(current_prompt)
         current_negative = remove_repeated_tags(current_negative)
         return current_prompt, current_negative
 
-    def _apply_loranado(self, p, lora_enabled, lora_folder, lora_amount, lora_min, lora_max, lora_custom_weights, lora_lock_prev):
+    def _apply_loranado(
+        self,
+        p,
+        lora_enabled,
+        lora_folder,
+        lora_amount,
+        lora_min,
+        lora_max,
+        lora_custom_weights,
+        lora_lock_prev,
+        lora_auto_detect_pony,
+        lora_detected_loras,
+        lora_blacklist,
+    ):
         lora_prompt = ''
         if not lora_enabled:
             return p
@@ -3290,21 +3881,57 @@ class Script(scripts.Script):
             lora_prompt = self.previous_loras
             print(f"[R] Using locked LoRAs: {lora_prompt}")
         else:
-            lora_dir = shared.cmd_opts.lora_dir
-            target_folder = os.path.join(lora_dir, lora_folder) if lora_folder else lora_dir
-            if not os.path.isdir(target_folder):
-                print(f"[R] LoRA folder not found: {target_folder}")
-                self.previous_loras = ''
-                return p
-            try:
-                all_loras = [f for f in os.listdir(target_folder) if f.lower().endswith('.safetensors')]
-            except Exception as e:
-                print(f"[R] Error list LoRA folder {target_folder}: {e}")
-                all_loras = []
+            scan = self._scan_loranado_candidates(lora_folder)
+            target_folder = str(scan.get('target_folder') or self._resolve_lora_target_folder(lora_folder))
+            all_loras = list(scan.get('all_files') or [])
             if not all_loras:
-                print(f"[R] No .safetensors LoRAs found: {target_folder}")
+                print(f"[R] {scan.get('message') or f'No .safetensors LoRAs found: {target_folder}'}")
                 self.previous_loras = ''
                 return p
+
+            if lora_auto_detect_pony:
+                detected_loras = list(scan.get('detected_files') or [])
+                if detected_loras:
+                    candidate_loras = detected_loras
+                    print(f"[R] LoRAnado: using {len(candidate_loras)} PonyXL-detected LoRAs.")
+                else:
+                    candidate_loras = all_loras
+                    print(f"[R] LoRAnado: no PonyXL markers detected in {target_folder}; falling back to all LoRAs.")
+            else:
+                candidate_loras = all_loras
+                print(f"[R] LoRAnado: auto-detect disabled; using all {len(candidate_loras)} LoRAs.")
+
+            enabled_selection = {
+                self._normalize_lora_name(name)
+                for name in _coerce_multiselect_values(lora_detected_loras)
+                if self._normalize_lora_name(name)
+            }
+            if enabled_selection:
+                candidate_loras = [
+                    lora_file
+                    for lora_file in candidate_loras
+                    if self._normalize_lora_name(lora_file) in enabled_selection
+                ]
+
+            blacklist_selection = {
+                self._normalize_lora_name(name)
+                for name in _coerce_multiselect_values(lora_blacklist)
+                if self._normalize_lora_name(name)
+            }
+            if blacklist_selection:
+                before_count = len(candidate_loras)
+                candidate_loras = [
+                    lora_file
+                    for lora_file in candidate_loras
+                    if self._normalize_lora_name(lora_file) not in blacklist_selection
+                ]
+                print(f"[R] LoRAnado: blacklist removed {before_count - len(candidate_loras)} LoRAs.")
+
+            if not candidate_loras:
+                print("[R] LoRAnado: no LoRAs remain after enabled/blacklist filtering.")
+                self.previous_loras = ''
+                return p
+
             custom_weights = []
             if lora_custom_weights:
                 try:
@@ -3312,22 +3939,16 @@ class Script(scripts.Script):
                 except ValueError:
                     print(f"[R] Warn: Invalid custom LoRA weights: '{lora_custom_weights}'")
             selected_loras = []
-            num_to_select = min(lora_amount, len(all_loras))
-            allow_reuse = len(all_loras) < num_to_select
-            chosen_files = set()
+            num_to_select = min(max(1, int(lora_amount)), len(candidate_loras))
+            chosen_files = random.sample(candidate_loras, num_to_select)
             for i in range(num_to_select):
                 lora_weight = custom_weights[i] if i < len(custom_weights) else round(random.uniform(lora_min, lora_max), 2)
-                available_choices = all_loras if allow_reuse else [lora for lora in all_loras if lora not in chosen_files]
-                if not available_choices:
-                    print(f"[R] Warn: Ran out unique LoRAs.")
-                    break
-                chosen_lora_file = random.choice(available_choices)
-                if not allow_reuse:
-                    chosen_files.add(chosen_lora_file)
+                chosen_lora_file = chosen_files[i]
                 lora_name = os.path.splitext(chosen_lora_file)[0]
                 selected_loras.append(f'<lora:{lora_name}:{lora_weight}>')
             lora_prompt = ' '.join(selected_loras)
             self.previous_loras = lora_prompt
+            print(f"[R] LoRAnado pool size={len(candidate_loras)} | selected={num_to_select}")
             print(f"[R] Applying LoRAs: {lora_prompt}")
         if lora_prompt:
             if isinstance(p.prompt, list):
@@ -3345,15 +3966,10 @@ class Script(scripts.Script):
             print("[R] Using higher quality initial pass to prevent distortion")
             self.real_steps = p.steps
             
-            # CRITICAL FIX: Store original prompt and use minimal prompt for initial pass
-            # This prevents ADetailer from processing the initial pass results
+            # Preserve the user's prompt for the initial pass. ADetailer is explicitly blocked
+            # during this phase, so we no longer need an abstract placeholder prompt.
             self.original_full_prompt = p.prompt
-            # Use minimal prompt to create basic shapes that ADetailer won't process
-            if isinstance(p.prompt, list):
-                p.prompt = ["abstract shapes, minimal"] * len(p.prompt)
-            else:
-                p.prompt = "abstract shapes, minimal"
-            print("[R] Using minimal prompt for initial pass to avoid premature ADetailer processing")
+            print("[R] Keeping original prompt for initial pass; ADetailer remains blocked by guards")
             
             p.steps = initial_steps
             
@@ -3381,7 +3997,7 @@ class Script(scripts.Script):
             # Create temp directory for initial pass saves (will be deleted)
             import tempfile
             temp_dir = tempfile.mkdtemp(prefix='ranbooru_temp_')
-            print(f"[R Save Prevention] 🚫 Redirected initial pass saves to temp directory: {temp_dir}")
+            print(f"[R Save Prevention] Redirected initial pass saves to temp directory: {temp_dir}")
             p.outpath_samples = temp_dir
             
             # Set batch size to 1 and disable extensions for initial pass
@@ -3390,6 +4006,13 @@ class Script(scripts.Script):
             
             # LIGHTER APPROACH: Just mark that we're in initial pass - don't completely disable ADetailer
             self._mark_initial_pass(p)
+
+            # Hide intermediary previews from pass 1 / img2img so UI only reflects final results.
+            try:
+                self._install_preview_guard()
+                self._set_preview_guard(True, block_all=True)
+            except Exception as guard_error:
+                print(f"[R UI] Warn: Could not enable early preview guard: {guard_error}")
             
             # ADDITIONAL SAVE PREVENTION: More aggressive image saving prevention
             self._prevent_all_image_saving(p)
@@ -3454,7 +4077,7 @@ class Script(scripts.Script):
             try:
                 import shutil
                 shutil.rmtree(self.temp_initial_dir, ignore_errors=True)
-                print(f"[R Cleanup] 🧹 Cleaned up temporary directory: {self.temp_initial_dir}")
+                print(f"[R Cleanup] Cleaned up temporary directory: {self.temp_initial_dir}")
                 delattr(self, 'temp_initial_dir')
             except Exception as e:
                 print(f"[R Cleanup] Warning: Could not clean temp directory: {e}")
@@ -3483,7 +4106,7 @@ class Script(scripts.Script):
             
         # CRITICAL FIX: Don't re-enable ADetailer in cleanup - let it stay disabled for this generation
         if hasattr(self, 'disabled_adetailer_scripts'):
-            print(f"[R Cleanup] 🚫 Keeping {len(self.disabled_adetailer_scripts)} ADetailer script(s) disabled to prevent wrong image processing")
+            print(f"[R Cleanup] Keeping {len(self.disabled_adetailer_scripts)} ADetailer script(s) disabled to prevent wrong image processing")
             # We'll re-enable them on the NEXT generation start instead of now
             # This prevents ADetailer from running on wrong images after our manual processing
         
@@ -3494,18 +4117,24 @@ class Script(scripts.Script):
             
         # Clean up blocking state  
         if hasattr(self.__class__, '_block_640x512_images'):
-            print("[R Cleanup] 🔄 Clearing 640x512 image blocking for next generation")
+            print("[R Cleanup] Clearing 640x512 image blocking for next generation")
             delattr(self.__class__, '_block_640x512_images')
         
         # Restore ADetailer scripts if they were removed from the pipeline
         if hasattr(self, '_removed_adetailer_scripts'):
-            print("[R Cleanup] 🔄 Restoring ADetailer scripts to pipeline for next generation")
+            print("[R Cleanup] Restoring ADetailer scripts to pipeline for next generation")
             # Note: We don't actually restore here since it's too aggressive
             # ADetailer will be available for the next generation automatically
             delattr(self, '_removed_adetailer_scripts')
             
         # Ensure any manual patches are removed once we're finished
         self._unpatch_manual_adetailer_overrides()
+
+        # Ensure preview suppression never leaks into the next generation.
+        try:
+            self._set_preview_guard(False)
+        except Exception:
+            pass
 
         if not use_cache and hasattr(self, 'cache_installed_by_us') and self.cache_installed_by_us and requests_cache.patcher.is_installed():
             requests_cache.uninstall_cache()
@@ -3519,7 +4148,7 @@ class Script(scripts.Script):
     def _force_release_processing_guards(self, reason, attempt_cleanup=True, processing_obj=None):
         """Aggressively clear processing locks when a previous job ended abruptly."""
         try:
-            print(f"[R Guard] ⚠️ Forcing release of RanbooruX processing lock: {reason}")
+            print(f"[R Guard] Forcing release of RanbooruX processing lock: {reason}")
         except Exception:
             pass
 
@@ -3601,7 +4230,7 @@ class Script(scripts.Script):
             reason = '; '.join(reason_bits) if reason_bits else 'stale lock detected'
             self._force_release_processing_guards(reason, processing_obj=new_processing_obj)
         else:
-            # New processing object arrived while guard is still active—treat as stale lock.
+            # New processing object arrived while guard is still active - treat as stale lock.
             self._force_release_processing_guards('new processing request detected while guard active', processing_obj=new_processing_obj)
 
     def before_process(self, p: StableDiffusionProcessing, *args):
@@ -3626,7 +4255,7 @@ class Script(scripts.Script):
                     # Mirror common aliases expected by some codepaths
                     p.seeds = list(p.all_seeds)
                     p.subseeds = list(p.all_subseeds)
-                    print(f"[R Before] ⚙️ Internal img2img fast-path: seeds={len(p.all_seeds)} from {base_seed}, subseeds from {base_subseed}")
+                    print(f"[R Before] Internal img2img fast-path: seeds={len(p.all_seeds)} from {base_seed}, subseeds from {base_subseed}")
                 except Exception as _e:
                     print(f"[R Before] WARN: Internal img2img seed init failed: {_e}")
                 return
@@ -3641,7 +4270,7 @@ class Script(scripts.Script):
             if (hasattr(self, processing_key) or 
                 getattr(self.__class__, '_ranbooru_global_processing', False) or
                 hasattr(p, '_ranbooru_already_processing')):
-                print(f"[R Before] 🛑 RanbooruX already processing - BLOCKING duplicate run")
+                print(f"[R Before] RanbooruX already processing - BLOCKING duplicate run")
                 # Ensure seeds exist to prevent IndexError in core pipeline
                 try:
                     base_seed = getattr(p, 'seed', -1)
@@ -3667,7 +4296,7 @@ class Script(scripts.Script):
             setattr(self, processing_key, True)
             setattr(self.__class__, '_ranbooru_global_processing', True)
             setattr(p, '_ranbooru_already_processing', True)
-            print(f"[R Before] 🎯 Started RanbooruX processing for request {id(p)}")
+            print(f"[R Before] Started RanbooruX processing for request {id(p)}")
             self._current_processing_object = p
             script_args_source = getattr(p, 'script_args', None)
             if isinstance(script_args_source, (list, tuple)):
@@ -3686,9 +4315,10 @@ class Script(scripts.Script):
              lora_folder, lora_amount, lora_min, lora_max, lora_enabled,
              lora_custom_weights, lora_lock_prev, use_ip, use_search_txt, use_remove_txt,
              choose_search_txt, choose_remove_txt, search_refresh_btn, remove_refresh_btn,
-             crop_center, use_deepbooru, type_deepbooru, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources_ui,
+             crop_center, enable_adetailer_support, use_same_seed, reuse_cached_posts, use_cache, log_prompt_sources_ui,
              remove_artist_tags_ui, remove_character_tags_ui, remove_clothing_tags_ui, remove_text_tags_ui, restrict_subject_tags_ui,
-             remove_furry_tags_ui, remove_headwear_tags_ui, preserve_hair_eye_colors_ui, remove_series_tags_ui, beta_filter_toggle_ui, use_tag_catalog_ui, tag_catalog_path_ui) = args
+             remove_furry_tags_ui, remove_headwear_tags_ui, remove_girl_suffix_tags_ui, preserve_hair_eye_colors_ui, remove_series_tags_ui, legacy_filter_toggle_ui, use_tag_catalog_ui, tag_catalog_path_ui,
+             lora_auto_detect_pony_ui, lora_detected_loras_ui, lora_blacklist_ui) = args
         except Exception as e:
             print(f"[R Before] CRITICAL Error unpack args: {e}. Aborting.")
             traceback.print_exc()
@@ -3708,8 +4338,6 @@ class Script(scripts.Script):
         self._post_use_ip = bool(use_ip)
         self._post_use_last_img = bool(use_last_img)
         self._post_crop_center = bool(crop_center)
-        self._post_use_deepbooru = bool(use_deepbooru)
-        self._post_type_deepbooru = type_deepbooru
         self._post_use_cache = bool(use_cache)
         self._reuse_cached_posts = bool(reuse_cached_posts)
         self._adetailer_support_enabled = bool(enable_adetailer_support)
@@ -3718,7 +4346,7 @@ class Script(scripts.Script):
         self._handle_adetailer_toggle_change(prev_manual_state, self._adetailer_support_enabled, p)
         self._manual_adetailer_prev_enabled = self._adetailer_support_enabled
         self._log_prompt_sources = bool(log_prompt_sources_ui)
-        self._beta_filter_enabled = bool(beta_filter_toggle_ui)
+        self._use_legacy_filter_engine = bool(legacy_filter_toggle_ui)
 
         self._current_booru_name = booru
         if booru == 'gelbooru':
@@ -3738,7 +4366,19 @@ class Script(scripts.Script):
         self._final_negative_prompts_snapshot = []
 
         if lora_enabled:
-            p = self._apply_loranado(p, lora_enabled, lora_folder, lora_amount, lora_min, lora_max, lora_custom_weights, lora_lock_prev)
+            p = self._apply_loranado(
+                p,
+                lora_enabled,
+                lora_folder,
+                lora_amount,
+                lora_min,
+                lora_max,
+                lora_custom_weights,
+                lora_lock_prev,
+                lora_auto_detect_pony_ui,
+                lora_detected_loras_ui,
+                lora_blacklist_ui,
+            )
         
         # CRITICAL: Ensure seeds are properly initialized to prevent IndexError
         # This must happen EVERY time, not just when they're empty
@@ -3755,14 +4395,14 @@ class Script(scripts.Script):
         
         # ALWAYS reinitialize seeds to prevent index errors
         p.all_seeds = [base_seed + i for i in range(total_images)]
-        print(f"[R Before] 🔧 Initialized p.all_seeds with {len(p.all_seeds)} seeds starting from {base_seed}")
+        print(f"[R Before] Initialized p.all_seeds with {len(p.all_seeds)} seeds starting from {base_seed}")
         
         # Also reinitialize all_subseeds
         base_subseed = getattr(p, 'subseed', -1)
         if base_subseed == -1:
             base_subseed = random.randint(0, 2**32 - 1)
         p.all_subseeds = [base_subseed + i for i in range(total_images)]
-        print(f"[R Before] 🔧 Initialized p.all_subseeds with {len(p.all_subseeds)} subseeds starting from {base_subseed}")
+        print(f"[R Before] Initialized p.all_subseeds with {len(p.all_subseeds)} subseeds starting from {base_subseed}")
         
         # ADDITIONAL: Ensure other seed-related attributes exist
         if not hasattr(p, 'seeds'):
@@ -3792,7 +4432,7 @@ class Script(scripts.Script):
             print("[R Before] Manual ADetailer support disabled - ensuring native ADetailer remains available")
 
         # Clear notification that extension is active
-        print("[R Before] ⚠️  RanbooruX IS ENABLED AND RUNNING ⚠️")
+        print("[R Before] RanbooruX IS ENABLED AND RUNNING")
         print(f"[R Before] Search tags: '{tags}' | Booru: {booru} | Img2Img: {use_img2img} | ControlNet: {use_ip}")
         
         # Check if we should reuse existing images or fetch new ones
@@ -3807,15 +4447,17 @@ class Script(scripts.Script):
             print(f"[R Before] Original tags: '{original_tags}' -> Cleaned: '{tags}'")
 
         self._use_tag_catalog = bool(use_tag_catalog_ui)
-        self._tag_catalog_path = (tag_catalog_path_ui or '').strip()
+        if self._catalog_source == 'custom':
+            incoming_custom_path = (tag_catalog_path_ui or '').strip()
+            if incoming_custom_path:
+                self._custom_catalog_path = incoming_custom_path
+            self._tag_catalog_path = self._custom_catalog_path
+        else:
+            self._tag_catalog_path = ''
         if self._use_tag_catalog:
-            if self._tag_catalog_path:
-                ok, message = self._load_tag_catalog()
-                if not ok:
-                    self._catalog = NoopCatalog()
-            else:
+            ok, message = self._load_tag_catalog()
+            if not ok:
                 self._catalog = NoopCatalog()
-                message = 'Catalog mode: ON - No path set'
         else:
             self._catalog = NoopCatalog()
             self._tag_catalog_diag = {}
@@ -3858,7 +4500,7 @@ class Script(scripts.Script):
         else:
             if reuse_cached_posts:
                 print(f"[R Before] Reusing cached images ({len(self.last_img)} images) from previous search")
-                print("[R Before] 💡 TIP: Add '!refresh' to your tags to force fetch new images")
+                print("[R Before] TIP: Add '!refresh' to your tags to force fetch new images")
         
         self.original_prompt = p.prompt if isinstance(p.prompt, str) else (p.prompt[0] if isinstance(p.prompt, list) and p.prompt else "")
         base_hair_colors, base_eye_colors = self._extract_color_tags(self.original_prompt)
@@ -3920,6 +4562,7 @@ class Script(scripts.Script):
                     bool(restrict_subject_tags_ui),
                     bool(remove_furry_tags_ui),
                     bool(remove_headwear_tags_ui),
+                    bool(remove_girl_suffix_tags_ui),
                     bool(preserve_hair_eye_colors_ui),
                     bool(remove_series_tags_ui),
                 )
@@ -3962,10 +4605,10 @@ class Script(scripts.Script):
                             preview = strict_rejections[:STRICT_IMG2IMG_LOG_SAMPLE]
                             for entry in preview:
                                 print(
-                                    f"[R Strict] • {entry.get('booru')} post {entry.get('post_id')} rejected by {entry.get('rule_type')} (tag: {entry.get('matched_tag')})"
+                                    f"[R Strict] - {entry.get('booru')} post {entry.get('post_id')} rejected by {entry.get('rule_type')} (tag: {entry.get('matched_tag')})"
                                 )
                             if len(strict_rejections) > STRICT_IMG2IMG_LOG_SAMPLE:
-                                print(f"[R Strict] • ... {len(strict_rejections) - STRICT_IMG2IMG_LOG_SAMPLE} more")
+                                print(f"[R Strict] - ... {len(strict_rejections) - STRICT_IMG2IMG_LOG_SAMPLE} more")
                         print(
                             f"[R Strict] {len(filtered_posts)} candidate(s) available after strict filtering (need {num_images_needed})"
                         )
@@ -3999,7 +4642,7 @@ class Script(scripts.Script):
                     print(f"[R] Warn: Failed to compute original post URLs: {e}")
                 self._last_post_urls = post_urls
 
-                if use_img2img or use_deepbooru or use_ip:
+                if use_img2img or use_ip:
                     self.last_img = self._fetch_images(selected_posts, use_last_img, booru, fringe_benefits)
             else:
                 # Use cached values
@@ -4052,7 +4695,7 @@ class Script(scripts.Script):
             final_negative_prompts = [base_negative] * num_images_needed
             prompt_processing_settings = (
                 shuffle_tags, chaos_mode, chaos_amount, limit_tags_pct, max_tags_count, change_dash,
-                use_deepbooru, type_deepbooru, self._remove_artist_tags, self._remove_character_tags,
+                self._remove_artist_tags, self._remove_character_tags,
                 self._remove_clothing_tags, self._remove_text_tags, self._restrict_subject_tags,
                 self._remove_furry_tags, self._remove_headwear_tags, self._preserve_hair_eye_colors,
                 self._remove_series_tags
@@ -4567,22 +5210,20 @@ class Script(scripts.Script):
         try:
             # If this generation already finalized, avoid looping
             if getattr(p, '_ranbooru_finalized', False):
-                print("[R Post] ⏭️ Already finalized this generation; skipping repeat postprocess")
+                print("[R Post] Already finalized this generation; skipping repeat postprocess")
                 return
             # If this call is re-entered during our manual ADetailer run, skip to avoid loops
             if getattr(self.__class__, '_ranbooru_manual_adetailer_active', False):
-                print("[R Post] ⏭️ Skipping RanbooruX postprocess during manual ADetailer run")
+                print("[R Post] Skipping RanbooruX postprocess during manual ADetailer run")
                 return
             # Prevent duplicate img2img runs within the same generation
             if getattr(p, '_ranbooru_img2img_started', False):
-                print("[R Post] ⏭️ Img2Img already started for this generation; skipping duplicate postprocess entry")
+                print("[R Post] Img2Img already started for this generation; skipping duplicate postprocess entry")
                 return
             enabled = getattr(self, '_post_enabled', False)
             use_img2img = getattr(self, '_post_use_img2img', False)
             use_last_img = getattr(self, '_post_use_last_img', False)
             crop_center = getattr(self, '_post_crop_center', False)
-            use_deepbooru = getattr(self, '_post_use_deepbooru', False)
-            type_deepbooru = getattr(self, '_post_type_deepbooru', 'Add Before')
             use_cache = getattr(self, '_post_use_cache', True)
             use_adetailer = getattr(self, '_post_adetailer_enabled', False) and self._is_adetailer_enabled()
             
@@ -4657,22 +5298,6 @@ class Script(scripts.Script):
             else:
                 final_prompts = processed.prompt
             final_negative_prompts = processed.negative_prompt
-            if use_deepbooru:
-                print("[R Post] Applying Deepbooru before Img2Img pass...")
-                tagged_prompts = []
-                try:
-                    if not deepbooru.model.model:
-                        deepbooru.model.start()
-                    temp_prompts = [final_prompts] * len(prepared_images) if not isinstance(final_prompts, list) else final_prompts
-                    for i, img in enumerate(prepared_images):
-                        db_tags = deepbooru.model.tag_multi(img)
-                        current_orig_prompt = temp_prompts[i % len(temp_prompts)]
-                        modified_p = modify_prompt(current_orig_prompt, db_tags, type_deepbooru)
-                        tagged_prompts.append(remove_repeated_tags(modified_p))
-                    final_prompts = tagged_prompts
-                    print("[R] Deepbooru tags applied.")
-                except Exception as e:
-                    print(f"[R] Error Deepbooru Img2Img: {e}.")
             num_imgs = len(prepared_images)
             if not isinstance(final_prompts, list) or len(final_prompts) != num_imgs:
                 final_prompts = ([final_prompts] * num_imgs) if not isinstance(final_prompts, list) else (final_prompts * (num_imgs // len(final_prompts)) + final_prompts[:num_imgs % len(final_prompts)])
@@ -4719,11 +5344,11 @@ class Script(scripts.Script):
                 # Ensure correct output path for img2img results
                 if hasattr(self, 'original_outpath') and self.original_outpath:
                     p_img2img.outpath_samples = self.original_outpath
-                    print(f"[R Save] 💾 Saving img2img result {i+1} to: {self.original_outpath}")
+                    print(f"[R Save] Saving img2img result {i+1} to: {self.original_outpath}")
                 else:
                     # Fallback to default img2img output directory
                     p_img2img.outpath_samples = shared.opts.outdir_img2img_samples or shared.opts.outdir_samples
-                    print(f"[R Save] 💾 Saving img2img result {i+1} to default: {p_img2img.outpath_samples}")
+                    print(f"[R Save] Saving img2img result {i+1} to default: {p_img2img.outpath_samples}")
                 
                 # Restore original batch size  
                 if hasattr(self, 'original_batch_size'):
@@ -4817,7 +5442,7 @@ class Script(scripts.Script):
                 try:
                     final_dims = all_img2img_results[0].size if all_img2img_results and hasattr(all_img2img_results[0], 'size') else None
                     self._install_preview_guard()
-                    self._set_preview_guard(True, final_dims)
+                    self._set_preview_guard(True, final_dims, block_all=True)
                 except Exception:
                     pass
                 adetailer_ran_successfully = self._run_adetailer_on_img2img(p, processed, all_img2img_results)
@@ -4845,7 +5470,7 @@ class Script(scripts.Script):
             # CRITICAL: Force UI to display our final results
             self._force_ui_update(p, processed, all_img2img_results)
             
-            print("[R Post] ✅ RanbooruX processing complete - final results ready for UI and other extensions")
+            print("[R Post] RanbooruX processing complete - final results ready for UI and other extensions")
             print(f"[R Post DEBUG] Final processed.images count: {len(processed.images) if hasattr(processed, 'images') else 'NO IMAGES ATTR'}")
             if hasattr(processed, 'images') and processed.images:
                 for i, img in enumerate(processed.images[:3]):  # Show first 3 images
@@ -4892,14 +5517,14 @@ class Script(scripts.Script):
                 processing_key = self._current_processing_key
                 if hasattr(self, processing_key):
                     delattr(self, processing_key)
-                    print(f"[R Post] 🔓 Cleared processing guard for request {processing_key}")
+                    print(f"[R Post] Cleared processing guard for request {processing_key}")
                 delattr(self, '_current_processing_key')
                 
                 # Clear global processing guard with delay to ensure no race conditions
                 import time
                 time.sleep(0.1)  # Small delay to ensure all processing is complete
                 setattr(self.__class__, '_ranbooru_global_processing', False)
-                print(f"[R Post] 🔓 Cleared global processing guard")
+                print(f"[R Post] Cleared global processing guard")
                 
                 # Also clear the processing object guard
                 # Note: p might not be available in postprocess, so we'll clear it in a different way
@@ -4967,7 +5592,7 @@ class Script(scripts.Script):
             import gc
             gc.collect()
             
-            print(f"[R Post] ✅ Global processed update complete - {len(img2img_results)} results should now be visible to all extensions")
+            print(f"[R Post] Global processed update complete - {len(img2img_results)} results should now be visible to all extensions")
             
             # NUCLEAR OPTION: Try to override WebUI's main processing result completely
             try:
@@ -4981,7 +5606,7 @@ class Script(scripts.Script):
     def _nuclear_processed_override(self, p, processed, img2img_results):
         """Last resort: completely override all possible processing references"""
         try:
-            print("[R Post] 🔥 NUCLEAR OPTION: Overriding ALL processing references")
+            print("[R Post] NUCLEAR OPTION: Overriding ALL processing references")
             
             # Store the img2img results in a global location that we control
             setattr(self.__class__, '_global_ranbooru_results', img2img_results)
@@ -5028,7 +5653,7 @@ class Script(scripts.Script):
                         script.postprocessed_images = converted_script_images
                         print(f"[R Post] Override {script.__class__.__name__}.postprocessed_images with {len(converted_script_images)} PIL images")
             
-            print("[R Post] 🔥 Nuclear override complete - all processing references should now point to img2img results")
+            print("[R Post] Nuclear override complete - all processing references should now point to img2img results")
             
         except Exception as e:
             print(f"[R Post] Nuclear override error: {e}")
@@ -5036,7 +5661,7 @@ class Script(scripts.Script):
     def _patch_adetailer_directly(self, processed, img2img_results):
         """FINAL AGGRESSIVE FIX: Directly patch ADetailer to force correct image access"""
         try:
-            print("[R Post] 🎯 FINAL FIX: Patching ADetailer directly")
+            print("[R Post] FINAL FIX: Patching ADetailer directly")
             
             # Method 1: Monkey patch common image access patterns
             if hasattr(processed, '_ranbooru_original_getattribute'):
@@ -5053,7 +5678,7 @@ class Script(scripts.Script):
             
             def patched_getattr(name):
                 if name in ['images', 'image', 'imgs']:
-                    print(f"[R Post] 🎯 Intercepted ADetailer access to '{name}' - returning img2img results")
+                    print(f"[R Post] Intercepted ADetailer access to '{name}' - returning img2img results")
                     return img2img_results if name == 'images' else (img2img_results[0] if img2img_results else None)
                 return original_getattr(name)
             
@@ -5067,24 +5692,26 @@ class Script(scripts.Script):
                 for module_name in adetailer_modules:
                     module = sys.modules[module_name]
                     # Patch any image access methods we can find
-                    if hasattr(module, 'get_images'):
+                    if self._verify_patch_target(module, 'get_images'):
                         if not hasattr(module, '_ranbooru_original_get_images'):
                             try:
                                 setattr(module, '_ranbooru_original_get_images', module.get_images)
                                 if not hasattr(self, '_patched_adetailer_modules'):
                                     self._patched_adetailer_modules = []
                                 self._patched_adetailer_modules.append((module, 'get_images'))
+                                self._log_patch_event("info", f"Stored original patch target for {module_name}.get_images")
                             except Exception:
                                 pass
 
                         def patched_get_images(*args, **kwargs):
-                            print("[R Post] 🎯 Intercepted ADetailer.get_images() - returning img2img results")
+                            print("[R Post] Intercepted ADetailer.get_images() - returning img2img results")
                             return img2img_results
 
                         module.get_images = patched_get_images
-                        print(f"[R Post] 🎯 Patched {module_name}.get_images()")
+                        self._log_patch_event("info", f"Patched {module_name}.get_images")
+                        print(f"[R Post] Patched {module_name}.get_images()")
                 
-                print(f"[R Post] 🎯 Found and attempted to patch {len(adetailer_modules)} ADetailer modules")
+                print(f"[R Post] Found and attempted to patch {len(adetailer_modules)} ADetailer modules")
                 
                 # Method 2b: Install global guard wrappers on AfterDetailerScript methods
                 self._install_adetailer_global_guard()
@@ -5101,23 +5728,23 @@ class Script(scripts.Script):
                             # Replace list contents
                             attr_value.clear()
                             attr_value.extend(img2img_results)
-                            print(f"[R Post] 🎯 Force-updated list attribute: {attr_name}")
+                            print(f"[R Post] Force-updated list attribute: {attr_name}")
                         elif attr_value is not None:
                             # CRITICAL FIX: Handle special attributes that must remain as lists
                             if attr_name in ['extra_images', 'images_list', 'output_images', '_cached_images']:
                                 setattr(processed, attr_name, img2img_results.copy())  # Set as list
-                                print(f"[R Post] 🎯 Force-updated list attribute: {attr_name} (converted to list)")
+                                print(f"[R Post] Force-updated list attribute: {attr_name} (converted to list)")
                             elif attr_name in ['index_of_first_image', '_ranbooru_image_count']:
                                 # These are numeric indices, don't change them
-                                print(f"[R Post] 🎯 Skipped numeric attribute: {attr_name}")
+                                print(f"[R Post] Skipped numeric attribute: {attr_name}")
                             else:
                                 setattr(processed, attr_name, img2img_results[0] if img2img_results else None)
-                                print(f"[R Post] 🎯 Force-updated single attribute: {attr_name}")
+                                print(f"[R Post] Force-updated single attribute: {attr_name}")
             
             # Method 4: Create a global intercept for image access
             self.__class__._force_adetailer_images = img2img_results
             
-            print("[R Post] 🎯 ADetailer direct patching complete")
+            print("[R Post] ADetailer direct patching complete")
             
         except Exception as e:
             print(f"[R Post] ADetailer direct patching error: {e}")
@@ -5145,7 +5772,7 @@ class Script(scripts.Script):
                         def wrapped(inst, *args, **kwargs):
                             try:
                                 if getattr(inst.__class__, '_ranbooru_should_block', False):
-                                    print(f"[R Guard] 🛑 Blocked ADetailer.{method_name}")
+                                    print(f"[R Guard] Blocked ADetailer.{method_name}")
                                     # Return strict boolean to avoid TypeError with |= aggregation
                                     return False
                             except Exception:
@@ -5159,7 +5786,7 @@ class Script(scripts.Script):
                     self._adetailer_classes.append(Cls)
                     installed += 1
             if installed:
-                print(f"[R Post] 🎯 Installed global ADetailer guard on {installed} class(es)")
+                print(f"[R Post] Installed global ADetailer guard on {installed} class(es)")
         except Exception as e:
             print(f"[R Post] Error installing ADetailer global guard: {e}")
     
@@ -5176,14 +5803,14 @@ class Script(scripts.Script):
                         setattr(Cls, '_ranbooru_should_block', bool(should_block))
                     except Exception:
                         pass
-                print(f"[R Post] 🎯 ADetailer global guard set to {should_block}")
+                print(f"[R Post] ADetailer global guard set to {should_block}")
         except Exception as e:
             print(f"[R Post] Error toggling ADetailer global guard: {e}")
     
     def _reset_script_runner_guards(self):
         """Reset ScriptRunner guards to ensure ADetailer is available for each generation"""
         try:
-            print("[R Before] 🔄 Resetting ScriptRunner guards for new generation")
+            print("[R Before] Resetting ScriptRunner guards for new generation")
             
             # Reset the guard installation flag so guards can be reinstalled if needed
             import modules.scripts
@@ -5195,7 +5822,7 @@ class Script(scripts.Script):
             if hasattr(self, '_adetailer_classes'):
                 delattr(self, '_adetailer_classes')
                 
-            print("[R Before] 🔄 ScriptRunner guards reset complete")
+            print("[R Before] ScriptRunner guards reset complete")
         except Exception as e:
             print(f"[R Before] Error resetting ScriptRunner guards: {e}")
     
@@ -5279,17 +5906,10 @@ class Script(scripts.Script):
         if not dicts:
             return {'args': [], 'meta': meta}
     
-        if enable_flag is None:
-            enable_flag = True
-        if skip_flag is None:
-            skip_flag = False
-    
-        enable_flag = True if enable_flag is None else bool(enable_flag)
-        # Manual runs should not honour skip flags from the UI; force processing
-        skip_flag = False
-
-        enable_flag = True if enable_flag is None else bool(enable_flag)
-        # Manual img2img runs should never skip ADetailer tabs via the bool flag
+        # Manual img2img ADetailer execution must run regardless of persisted UI flags
+        # to avoid silently skipping detailing when the extracted enable flag is False.
+        enable_flag = True
+        # Manual runs should never honour the "skip img2img" style bool.
         skip_flag = False
 
         # Ensure each tab only runs when it has a valid model
@@ -5303,6 +5923,45 @@ class Script(scripts.Script):
 
         sanitized = [enable_flag, skip_flag] + dicts
         return {'args': sanitized, 'meta': meta}
+
+    def _manual_adetailer_requires_controlnet(self, script_args):
+        """Return True when extracted ADetailer args request ControlNet integration."""
+        try:
+            for arg in script_args or []:
+                if not isinstance(arg, dict):
+                    continue
+                model_name = str(arg.get('ad_controlnet_model', '') or '').strip().lower()
+                if model_name and model_name not in ('none', 'passthrough'):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _images_visibly_different(self, original_image, processed_image):
+        """Return True only when pixel content or dimensions actually changed."""
+        try:
+            if original_image is None or processed_image is None:
+                return False
+
+            original_size = getattr(original_image, 'size', None)
+            processed_size = getattr(processed_image, 'size', None)
+            if original_size and processed_size and original_size != processed_size:
+                return True
+
+            original_compare = original_image
+            processed_compare = processed_image
+
+            if hasattr(original_compare, 'mode') and original_compare.mode != 'RGB':
+                original_compare = original_compare.convert('RGB')
+            if hasattr(processed_compare, 'mode') and processed_compare.mode != 'RGB':
+                processed_compare = processed_compare.convert('RGB')
+
+            if hasattr(original_compare, 'tobytes') and hasattr(processed_compare, 'tobytes'):
+                return original_compare.tobytes() != processed_compare.tobytes()
+        except Exception as compare_exc:
+            print(f"[R Post] WARN: Could not compare image pixels: {compare_exc}")
+
+        return False
     
     def _run_adetailer_on_img2img(self, p, processed, img2img_results):
         """Manually run ADetailer on our img2img results - EACH IMAGE in batch"""
@@ -5311,10 +5970,10 @@ class Script(scripts.Script):
             return False
         try:
             # Remove generation-based limiting - ADetailer should process ALL images in batch
-            print(f"[R Post] 🎯 Starting manual ADetailer execution on {len(img2img_results)} img2img results")
+            print(f"[R Post] Starting manual ADetailer execution on {len(img2img_results)} img2img results")
             
             if not img2img_results:
-                print("[R Post] ❌ No img2img results to process with ADetailer")
+                print("[R Post] No img2img results to process with ADetailer")
                 return False
             
             # Debug: Check the images we're about to process
@@ -5326,7 +5985,7 @@ class Script(scripts.Script):
             
             # Try to find and run ADetailer scripts manually
             if not hasattr(p, 'scripts'):
-                print("[R Post] ❌ No scripts container on processing object")
+                print("[R Post] No scripts container on processing object")
                 return False
             
             # Collect both always-on and regular scripts
@@ -5370,7 +6029,7 @@ class Script(scripts.Script):
             print(f"[R Post] DEBUG - Candidate scripts total: {len(candidate_scripts)}")
             
             if not candidate_scripts:
-                print("[R Post] ❌ No candidate scripts available on processing object or global runners")
+                print("[R Post] No candidate scripts available on processing object or global runners")
                 return False
             
             adetailer_scripts_found = 0
@@ -5381,11 +6040,11 @@ class Script(scripts.Script):
                     script_name_lower = ''
                 if 'adetailer' in script_name_lower or 'afterdetailer' in script_name_lower:
                     adetailer_scripts_found += 1
-                    print(f"[R Post] 🎯 Found ADetailer script #{adetailer_scripts_found}: {script.__class__.__name__}")
+                    print(f"[R Post] Found ADetailer script #{adetailer_scripts_found}: {script.__class__.__name__}")
                     
                     # Check if script is enabled
                     if hasattr(script, 'enabled') and not script.enabled:
-                        print(f"[R Post] ⚠️  Script {script.__class__.__name__} is disabled - skipping")
+                        print(f"[R Post] Script {script.__class__.__name__} is disabled - skipping")
                         continue
                     
                     # Process EACH IMAGE INDIVIDUALLY through ADetailer (not as batch)
@@ -5406,12 +6065,12 @@ class Script(scripts.Script):
                                 img = Image.fromarray(img.astype(np.uint8))
                         converted_images.append(img)
                     
-                    print(f"[R Post] 🔧 Processing {len(converted_images)} images individually through ADetailer")
+                    print(f"[R Post] Processing {len(converted_images)} images individually through ADetailer")
                     
                     # Process each image individually with error handling
                     for img_idx, single_img in enumerate(converted_images):
                         try:
-                            print(f"[R Post] 🎯 Processing image {img_idx + 1}/{len(converted_images)} individually")
+                            print(f"[R Post] Processing image {img_idx + 1}/{len(converted_images)} individually")
                             
                             # Create temp_processed for this single image
                             single_temp_processed = None
@@ -5422,7 +6081,7 @@ class Script(scripts.Script):
                             
                             for method_num, construct_method in enumerate(construction_methods, 1):
                                 try:
-                                    print(f"[R Post] 🔧 Image {img_idx + 1}: Trying construction method {method_num}")
+                                    print(f"[R Post] Image {img_idx + 1}: Trying construction method {method_num}")
                                     single_temp_processed = construct_method()
                                     
                                     # Copy essential attributes
@@ -5442,21 +6101,21 @@ class Script(scripts.Script):
                                             single_img = Image.fromarray(single_img.astype(np.uint8))
                                     
                                     single_temp_processed.image = single_img
-                                    print(f"[R Post] 🔧 Image {img_idx + 1}: Set temp_processed.image = {single_img.size} mode={single_img.mode} type={type(single_img)}")
-                                    print(f"[R Post] ✅ Image {img_idx + 1}: Successfully created temp_processed with method {method_num}")
+                                    print(f"[R Post] Image {img_idx + 1}: Set temp_processed.image = {single_img.size} mode={single_img.mode} type={type(single_img)}")
+                                    print(f"[R Post] Image {img_idx + 1}: Successfully created temp_processed with method {method_num}")
                                     break
                                     
                                 except Exception as construct_e:
-                                    print(f"[R Post] ❌ Image {img_idx + 1}: Construction method {method_num} failed: {construct_e}")
+                                    print(f"[R Post] Image {img_idx + 1}: Construction method {method_num} failed: {construct_e}")
                                     continue
                             
                             if single_temp_processed is None:
-                                print(f"[R Post] ❌ Image {img_idx + 1}: Could not construct temp_processed - using original image")
+                                print(f"[R Post] Image {img_idx + 1}: Could not construct temp_processed - using original image")
                                 final_processed_images.append(single_img)
                                 continue
                             
                             # Now run ADetailer on this single image
-                            print(f"[R Post] 🔄 Running {script.__class__.__name__} on image {img_idx + 1}")
+                            print(f"[R Post] Running {script.__class__.__name__} on image {img_idx + 1}")
                             
                             # Setup ADetailer processing parameters for this single image
                             p.init_images = [single_img]
@@ -5484,7 +6143,7 @@ class Script(scripts.Script):
                             save_path = getattr(p, 'outpath_samples', 'outputs/txt2img-images')
                             setattr(single_temp_processed, 'outpath_samples', save_path)
                             setattr(single_temp_processed, 'save_samples', True)
-                            print(f"[R Post] 💾 Configured ADetailer save path: {save_path}")
+                            print(f"[R Post] Configured ADetailer save path: {save_path}")
                             
                             # Enable ADetailer globally for this run
                             setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
@@ -5514,7 +6173,7 @@ class Script(scripts.Script):
                                         if hasattr(img, 'shape'):  # It's a numpy array
                                             pil_img = Image.fromarray(img.astype(np.uint8), 'RGB')
                                             converted_images.append(pil_img)
-                                            print(f"[R Post] 🔧 CONVERTED numpy to PIL: {pil_img.size}")
+                                            print(f"[R Post] CONVERTED numpy to PIL: {pil_img.size}")
                                         else:
                                             converted_images.append(img)  # Already PIL
                                     single_temp_processed.images = converted_images
@@ -5523,11 +6182,11 @@ class Script(scripts.Script):
                                 if hasattr(single_temp_processed, 'image') and hasattr(single_temp_processed.image, 'shape'):
                                     pil_img = Image.fromarray(single_temp_processed.image.astype(np.uint8), 'RGB')
                                     single_temp_processed.image = pil_img
-                                    print(f"[R Post] 🔧 CONVERTED temp_processed.image to PIL: {pil_img.size}")
+                                    print(f"[R Post] CONVERTED temp_processed.image to PIL: {pil_img.size}")
                                 
-                                print(f"[R Post] ✅ All images converted to PIL before ADetailer call")
+                                print(f"[R Post] All images converted to PIL before ADetailer call")
                             except Exception as conversion_error:
-                                print(f"[R Post] ⚠️ PIL conversion failed: {conversion_error}")
+                                print(f"[R Post] PIL conversion failed: {conversion_error}")
                             
                             # Get script arguments
                             extracted_args = self._extract_adetailer_script_args(script, p)
@@ -5536,7 +6195,7 @@ class Script(scripts.Script):
                             if not script_args:
                                 reason = meta.get('fallback_reason')
                                 reason_text = f' (fallback={reason})' if reason else ''
-                                print(f"[R Post] ⚠️ Image {img_idx + 1}: No ADetailer config found in script args; skipping manual run{reason_text}")
+                                print(f"[R Post] Image {img_idx + 1}: No ADetailer config found in script args; skipping manual run{reason_text}")
                                 continue
                             args_preview = []
                             for arg_index, arg_value in enumerate(script_args[:6]):
@@ -5546,27 +6205,31 @@ class Script(scripts.Script):
                                 else:
                                     args_preview.append((arg_index, type(arg_value).__name__, arg_value))
                             print(f"[R Post] DEBUG - Image {img_idx + 1}: Using {len(script_args)} script args (slice={meta.get('slice_start')}->{meta.get('slice_end')}); preview={args_preview}")
+                            requires_controlnet = self._manual_adetailer_requires_controlnet(script_args)
+                            if requires_controlnet:
+                                print(f"[R Post] Image {img_idx + 1}: Keeping ControlNet script available for ADetailer ControlNet integration")
 
                             
                             # Store the original image before ADetailer processing
                             original_image = single_temp_processed.images[0] if single_temp_processed.images else single_img
                             original_image_size = getattr(original_image, 'size', 'unknown')
-                            print(f"[R Post] 📷 Image {img_idx + 1}: Original before ADetailer: {original_image_size}")
+                            print(f"[R Post] Image {img_idx + 1}: Original before ADetailer: {original_image_size}")
                             
                             # DETAILED DEBUG: Show temp_processed state before ADetailer
-                            print(f"[R Post] 🔍 PRE-ADETAILER STATE:")
-                            print(f"[R Post] 🔍   temp_processed.images count: {len(getattr(single_temp_processed, 'images', []))}")
+                            print(f"[R Post] PRE-ADETAILER STATE:")
+                            print(f"[R Post] temp_processed.images count: {len(getattr(single_temp_processed, 'images', []))}")
                             if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
                                 for idx, img in enumerate(single_temp_processed.images):
-                                    print(f"[R Post] 🔍   Image {idx}: {type(img)} {getattr(img, 'size', 'no-size')}")
+                                    print(f"[R Post] Image {idx}: {type(img)} {getattr(img, 'size', 'no-size')}")
                             
                             # Try postprocess_image first (ADetailer's main method)
                             adetailer_success = False
                             if hasattr(script, 'postprocess_image'):
                                 try:
-                                    print(f"[R Post] 🚀 Image {img_idx + 1}: Calling postprocess_image")
-                                    result = script.postprocess_image(p, single_temp_processed, *script_args)
-                                    print(f"[R Post] 📋 Image {img_idx + 1}: postprocess_image returned: {result}")
+                                    print(f"[R Post] Image {img_idx + 1}: Calling postprocess_image")
+                                    with self._manual_adetailer_script_isolation(p, script, keep_controlnet=requires_controlnet):
+                                        result = script.postprocess_image(p, single_temp_processed, *script_args)
+                                    print(f"[R Post] Image {img_idx + 1}: postprocess_image returned: {result}")
 
                                     processed_attr = getattr(single_temp_processed, 'image', None)
                                     if processed_attr is not None:
@@ -5578,24 +6241,24 @@ class Script(scripts.Script):
 
                                     
                                     # COMPREHENSIVE DEBUG: Check ALL possible result locations
-                                    print(f"[R Post] 🔍 POST-ADETAILER STATE:")
-                                    print(f"[R Post] 🔍   temp_processed.images count: {len(getattr(single_temp_processed, 'images', []))}")
+                                    print(f"[R Post] POST-ADETAILER STATE:")
+                                    print(f"[R Post] temp_processed.images count: {len(getattr(single_temp_processed, 'images', []))}")
                                     
                                     # Check temp_processed.images
                                     if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
                                         for idx, img in enumerate(single_temp_processed.images):
-                                            print(f"[R Post] 🔍   Image {idx}: {type(img)} {getattr(img, 'size', 'no-size')}")
+                                            print(f"[R Post] Image {idx}: {type(img)} {getattr(img, 'size', 'no-size')}")
                                     
                                     # Check other possible result attributes
                                     for attr in ['extra_images', 'all_images', 'output_images', 'processed_images']:
                                         if hasattr(single_temp_processed, attr):
                                             attr_value = getattr(single_temp_processed, attr)
                                             if attr_value:
-                                                print(f"[R Post] 🔍   {attr}: {len(attr_value) if isinstance(attr_value, (list, tuple)) else type(attr_value)}")
+                                                print(f"[R Post] {attr}: {len(attr_value) if isinstance(attr_value, (list, tuple)) else type(attr_value)}")
                                     
                                     # Check p object for results
                                     if hasattr(p, 'processed') and hasattr(p.processed, 'images'):
-                                        print(f"[R Post] 🔍   p.processed.images count: {len(p.processed.images)}")
+                                        print(f"[R Post] p.processed.images count: {len(p.processed.images)}")
                                     
                                     # Now check if temp_processed.images was modified by ADetailer
                                     if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
@@ -5603,148 +6266,107 @@ class Script(scripts.Script):
                                         if len(single_temp_processed.images) > 1:
                                             # Multiple images - use the last (most processed) one
                                             processed_image = single_temp_processed.images[-1]
-                                            print(f"[R Post] 🎯 Found {len(single_temp_processed.images)} images - using last processed image")
+                                            print(f"[R Post] Found {len(single_temp_processed.images)} images - using last processed image")
                                         else:
                                             processed_image = single_temp_processed.images[0]
                                         
                                         processed_size = getattr(processed_image, 'size', 'unknown')
-                                        print(f"[R Post] 📷 Image {img_idx + 1}: After ADetailer: {processed_size}")
+                                        print(f"[R Post] Image {img_idx + 1}: After ADetailer: {processed_size}")
                                         
                                         # Check for upscaling (ADetailer often upscales faces)
                                         original_size = getattr(original_image, 'size', (0, 0))
                                         if processed_size != original_size and processed_size != 'unknown':
-                                            print(f"[R Post] 🚀 UPSCALING DETECTED: {original_size} -> {processed_size}")
+                                            print(f"[R Post] UPSCALING DETECTED: {original_size} -> {processed_size}")
                                         
-                                        # Advanced change detection: Check object identity, size, and image data
-                                        image_changed = False
-                                        
-                                        # Debug: Show what we're comparing
-                                        print(f"[R Post] 🔍 COMPARISON - Original: {type(original_image)} {original_image_size}, Processed: {type(processed_image)} {processed_size}")
-                                        
-                                        # Check 1: Different object identity
-                                        if processed_image is not original_image:
-                                            print(f"[R Post] ✅ Image {img_idx + 1}: Different image object detected")
-                                            image_changed = True
-                                        
-                                        # Check 2: Different size (upscaling)
-                                        elif processed_size != original_image_size:
-                                            print(f"[R Post] ✅ Image {img_idx + 1}: Size changed from {original_image_size} to {processed_size}")
-                                            image_changed = True
-                                        
-                                        # Check 3: Look for ADetailer-specific attributes
-                                        elif hasattr(single_temp_processed, 'extra_generation_params') and single_temp_processed.extra_generation_params:
-                                            print(f"[R Post] ✅ Image {img_idx + 1}: Extra generation params indicate ADetailer processing")
-                                            image_changed = True
-                                    
-                                        # Check 3: Same object but potentially modified data (face enhancement)
+                                        # Only treat manual ADetailer as successful when pixels or dimensions changed.
+                                        print(f"[R Post] COMPARISON - Original: {type(original_image)} {original_image_size}, Processed: {type(processed_image)} {processed_size}")
+                                        image_changed = self._images_visibly_different(original_image, processed_image)
+                                        if image_changed:
+                                            print(f"[R Post] Image {img_idx + 1}: Pixel or size change detected after ADetailer")
                                         else:
-                                            try:
-                                                # Convert both to same format for comparison
-                                                import hashlib
-                                                orig_bytes = original_image.tobytes() if hasattr(original_image, 'tobytes') else None
-                                                proc_bytes = processed_image.tobytes() if hasattr(processed_image, 'tobytes') else None
-                                                
-                                                if orig_bytes and proc_bytes and orig_bytes != proc_bytes:
-                                                    print(f"[R Post] ✅ Image {img_idx + 1}: Image data modified (face enhancement detected)")
-                                                    image_changed = True
-                                                else:
-                                                    print(f"[R Post] 📊 Image {img_idx + 1}: Checking for subtle changes (face enhancement)")
-                                                    # Check if temp_processed was modified in any way
-                                                    if hasattr(single_temp_processed, '_adetailer_processed') or \
-                                                       hasattr(single_temp_processed, 'extra_generation_params') or \
-                                                       len(getattr(single_temp_processed, 'images', [])) > 1:
-                                                        print(f"[R Post] ✅ Image {img_idx + 1}: ADetailer metadata indicates processing occurred")
-                                                        image_changed = True
-                                                    else:
-                                                        print(f"[R Post] 📊 Image {img_idx + 1}: No clear changes detected")
-
-                                            except Exception as compare_e:
-                                                print(f"[R Post] 📊 Image {img_idx + 1}: Could not compare image data: {compare_e}")
-                                                image_changed = False
+                                            print(f"[R Post] Image {img_idx + 1}: No visible pixel changes detected after ADetailer")
                                         
                                         if image_changed:
                                             adetailer_success = True
-                                            print(f"[R Post] ✅ Image {img_idx + 1}: ADetailer processing detected as successful")
+                                            print(f"[R Post] Image {img_idx + 1}: ADetailer processing detected as successful")
                                             if isinstance(getattr(p, 'extra_generation_params', None), dict):
                                                 single_temp_processed.extra_generation_params = dict(p.extra_generation_params)
                                         else:
-                                            print(f"[R Post] ⚠️ Image {img_idx + 1}: No changes detected; keeping original image")
+                                            print(f"[R Post] Image {img_idx + 1}: No changes detected; keeping original image")
                                     else:
-                                        print(f"[R Post] ⚠️ Image {img_idx + 1}: No images in temp_processed after ADetailer")
+                                        print(f"[R Post] Image {img_idx + 1}: No images in temp_processed after ADetailer")
                                 except Exception as e:
-                                    print(f"[R Post] ❌ Image {img_idx + 1}: postprocess_image failed: {e}")
+                                    print(f"[R Post] Image {img_idx + 1}: postprocess_image failed: {e}")
                         
                             # Try postprocess as fallback
                             if not adetailer_success and hasattr(script, 'postprocess'):
                                 try:
-                                    print(f"[R Post] 🚀 Image {img_idx + 1}: FALLBACK calling postprocess")
-                                    script.postprocess(p, single_temp_processed, *script_args)
+                                    print(f"[R Post] Image {img_idx + 1}: FALLBACK calling postprocess")
+                                    with self._manual_adetailer_script_isolation(p, script, keep_controlnet=requires_controlnet):
+                                        script.postprocess(p, single_temp_processed, *script_args)
                                     
                                     # Check results after postprocess
                                     if hasattr(single_temp_processed, 'images') and single_temp_processed.images:
                                         processed_image = single_temp_processed.images[0]
                                         processed_size = getattr(processed_image, 'size', 'unknown')
-                                        print(f"[R Post] 📷 Image {img_idx + 1}: After postprocess: {processed_size}")
-                                        adetailer_success = True
-                                        print(f"[R Post] ✅ Image {img_idx + 1}: postprocess succeeded!")
+                                        print(f"[R Post] Image {img_idx + 1}: After postprocess: {processed_size}")
+                                        if self._images_visibly_different(original_image, processed_image):
+                                            adetailer_success = True
+                                            print(f"[R Post] Image {img_idx + 1}: postprocess produced visible changes")
+                                        else:
+                                            print(f"[R Post] Image {img_idx + 1}: postprocess returned without visible changes")
                                     else:
-                                        print(f"[R Post] ⚠️ Image {img_idx + 1}: No images after postprocess")
+                                        print(f"[R Post] Image {img_idx + 1}: No images after postprocess")
                                 except Exception as e:
-                                    print(f"[R Post] ❌ Image {img_idx + 1}: postprocess failed: {e}")
+                                    print(f"[R Post] Image {img_idx + 1}: postprocess failed: {e}")
                             
-                            # Collect the processed result - always use what's in temp_processed.images
+                            # Collect the processed result safely.
+                            processed_img = None
                             if adetailer_success and hasattr(single_temp_processed, 'images') and single_temp_processed.images:
-                                        # ENHANCED: Look for the best result from multiple sources
-                                        processed_img = None
-                                        
-                                        # Method 1: Check for extra_images (ADetailer often puts results here)
-                                        if hasattr(single_temp_processed, 'extra_images') and single_temp_processed.extra_images:
-                                            processed_img = single_temp_processed.extra_images[-1]
-                                            print(f"[R Post] 🎯 Using enhanced image from extra_images: {getattr(processed_img, 'size', 'unknown')}")
-                                        
-                                        # Method 2: Use last image if multiple exist
-                                        elif len(single_temp_processed.images) > 1:
-                                            processed_img = single_temp_processed.images[-1]  # Last = most processed
-                                            print(f"[R Post] 🎯 Using last processed image from {len(single_temp_processed.images)} available")
-                                        
-                                        # Method 3: Compare with backup to find changes
-                                        elif original_images_backup:
-                                            current_img = single_temp_processed.images[0]
-                                            if len(original_images_backup) > 0:
-                                                original_backup = original_images_backup[0]
-                                                if (hasattr(current_img, 'size') and hasattr(original_backup, 'size') and 
-                                                    current_img.size != original_backup.size):
-                                                    processed_img = current_img
-                                                    print(f"[R Post] 🎯 Detected size change: {original_backup.size} -> {current_img.size}")
-                                                elif current_img is not original_backup:
-                                                    processed_img = current_img
-                                                    print(f"[R Post] 🎯 Detected object change (same size)")
-                                        
-                                        # Method 4: Fallback to first image
-                                        if processed_img is None:
-                                            processed_img = single_temp_processed.images[0]
-                                            print(f"[R Post] 🎯 Using fallback image: {getattr(processed_img, 'size', 'unknown')}")
-                                
-                            final_processed_images.append(processed_img)
-                            successful_processes += 1
-                            print(f"[R Post] ✅ Image {img_idx + 1}: Using ADetailer result - size {getattr(processed_img, 'size', 'unknown')}")
-                            
-                            # Debug: Compare original vs processed
-                            if hasattr(processed_img, 'size') and hasattr(single_img, 'size'):
-                                orig_size = getattr(single_img, 'size', 'unknown')
-                                proc_size = getattr(processed_img, 'size', 'unknown')
-                                print(f"[R Post] 📊 SIZE COMPARISON: Original {orig_size} -> Processed {proc_size}")
-                            
-                            # CRITICAL: Manually save ADetailer result since auto-save may not work
+                                # ENHANCED: Look for the best result from multiple sources
+                                if hasattr(single_temp_processed, 'extra_images') and single_temp_processed.extra_images:
+                                    processed_img = single_temp_processed.extra_images[-1]
+                                    print(f"[R Post] Using enhanced image from extra_images: {getattr(processed_img, 'size', 'unknown')}")
+                                elif len(single_temp_processed.images) > 1:
+                                    processed_img = single_temp_processed.images[-1]  # Last = most processed
+                                    print(f"[R Post] Using last processed image from {len(single_temp_processed.images)} available")
+                                elif original_images_backup:
+                                    current_img = single_temp_processed.images[0]
+                                    if len(original_images_backup) > 0:
+                                        original_backup = original_images_backup[0]
+                                        if (hasattr(current_img, 'size') and hasattr(original_backup, 'size') and
+                                            current_img.size != original_backup.size):
+                                            processed_img = current_img
+                                            print(f"[R Post] Detected size change: {original_backup.size} -> {current_img.size}")
+                                        elif current_img is not original_backup:
+                                            processed_img = current_img
+                                            print(f"[R Post] Detected object change (same size)")
+
+                                if processed_img is None:
+                                    processed_img = single_temp_processed.images[0]
+                                    print(f"[R Post] Using fallback image: {getattr(processed_img, 'size', 'unknown')}")
+
+                            if processed_img is not None:
+                                final_processed_images.append(processed_img)
+                                successful_processes += 1
+                                print(f"[R Post] Image {img_idx + 1}: Using ADetailer result - size {getattr(processed_img, 'size', 'unknown')}")
+
+                                # Debug: Compare original vs processed
+                                if hasattr(processed_img, 'size') and hasattr(single_img, 'size'):
+                                    orig_size = getattr(single_img, 'size', 'unknown')
+                                    proc_size = getattr(processed_img, 'size', 'unknown')
+                                    print(f"[R Post] SIZE COMPARISON: Original {orig_size} -> Processed {proc_size}")
+
+                                # CRITICAL: Manually save ADetailer result since auto-save may not work
                                 try:
                                     import os
                                     from modules import images as images_module
                                     save_dir = getattr(p, 'outpath_samples', 'outputs/txt2img-images')
                                     os.makedirs(save_dir, exist_ok=True)
-                                    
+
                                     # Generate filename with ADetailer suffix
                                     base_filename = f"{getattr(p, 'seed', 'unknown')}_{img_idx+1}_adetailer"
-                                    
+
                                     # Save both original and processed for comparison
                                     info_text = None
                                     if hasattr(processed, 'infotexts') and processed.infotexts:
@@ -5756,41 +6378,41 @@ class Script(scripts.Script):
                                         info_text = getattr(single_temp_processed, 'info', '')
                                     if original_images_backup:
                                         orig_filepath = images_module.save_image(
-                                            original_images_backup[0], 
-                                            save_dir, 
+                                            original_images_backup[0],
+                                            save_dir,
                                             f"{base_filename}_ORIGINAL",
                                             extension='png',
                                             info=info_text,
                                             p=p
                                         )
-                                        print(f"[R Post] 💾 SAVED original for comparison: {orig_filepath}")
-                                    
+                                        print(f"[R Post] SAVED original for comparison: {orig_filepath}")
+
                                     filepath = images_module.save_image(
-                                        processed_img, 
-                                        save_dir, 
+                                        processed_img,
+                                        save_dir,
                                         f"{base_filename}_PROCESSED",
                                         extension='png',
                                         info=info_text,
                                         p=p
                                     )
-                                    print(f"[R Post] 💾 SAVED ADetailer result: {filepath}")
+                                    print(f"[R Post] SAVED ADetailer result: {filepath}")
                                 except Exception as save_error:
-                                    print(f"[R Post] ⚠️ Manual save failed: {save_error}")
+                                    print(f"[R Post] Manual save failed: {save_error}")
                             else:
-                                # Use original if ADetailer failed
+                                # Use original if ADetailer failed or produced no visible output
                                 final_processed_images.append(single_img)
-                                print(f"[R Post] ⚠️ Image {img_idx + 1}: ADetailer failed - using original image")
+                                print(f"[R Post] Image {img_idx + 1}: ADetailer failed/no-change - using original image")
                         
                         except Exception as img_error:
                             # Comprehensive error handling for individual image processing
-                            print(f"[R Post] ❌ Critical error processing image {img_idx + 1}: {img_error}")
+                            print(f"[R Post] Critical error processing image {img_idx + 1}: {img_error}")
                             # Always add the original image to prevent complete failure
                             final_processed_images.append(single_img)
                             import traceback
                             traceback.print_exc()
                     
                     # Report results
-                    print(f"[R Post] 🎉 Individual processing complete: {successful_processes}/{len(converted_images)} images processed by ADetailer")
+                    print(f"[R Post] Individual processing complete: {successful_processes}/{len(converted_images)} images processed by ADetailer")
                     
                     # Update processed object with final results
                     if final_processed_images:
@@ -5801,7 +6423,7 @@ class Script(scripts.Script):
                         if hasattr(p, 'processed'):
                             p.processed.images.clear()
                             p.processed.images.extend(final_processed_images)
-                        print(f"[R Post] 🔧 Updated processed.images with {len(final_processed_images)} final results")
+                        print(f"[R Post] Updated processed.images with {len(final_processed_images)} final results")
                     
                     # Clear the manual ADetailer flag
                     setattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
@@ -5810,10 +6432,10 @@ class Script(scripts.Script):
                     
                     # Try to run ADetailer's postprocess method
                     if not hasattr(script, 'postprocess'):
-                        print(f"[R Post] ❌ Script {script.__class__.__name__} has no postprocess method")
+                        print(f"[R Post] Script {script.__class__.__name__} has no postprocess method")
                         continue
                     
-                    print(f"[R Post] 🔄 Running {script.__class__.__name__}.postprocess() on img2img results")
+                    print(f"[R Post] Running {script.__class__.__name__}.postprocess() on img2img results")
                     try:
                         # CRITICAL: Clear all our blocking flags so ADetailer can actually run
                         setattr(p, '_ad_disabled', False)
@@ -5829,7 +6451,7 @@ class Script(scripts.Script):
                         # CRITICAL: Set flag to prevent recursive guard calls
                         setattr(self.__class__, '_ranbooru_manual_adetailer_active', True)
                         
-                        print("[R Post] 🔓 CLEARED all blocking flags for manual ADetailer run")
+                        print("[R Post] CLEARED all blocking flags for manual ADetailer run")
                         
                         # CRITICAL: Set up processing object for ADetailer
                         # ADetailer needs these parameters to actually run
@@ -5853,10 +6475,10 @@ class Script(scripts.Script):
                             import modules.shared as shared
                             adetailer_outpath = getattr(shared.opts, 'outdir_txt2img_samples', None) or original_outpath
                             p.outpath_samples = adetailer_outpath
-                            print(f"[R Post] 🔧 Set ADetailer save path: {adetailer_outpath}")
+                            print(f"[R Post] Set ADetailer save path: {adetailer_outpath}")
                         except Exception:
                             p.outpath_samples = original_outpath
-                            print(f"[R Post] 🔧 Fallback ADetailer save path: {original_outpath}")
+                            print(f"[R Post] Fallback ADetailer save path: {original_outpath}")
                         
                         # Set ADetailer-friendly flags
                         setattr(p, 'save_images', True)
@@ -5885,13 +6507,13 @@ class Script(scripts.Script):
                                                 new_arg = arg.copy()
                                                 new_arg['image'] = pil_img
                                                 new_args.append(new_arg)
-                                                print(f"[R Post] 🔧 NUMPY HOOK: Intercepted and converted numpy array to PIL {pil_img.size}")
+                                                print(f"[R Post] NUMPY HOOK: Intercepted and converted numpy array to PIL {pil_img.size}")
                                                 continue
                                         new_args.append(arg)
                                     return original_method(*new_args, **kwargs)
                                 script.postprocess_image = numpy_safe_postprocess_image
                                 setattr(script.__class__, '_ranbooru_numpy_hooked', True)
-                                print(f"[R Post] 🔧 INSTALLED: Numpy->PIL conversion hook on ADetailer.postprocess_image")
+                                print(f"[R Post] INSTALLED: Numpy->PIL conversion hook on ADetailer.postprocess_image")
                         except Exception as hook_error:
                             print(f"[R Post] Numpy validation hook failed: {hook_error}")
                         
@@ -5901,8 +6523,8 @@ class Script(scripts.Script):
                         if hasattr(self, 'original_outpath'):
                             p.outpath_samples = self.original_outpath
                         
-                        print(f"[R Post] 🔧 SETUP: p.init_images[0]={p.init_images[0].size}, p.width={p.width}, p.height={p.height}")
-                        print(f"[R Post] 🔧 SETUP: p.do_not_save_samples={p.do_not_save_samples}, p.outpath_samples='{p.outpath_samples}'")
+                        print(f"[R Post] SETUP: p.init_images[0]={p.init_images[0].size}, p.width={p.width}, p.height={p.height}")
+                        print(f"[R Post] SETUP: p.do_not_save_samples={p.do_not_save_samples}, p.outpath_samples='{p.outpath_samples}'")
                         
                         # Get script args - this is critical for ADetailer
                         script_args = getattr(p, 'script_args', [])
@@ -5951,7 +6573,7 @@ class Script(scripts.Script):
                                         data_dict[key] = Image.fromarray(value.astype(np.uint8), 'RGB')
                                     else:
                                         data_dict[key] = Image.fromarray(value.astype(np.uint8))
-                                    print(f"[R Post] 🔧 FINAL CONVERSION: {key} converted from numpy to PIL Image {data_dict[key].size}")
+                                    print(f"[R Post] FINAL CONVERSION: {key} converted from numpy to PIL Image {data_dict[key].size}")
                             return data_dict
                         
                         # Hook ADetailer's validation to ensure PIL Images
@@ -5966,7 +6588,7 @@ class Script(scripts.Script):
                         
                         # Method 1: Try postprocess_image (ADetailer's main method)
                         if hasattr(script, 'postprocess_image'):
-                            print(f"[R Post] 🚀 TRYING: {script.__class__.__name__}.postprocess_image(p, temp_processed, *{len(script_args)} args)")
+                            print(f"[R Post] TRYING: {script.__class__.__name__}.postprocess_image(p, temp_processed, *{len(script_args)} args)")
                             try:
                                 # CRITICAL: ADetailer extracts image data from different sources
                                 # We need to patch ALL possible image sources, not just temp_processed
@@ -5981,7 +6603,7 @@ class Script(scripts.Script):
                                             final_img = Image.fromarray(img.astype(np.uint8), 'RGB')
                                         else:
                                             final_img = Image.fromarray(img.astype(np.uint8))
-                                        print(f"[R Post] 🔧 CONVERTED temp_processed.images: numpy -> PIL Image {final_img.size}")
+                                        print(f"[R Post] CONVERTED temp_processed.images: numpy -> PIL Image {final_img.size}")
                                         final_validation_images.append(final_img)
                                     else:
                                         final_validation_images.append(img)
@@ -6002,7 +6624,7 @@ class Script(scripts.Script):
                                                 patched_img = Image.fromarray(img.astype(np.uint8), 'RGB')
                                             else:
                                                 patched_img = Image.fromarray(img.astype(np.uint8))
-                                            print(f"[R Post] 🔧 CONVERTED p.init_images: numpy -> PIL Image {patched_img.size}")
+                                            print(f"[R Post] CONVERTED p.init_images: numpy -> PIL Image {patched_img.size}")
                                             patched_init_images.append(patched_img)
                                         else:
                                             patched_init_images.append(img)
@@ -6017,45 +6639,47 @@ class Script(scripts.Script):
                                     for mod in adetailer_modules:
                                         if hasattr(mod, 'validate_inputs') or hasattr(mod, 'process_image'):
                                             # Found a potential validation function - this is where ADetailer processes the image
-                                            print(f"[R Post] 🎯 Found ADetailer module with validation: {mod.__name__}")
+                                            print(f"[R Post] Found ADetailer module with validation: {mod.__name__}")
                                             break
                                 except Exception:
                                     pass
                                 
-                                print(f"[R Post] 🔧 COMPREHENSIVE PIL VALIDATION: All image sources patched")
+                                print(f"[R Post] COMPREHENSIVE PIL VALIDATION: All image sources patched")
                                 
-                                result = script.postprocess_image(p, temp_processed, *script_args)
-                                print(f"[R Post] 📋 postprocess_image returned: {result}")
+                                with self._manual_adetailer_script_isolation(p, script):
+                                    result = script.postprocess_image(p, temp_processed, *script_args)
+                                print(f"[R Post] postprocess_image returned: {result}")
                                 if result is not None:
                                     adetailer_processed = True
-                                    print(f"[R Post] ✅ postprocess_image succeeded!")
+                                    print(f"[R Post] postprocess_image succeeded!")
                             except Exception as e:
-                                print(f"[R Post] ❌ postprocess_image failed: {e}")
+                                print(f"[R Post] postprocess_image failed: {e}")
                                 # Show ValidationError details if it's that type
                                 error_str = str(e)
                                 if 'ValidationError' in error_str and 'array(' in error_str:
-                                    print(f"[R Post] 🔍 ADetailer ValidationError - ADetailer is reading numpy arrays from an unknown source")
-                                    print(f"[R Post] 🔍 Debug temp_processed.images types: {[type(img).__name__ for img in getattr(temp_processed, 'images', [])]}")
+                                    print(f"[R Post] ADetailer ValidationError - ADetailer is reading numpy arrays from an unknown source")
+                                    print(f"[R Post] Debug temp_processed.images types: {[type(img).__name__ for img in getattr(temp_processed, 'images', [])]}")
                                     if hasattr(temp_processed, 'image'):
-                                        print(f"[R Post] 🔍 Debug temp_processed.image type: {type(temp_processed.image).__name__}")
+                                        print(f"[R Post] Debug temp_processed.image type: {type(temp_processed.image).__name__}")
                                     if hasattr(p, 'init_images'):
-                                        print(f"[R Post] 🔍 Debug p.init_images types: {[type(img).__name__ for img in p.init_images]}")
+                                        print(f"[R Post] Debug p.init_images types: {[type(img).__name__ for img in p.init_images]}")
                                     # Try to skip ADetailer if it keeps failing
-                                    print(f"[R Post] 🔍 ValidationError persists - ADetailer may be reading from internal cache or other source")
+                                    print(f"[R Post] ValidationError persists - ADetailer may be reading from internal cache or other source")
                         
                         # Method 2: Try postprocess (fallback)
                         if not adetailer_processed and hasattr(script, 'postprocess'):
-                            print(f"[R Post] 🚀 FALLBACK: {script.__class__.__name__}.postprocess(p, temp_processed, *{len(script_args)} args)")
+                            print(f"[R Post] FALLBACK: {script.__class__.__name__}.postprocess(p, temp_processed, *{len(script_args)} args)")
                             try:
-                                script.postprocess(p, temp_processed, *script_args)
+                                with self._manual_adetailer_script_isolation(p, script):
+                                    script.postprocess(p, temp_processed, *script_args)
                                 adetailer_processed = True
-                                print(f"[R Post] ✅ postprocess succeeded!")
+                                print(f"[R Post] postprocess succeeded!")
                             except Exception as e:
-                                print(f"[R Post] ❌ postprocess failed: {e}")
+                                print(f"[R Post] postprocess failed: {e}")
                         
                         # Method 3: Try direct ADetailer processing (bypass all checks)
                         if not adetailer_processed:
-                            print(f"[R Post] 🚀 DIRECT: Attempting direct ADetailer processing bypass")
+                            print(f"[R Post] DIRECT: Attempting direct ADetailer processing bypass")
                             try:
                                 # Force enable the script
                                 original_enabled = getattr(script, 'enabled', True)
@@ -6063,18 +6687,18 @@ class Script(scripts.Script):
                                 
                                 # Try to call ADetailer's internal processing directly
                                 if hasattr(script, '_process_image'):
-                                    print(f"[R Post] 🚀 DIRECT: Trying _process_image")
+                                    print(f"[R Post] DIRECT: Trying _process_image")
                                     result = script._process_image(temp_processed.images[0], p)
                                     if result:
                                         temp_processed.images[0] = result
                                         adetailer_processed = True
-                                        print(f"[R Post] ✅ _process_image succeeded!")
+                                        print(f"[R Post] _process_image succeeded!")
                                 
                                 # Restore original state
                                 script.enabled = original_enabled
                                 
                             except Exception as e:
-                                print(f"[R Post] ❌ Direct processing failed: {e}")
+                                print(f"[R Post] Direct processing failed: {e}")
                                 try:
                                     script.enabled = original_enabled
                                 except:
@@ -6082,20 +6706,20 @@ class Script(scripts.Script):
                         
                         # Method 4: Try using modules.scripts to run ADetailer normally
                         if not adetailer_processed:
-                            print(f"[R Post] 🚀 PIPELINE: Attempting to run ADetailer through normal pipeline")
+                            print(f"[R Post] PIPELINE: Attempting to run ADetailer through normal pipeline")
                             try:
                                 import modules.scripts
                                 # Try to run postprocess_image through the script system
                                 if hasattr(modules.scripts, 'postprocess_image'):
-                                    print(f"[R Post] 🚀 PIPELINE: Calling modules.scripts.postprocess_image")
+                                    print(f"[R Post] PIPELINE: Calling modules.scripts.postprocess_image")
                                     modules.scripts.postprocess_image(p, temp_processed)
                                     adetailer_processed = True
-                                    print(f"[R Post] ✅ Pipeline postprocess_image succeeded!")
+                                    print(f"[R Post] Pipeline postprocess_image succeeded!")
                             except Exception as e:
-                                print(f"[R Post] ❌ Pipeline processing failed: {e}")
+                                print(f"[R Post] Pipeline processing failed: {e}")
                         
-                        print(f"[R Post] 📋 AFTER ALL CALLS: temp_processed.images has {len(getattr(temp_processed, 'images', []))} images")
-                        print(f"[R Post] 📋 ADetailer processing result: {adetailer_processed}")
+                        print(f"[R Post] AFTER ALL CALLS: temp_processed.images has {len(getattr(temp_processed, 'images', []))} images")
+                        print(f"[R Post] ADetailer processing result: {adetailer_processed}")
                         
                         # Check if ADetailer actually processed the images
                         if hasattr(temp_processed, 'images') and temp_processed.images:
@@ -6113,8 +6737,8 @@ class Script(scripts.Script):
                                     p.processed.images.clear()
                                     p.processed.images.extend(temp_processed.images)
                                 
-                                print(f"[R Post] 🎉 SUCCESS! {script.__class__.__name__} processed {len(temp_processed.images)} images")
-                                print(f"[R Post] 🔧 Updated processed.images, img2img_results, and p.processed with ADetailer results")
+                                print(f"[R Post] SUCCESS! {script.__class__.__name__} processed {len(temp_processed.images)} images")
+                                print(f"[R Post] Updated processed.images, img2img_results, and p.processed with ADetailer results")
                                 
                                 # Mark completion to prevent any subsequent manual re-runs
                                 try:
@@ -6123,11 +6747,11 @@ class Script(scripts.Script):
                                     pass
                                 return True
                             else:
-                                print(f"[R Post] ⚠️  {script.__class__.__name__} returned empty images list")
+                                print(f"[R Post] {script.__class__.__name__} returned empty images list")
                         else:
-                            print(f"[R Post] ⚠️  {script.__class__.__name__} didn't return processed images")
+                            print(f"[R Post] {script.__class__.__name__} didn't return processed images")
                     except Exception as e:
-                        print(f"[R Post] ❌ {script.__class__.__name__} postprocess failed: {e}")
+                        print(f"[R Post] {script.__class__.__name__} postprocess failed: {e}")
                         import traceback
                         traceback.print_exc()
                         continue
@@ -6136,20 +6760,20 @@ class Script(scripts.Script):
                         setattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
             
             if adetailer_scripts_found == 0:
-                print("[R Post] ❌ No ADetailer scripts found")
+                print("[R Post] No ADetailer scripts found")
             else:
-                print(f"[R Post] ⚠️  Found {adetailer_scripts_found} ADetailer script(s) but none processed successfully")
+                print(f"[R Post] Found {adetailer_scripts_found} ADetailer script(s) but none processed successfully")
             
             return False
         except Exception as e:
-            print(f"[R Post] ❌ Critical error in manual ADetailer execution: {e}")
+            print(f"[R Post] Critical error in manual ADetailer execution: {e}")
             import traceback
             traceback.print_exc()
             return False
         finally:
             # Clear the manual ADetailer active flag
             setattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
-            print("[R Post] 🔓 Cleared ADetailer active flag")
+            print("[R Post] Cleared ADetailer active flag")
     
     def _enforce_pil_everywhere(self, p, temp_processed, img2img_results):
         """Comprehensive PIL enforcement - patch ALL possible image sources that ADetailer might read from"""
@@ -6176,13 +6800,13 @@ class Script(scripts.Script):
                     converted = convert_to_pil(img)
                     if converted != img:
                         temp_processed.images[idx] = converted
-                        print(f"[R Post] 🔧 ENFORCED PIL: temp_processed.images[{idx}] -> {converted.size}")
+                        print(f"[R Post] ENFORCED PIL: temp_processed.images[{idx}] -> {converted.size}")
             
             if hasattr(temp_processed, 'image'):
                 converted = convert_to_pil(temp_processed.image)
                 if converted != temp_processed.image:
                     temp_processed.image = converted
-                    print(f"[R Post] 🔧 ENFORCED PIL: temp_processed.image -> {converted.size}")
+                    print(f"[R Post] ENFORCED PIL: temp_processed.image -> {converted.size}")
             
             # 2. Convert p.init_images (ADetailer reads from here too)
             if hasattr(p, 'init_images') and p.init_images:
@@ -6190,7 +6814,7 @@ class Script(scripts.Script):
                     converted = convert_to_pil(img)
                     if converted != img:
                         p.init_images[idx] = converted
-                        print(f"[R Post] 🔧 ENFORCED PIL: p.init_images[{idx}] -> {converted.size}")
+                        print(f"[R Post] ENFORCED PIL: p.init_images[{idx}] -> {converted.size}")
             
             # 3. Convert the main processed object images
             if hasattr(p, 'processed') and hasattr(p.processed, 'images'):
@@ -6198,9 +6822,9 @@ class Script(scripts.Script):
                     converted = convert_to_pil(img)
                     if converted != img:
                         p.processed.images[idx] = converted
-                        print(f"[R Post] 🔧 ENFORCED PIL: p.processed.images[{idx}] -> {converted.size}")
+                        print(f"[R Post] ENFORCED PIL: p.processed.images[{idx}] -> {converted.size}")
             
-            print("[R Post] 🔧 COMPREHENSIVE PIL ENFORCEMENT: All image sources converted to PIL RGB")
+            print("[R Post] COMPREHENSIVE PIL ENFORCEMENT: All image sources converted to PIL RGB")
             
         except Exception as e:
             print(f"[R Post] Error in PIL enforcement: {e}")
@@ -6222,7 +6846,7 @@ class Script(scripts.Script):
             
             # Install interceptors
             for module in modules_to_patch:
-                if hasattr(module, 'pil2numpy') and not hasattr(module, '_ranbooru_original_pil2numpy'):
+                if self._verify_patch_target(module, 'pil2numpy') and not hasattr(module, '_ranbooru_original_pil2numpy'):
                     original_func = module.pil2numpy
                     module._ranbooru_original_pil2numpy = original_func
                     
@@ -6232,11 +6856,12 @@ class Script(scripts.Script):
                         if getattr(self.__class__, '_ranbooru_manual_adetailer_active', False):
                             if isinstance(result, np.ndarray) and len(result.shape) == 3:
                                 pil_img = Image.fromarray(result.astype(np.uint8), 'RGB')
-                                print("[R Post] 🚫 INTERCEPTED: Blocked numpy conversion during ADetailer, returning PIL")
+                                print("[R Post] INTERCEPTED: Blocked numpy conversion during ADetailer, returning PIL")
                                 return pil_img
                         return result
                     
                     module.pil2numpy = patched_pil2numpy
+                    self._log_patch_event("info", f"Patched conversion target: {module.__name__}.pil2numpy")
                     try:
                         if not hasattr(self, '_patched_conversion_modules'):
                             self._patched_conversion_modules = []
@@ -6244,7 +6869,7 @@ class Script(scripts.Script):
                     except Exception:
                         pass
             
-            print(f"[R Post] 🔧 PATCHED: {len(modules_to_patch)} modules to prevent numpy leaks to ADetailer")
+            print(f"[R Post] PATCHED: {len(modules_to_patch)} modules to prevent numpy leaks to ADetailer")
             
         except Exception as e:
             print(f"[R Post] Error patching image conversion functions: {e}")
@@ -6252,6 +6877,7 @@ class Script(scripts.Script):
     def _unpatch_manual_adetailer_overrides(self):
         """Restore any monkey patches applied for manual ADetailer runs."""
         try:
+            self._log_patch_event("info", "Starting unpatch of manual ADetailer overrides")
             if hasattr(self, '_patched_processed_objects'):
                 for proc in list(self._patched_processed_objects):
                     original = getattr(proc, '_ranbooru_original_getattribute', None)
@@ -6338,7 +6964,9 @@ class Script(scripts.Script):
                             pass
             except Exception:
                 pass
+            self._log_patch_event("info", "Completed unpatch of manual ADetailer overrides")
         except Exception as exc:
+            self._log_patch_event("warning", f"Failed to unpatch manual ADetailer overrides: {exc}")
             print(f"[R Cleanup] Warn: Failed to unpatch manual ADetailer overrides: {exc}")
     
     def _construct_processed_fallback(self, processed, img2img_results, p):
@@ -6367,8 +6995,8 @@ class Script(scripts.Script):
             # CRITICAL: ADetailer expects 'image' attribute (singular)
             if converted_images:
                 temp_processed.image = converted_images[0]
-                print(f"[R Post] 🔧 FALLBACK: Set temp_processed.image = {converted_images[0].size} mode={converted_images[0].mode}")
-                print(f"[R Post] 🔧 FALLBACK: Converted {len(converted_images)} images to PIL format")
+                print(f"[R Post] FALLBACK: Set temp_processed.image = {converted_images[0].size} mode={converted_images[0].mode}")
+                print(f"[R Post] FALLBACK: Converted {len(converted_images)} images to PIL format")
             
             return temp_processed
         except Exception as e:
@@ -6377,7 +7005,7 @@ class Script(scripts.Script):
     def _disable_original_adetailer(self, p):
         """Comprehensively disable ALL ADetailer scripts from ALL possible sources"""
         try:
-            print("[R Post] 🚫 COMPREHENSIVE: Finding and disabling ALL ADetailer scripts everywhere")
+            print("[R Post] COMPREHENSIVE: Finding and disabling ALL ADetailer scripts everywhere")
             self.disabled_adetailer_scripts = []
             
             # Method 1: Check alwayson_scripts (primary location)
@@ -6417,7 +7045,7 @@ class Script(scripts.Script):
             except:
                 pass  # Module inspection might fail
                 
-            print(f"[R Post] 🚫 COMPREHENSIVE DISABLE: Found and disabled {len(self.disabled_adetailer_scripts)} ADetailer script(s) from all sources")
+            print(f"[R Post] COMPREHENSIVE DISABLE: Found and disabled {len(self.disabled_adetailer_scripts)} ADetailer script(s) from all sources")
             
             # NUCLEAR OPTION: Block the wrong image size entirely
             self._block_wrong_image_size()
@@ -6437,11 +7065,139 @@ class Script(scripts.Script):
                     'ad_script' in script_name)
         except:
             return False
+
+    def _is_controlnet_script(self, script):
+        """Check if a script appears to be a ControlNet script."""
+        try:
+            if script is None:
+                return False
+            script_name = script.__class__.__name__.lower() if hasattr(script, '__class__') else str(script).lower()
+            if 'controlnet' in script_name:
+                return True
+            title_attr = getattr(script, 'title', None)
+            if callable(title_attr):
+                try:
+                    title_value = str(title_attr()).strip().lower()
+                    if 'controlnet' in title_value:
+                        return True
+                except Exception:
+                    pass
+            return False
+        except Exception:
+            return False
+
+    def _is_forge_controlnet_script(self, script):
+        """Detect Forge's built-in ControlNet script class."""
+        try:
+            if script is None:
+                return False
+            cls = getattr(script, '__class__', None)
+            class_name = getattr(cls, '__name__', '')
+            module_name = getattr(cls, '__module__', '')
+            filename = str(getattr(script, 'filename', '') or '')
+            class_name_l = str(class_name).lower()
+            module_name_l = str(module_name).lower()
+            filename_l = filename.replace('\\', '/').lower()
+            return (
+                class_name_l == 'controlnetforforgeofficial'
+                or 'sd_forge_controlnet' in module_name_l
+                or 'sd_forge_controlnet' in filename_l
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _clear_runner_callback_cache(runner):
+        """Invalidate ScriptRunner callback cache after script list mutations."""
+        try:
+            callback_map = getattr(runner, 'callback_map', None)
+            if isinstance(callback_map, dict):
+                callback_map.clear()
+        except Exception:
+            pass
+
+    @contextmanager
+    def _manual_adetailer_script_isolation(self, processing_obj, adetailer_script, keep_controlnet: bool = False):
+        """Run manual ADetailer with only the selected ADetailer script present in runners."""
+        snapshots = []
+        try:
+            if adetailer_script is None:
+                yield
+                return
+
+            runners = []
+            seen_runner_ids = set()
+
+            def add_runner(runner):
+                if runner is None:
+                    return
+                runner_id = id(runner)
+                if runner_id in seen_runner_ids:
+                    return
+                seen_runner_ids.add(runner_id)
+                runners.append(runner)
+
+            add_runner(getattr(processing_obj, 'scripts', None))
+            try:
+                import modules.scripts as scripts_module
+                add_runner(getattr(scripts_module, 'scripts_txt2img', None))
+                add_runner(getattr(scripts_module, 'scripts_img2img', None))
+            except Exception:
+                pass
+
+            removed_total = 0
+            kept_controlnet = 0
+            forge_controlnet_discovery_only = 0
+            for runner in runners:
+                for list_attr in ('alwayson_scripts', 'scripts'):
+                    script_list = getattr(runner, list_attr, None)
+                    if not isinstance(script_list, (list, tuple)):
+                        continue
+                    original_items = list(script_list)
+                    filtered_items = []
+                    for script_item in original_items:
+                        if script_item is adetailer_script:
+                            filtered_items.append(script_item)
+                            continue
+                        if keep_controlnet and self._is_controlnet_script(script_item):
+                            # Forge ControlNet only needs to stay discoverable in runner.scripts.
+                            # Keeping it always-on during manual ADetailer can trigger stale
+                            # callbacks where process_before_every_sampling runs without process().
+                            if list_attr == 'scripts':
+                                filtered_items.append(script_item)
+                                kept_controlnet += 1
+                            elif not self._is_forge_controlnet_script(script_item):
+                                filtered_items.append(script_item)
+                                kept_controlnet += 1
+                            else:
+                                forge_controlnet_discovery_only += 1
+                    if filtered_items == original_items:
+                        continue
+                    snapshots.append((runner, list_attr, script_list))
+                    setattr(runner, list_attr, filtered_items)
+                    self._clear_runner_callback_cache(runner)
+                    removed_total += max(0, len(original_items) - len(filtered_items))
+
+            if removed_total:
+                if keep_controlnet:
+                    print(f"[R Post] Manual ADetailer isolation active: removed {removed_total} non-ADetailer/ControlNet script entry(s), kept {kept_controlnet} ControlNet entry(s)")
+                    if forge_controlnet_discovery_only:
+                        print(f"[R Post] Manual ADetailer isolation: Forge ControlNet kept for discovery only ({forge_controlnet_discovery_only} always-on callback slot(s) suppressed)")
+                else:
+                    print(f"[R Post] Manual ADetailer isolation active: removed {removed_total} non-ADetailer script entry(s)")
+            yield
+        finally:
+            for runner, list_attr, original_value in reversed(snapshots):
+                try:
+                    setattr(runner, list_attr, original_value)
+                    self._clear_runner_callback_cache(runner)
+                except Exception:
+                    pass
     
     def _disable_single_adetailer(self, script, source):
         """Disable a single ADetailer script"""
         try:
-            print(f"[R Post] 🚫 Disabling {script.__class__.__name__} from {source}")
+            print(f"[R Post] Disabling {script.__class__.__name__} from {source}")
             
             # Store original state for cleanup
             original_enabled = getattr(script, 'enabled', True)
@@ -6469,7 +7225,7 @@ class Script(scripts.Script):
     def _block_wrong_image_size(self):
         """Block processing of 640x512 images entirely"""
         try:
-            print("[R Post] 🚫 NUCLEAR: Blocking 640x512 image processing entirely")
+            print("[R Post] NUCLEAR: Blocking 640x512 image processing entirely")
             
             # Store global flag to block wrong image sizes
             self.__class__._block_640x512_images = True
@@ -6485,7 +7241,7 @@ class Script(scripts.Script):
                         if hasattr(img, 'size') and img.size != (640, 512):
                             filtered_images.append(img)
                         else:
-                            print(f"[R Post] 🚫 BLOCKED 640x512 image from processing")
+                            print(f"[R Post] BLOCKED 640x512 image from processing")
                     original_processed.images = filtered_images
             
         except Exception as e:
@@ -6494,13 +7250,13 @@ class Script(scripts.Script):
     def _mark_initial_pass(self, p):
         """Mark that we're in initial pass so ADetailer can be intercepted later"""
         try:
-            print("[R] 📍 Marking initial pass - ADetailer will run on img2img results instead")
+            print("[R] Marking initial pass - ADetailer will run on img2img results instead")
             
             # Clear any previous hard-disable flag for ADetailer
             try:
                 if hasattr(p, "_ad_disabled") and getattr(p, "_ad_disabled", False):
                     setattr(p, "_ad_disabled", False)
-                    print("[R] 🔄 Cleared p._ad_disabled from previous generation")
+                    print("[R] Cleared p._ad_disabled from previous generation")
             except Exception as _e:
                 print(f"[R] WARN: Could not clear p._ad_disabled: {_e}")
             
@@ -6528,11 +7284,11 @@ class Script(scripts.Script):
         """Re-enable ALL ADetailer scripts that were disabled in the previous generation"""
         try:
             if hasattr(self, 'disabled_adetailer_scripts') and self.disabled_adetailer_scripts:
-                print(f"[R] 🔄 COMPREHENSIVE RE-ENABLE: Restoring {len(self.disabled_adetailer_scripts)} ADetailer script(s) from previous generation")
+                print(f"[R] COMPREHENSIVE RE-ENABLE: Restoring {len(self.disabled_adetailer_scripts)} ADetailer script(s) from previous generation")
                 
                 for script, original_enabled in self.disabled_adetailer_scripts:
                     source = getattr(script, '_ranbooru_disabled_source', 'unknown')
-                    print(f"[R] 🔄 Re-enabling {script.__class__.__name__} from {source}")
+                    print(f"[R] Re-enabling {script.__class__.__name__} from {source}")
                     
                     # Restore original enabled state
                     if hasattr(script, 'enabled'):
@@ -6553,7 +7309,7 @@ class Script(scripts.Script):
                     if hasattr(script, '_ranbooru_disabled_source'):
                         delattr(script, '_ranbooru_disabled_source')
                 
-                print(f"[R] 🔄 COMPREHENSIVE RE-ENABLE: Restored {len(self.disabled_adetailer_scripts)} ADetailer script(s) for new generation")
+                print(f"[R] COMPREHENSIVE RE-ENABLE: Restored {len(self.disabled_adetailer_scripts)} ADetailer script(s) for new generation")
                 # Clear the list now that we've re-enabled everything
                 delattr(self, 'disabled_adetailer_scripts')
             
@@ -6567,7 +7323,7 @@ class Script(scripts.Script):
         """Unblock 640x512 image processing for normal ADetailer operation"""
         try:
             if hasattr(self.__class__, '_block_640x512_images'):
-                print("[R] 🔄 UNBLOCKING: Re-enabling 640x512 image processing for normal operation")
+                print("[R] UNBLOCKING: Re-enabling 640x512 image processing for normal operation")
                 delattr(self.__class__, '_block_640x512_images')
         except Exception as e:
             print(f"[R] Error unblocking wrong image size: {e}")
@@ -6575,7 +7331,7 @@ class Script(scripts.Script):
     def _prevent_all_image_saving(self, p):
         """Prevent all possible image saving during initial pass"""
         try:
-            print("[R] 🚫 Implementing comprehensive save prevention for initial pass")
+            print("[R] Implementing comprehensive save prevention for initial pass")
             
             # Store additional original values for restoration
             self.original_save_to_dirs = getattr(p, 'save_to_dirs', True)  
@@ -6593,8 +7349,8 @@ class Script(scripts.Script):
             # ULTIMATE: Set a flag to completely suppress this generation from being processed by anything else
             setattr(p, '_ranbooru_suppress_all_processing', True)
             setattr(p, '_ranbooru_initial_pass_only', True)
-            print(f"[R Save Prevention] 🚫 Redirected initial pass saves to temp directory: {temp_dir}")
-            print("[R Save Prevention] 🚫 ULTIMATE: Marked initial pass for complete processing suppression")
+            print(f"[R Save Prevention] Redirected initial pass saves to temp directory: {temp_dir}")
+            print("[R Save Prevention] ULTIMATE: Marked initial pass for complete processing suppression")
             
             # Try to disable any gallery/history saving
             if hasattr(p, 'save_images_history'):
@@ -6610,7 +7366,7 @@ class Script(scripts.Script):
             if hasattr(p, 'filename_format'):
                 p.filename_format = ""
                 
-            print("[R] 🚫 Comprehensive save prevention applied")
+            print("[R] Comprehensive save prevention applied")
             
         except Exception as e:
             print(f"[R] Error applying save prevention: {e}")
@@ -6620,7 +7376,7 @@ class Script(scripts.Script):
         if not self._is_adetailer_enabled():
             return
         try:
-            print("[R] ✅ Preparing ADetailer to run on img2img results")
+            print("[R] Preparing ADetailer to run on img2img results")
             
             # Clear the initial pass flag so ADetailer knows to run normally
             self._ranbooru_initial_pass = False
@@ -6631,18 +7387,18 @@ class Script(scripts.Script):
     def _force_ui_update(self, p, processed, final_results):
         """Force ForgeUI to display our final ADetailer-processed results"""
         try:
-            print(f"[R UI] 🖥️  Forcing UI to display {len(final_results)} final results")
+            print(f"[R UI] Forcing UI to display {len(final_results)} final results")
             
             # SAFETY CHECK: Filter out any 640x512 images from final results
             filtered_results = []
             for img in final_results:
                 if hasattr(img, 'size') and img.size == (640, 512):
-                    print(f"[R UI] 🚫 BLOCKED 640x512 image from UI display")
+                    print(f"[R UI] BLOCKED 640x512 image from UI display")
                 else:
                     filtered_results.append(img)
             
             if len(filtered_results) != len(final_results):
-                print(f"[R UI] 🚫 Filtered out {len(final_results) - len(filtered_results)} wrong-sized images")
+                print(f"[R UI] Filtered out {len(final_results) - len(filtered_results)} wrong-sized images")
                 final_results = filtered_results
             
             # Method 1: Update all possible UI-related attributes
@@ -6656,10 +7412,10 @@ class Script(scripts.Script):
                     if isinstance(getattr(processed, attr), list):
                         getattr(processed, attr).clear()
                         getattr(processed, attr).extend(final_results)
-                        print(f"[R UI] 🖥️  Updated {attr} for UI")
+                        print(f"[R UI] Updated {attr} for UI")
                     else:
                         setattr(processed, attr, final_results)
-                        print(f"[R UI] 🖥️  Set {attr} for UI")
+                        print(f"[R UI] Set {attr} for UI")
             
             # Method 2: Try to update WebUI/Gradio state directly
             try:
@@ -6668,12 +7424,12 @@ class Script(scripts.Script):
                     # Force UI refresh
                     if hasattr(shared_modules.state, 'current_image'):
                         shared_modules.state.current_image = final_results[0] if final_results else None
-                        print("[R UI] 🖥️  Updated shared.state.current_image")
+                        print("[R UI] Updated shared.state.current_image")
                     
                     # Update any gallery state
                     if hasattr(shared_modules.state, 'gallery_images'):
                         shared_modules.state.gallery_images = final_results
-                        print("[R UI] 🖥️  Updated shared.state.gallery_images")
+                        print("[R UI] Updated shared.state.gallery_images")
                         
                     # Force UI state update
                     shared_modules.state.need_restart = False  # Prevent restart
@@ -6684,14 +7440,14 @@ class Script(scripts.Script):
             # Method 3: Try to update processing pipeline UI references
             if hasattr(p, 'cached_images'):
                 p.cached_images = final_results
-                print("[R UI] 🖥️  Updated p.cached_images")
+                print("[R UI] Updated p.cached_images")
             
             # Method 4: Force update any Gradio components we can find
             try:
                 # This is a bit hacky but should force UI refresh
                 processed._ui_force_update = True
                 processed._ui_timestamp = __import__('time').time()
-                print("[R UI] 🖥️  Added UI force update flags")
+                print("[R UI] Added UI force update flags")
             except:
                 pass
             
@@ -6701,9 +7457,9 @@ class Script(scripts.Script):
                     if 'result' in key.lower() and isinstance(value, list):
                         value.clear()
                         value.extend(final_results)
-                        print(f"[R UI] 🖥️  Updated result attribute: {key}")
+                        print(f"[R UI] Updated result attribute: {key}")
             
-            print(f"[R UI] 🖥️  UI force update complete - ForgeUI should now display final results")
+            print(f"[R UI] UI force update complete - ForgeUI should now display final results")
             
             # Disable preview guard now that correct image is presented
             try:
@@ -6730,12 +7486,12 @@ class Script(scripts.Script):
             # FINAL INTERCEPT: If we have global results, force them into all possible locations
             if hasattr(self.__class__, '_global_ranbooru_results'):
                 img2img_results = self.__class__._global_ranbooru_results
-                print(f"[R PostBatch] 🎯 FINAL INTERCEPT: Forcing {len(img2img_results)} img2img results into all extensions")
+                print(f"[R PostBatch] FINAL INTERCEPT: Forcing {len(img2img_results)} img2img results into all extensions")
                 
                 # Try to find the processed object in the arguments and force update it
                 for arg in args:
                     if hasattr(arg, 'images') and hasattr(arg, 'prompt'):
-                        print("[R PostBatch] 🎯 Found processed object in args - force updating")
+                        print("[R PostBatch] Found processed object in args - force updating")
                         arg.images.clear()
                         arg.images.extend(img2img_results)
                         # Apply UI force update here too
@@ -6756,10 +7512,10 @@ class Script(scripts.Script):
                     if self._is_adetailer_script(script):
                         # Skip if we've already disabled this script
                         if hasattr(script, '_ranbooru_disabled_after_manual'):
-                            print(f"[R PostBatch] 🚫 Skipping {script.__class__.__name__} ({script_type}) - disabled by RanbooruX after manual processing")
+                            print(f"[R PostBatch] Skipping {script.__class__.__name__} ({script_type}) - disabled by RanbooruX after manual processing")
                             continue
                             
-                        print(f"[R PostBatch] 🎯 Found potential ADetailer script: {script.__class__.__name__} ({script_type})")
+                        print(f"[R PostBatch] Found potential ADetailer script: {script.__class__.__name__} ({script_type})")
                         # Force update any image attributes this script might have
                         for attr_name in dir(script):
                             if 'image' in attr_name.lower() and not attr_name.startswith('_'):
@@ -6768,12 +7524,12 @@ class Script(scripts.Script):
                                     if isinstance(attr_value, list):
                                         attr_value.clear()
                                         attr_value.extend(img2img_results)
-                                        print(f"[R PostBatch] 🎯 Updated {script_name}.{attr_name}")
+                                        print(f"[R PostBatch] Updated {script_name}.{attr_name}")
                                 except:
                                     pass
                 
                 # CRITICAL: Final UI force update at batch level
-                print("[R PostBatch] 🖥️  Performing final UI force update")
+                print("[R PostBatch] Performing final UI force update")
                 if args and hasattr(args[0], 'images'):
                     self._force_ui_update(p, args[0], img2img_results)
             
@@ -6812,7 +7568,7 @@ class Script(scripts.Script):
                 # Set early block flag if we're about to process with img2img
                 if hasattr(self, '_ranbooru_manual_adetailer_complete'):
                     setattr(self.__class__, '_ranbooru_block_all_adetailer', True)
-                    print("[R Process] 🛑 Early block flag set - preventing ADetailer execution")
+                    print("[R Process] Early block flag set - preventing ADetailer execution")
                 
         except Exception as e:
             print(f"[R Process] Error: {e}")
@@ -6822,11 +7578,11 @@ class Script(scripts.Script):
         if not self._is_adetailer_enabled():
             return
         try:
-            print("[R Process] 🛡️  Early ADetailer protection activated")
+            print("[R Process] Early ADetailer protection activated")
             
             # Check if we're in the initial pass
             if getattr(self, '_ranbooru_initial_pass', False):
-                print("[R Process] 🛡️  Detected initial pass - COMPLETELY BLOCKING ADetailer")
+                print("[R Process] Detected initial pass - COMPLETELY BLOCKING ADetailer")
                 
                 # Set comprehensive block flags
                 setattr(p, '_ranbooru_skip_initial_adetailer', True)
@@ -6842,7 +7598,7 @@ class Script(scripts.Script):
                 setattr(self.__class__, '_ranbooru_block_all_adetailer', True)
                 setattr(self.__class__, '_adetailer_global_guard_active', True)
                 
-                print("[R Process] 🛡️  ADetailer completely blocked for initial pass - will be restored for manual img2img processing")
+                print("[R Process] ADetailer completely blocked for initial pass - will be restored for manual img2img processing")
                 
         except Exception as e:
             print(f"[R Process] Error in early ADetailer protection: {e}")
@@ -6865,7 +7621,7 @@ class Script(scripts.Script):
                 
                 p.scripts.alwayson_scripts = filtered_alwayson
                 self._stored_adetailer_scripts['alwayson'] = removed_alwayson
-                print(f"[R Process] 🛡️  Removed {len(removed_alwayson)} ADetailer scripts from alwayson_scripts")
+                print(f"[R Process] Removed {len(removed_alwayson)} ADetailer scripts from alwayson_scripts")
             
             # Remove ADetailer from regular scripts
             if hasattr(p.scripts, 'scripts') and p.scripts.scripts:
@@ -6875,7 +7631,7 @@ class Script(scripts.Script):
                 
                 p.scripts.scripts = filtered_scripts
                 self._stored_adetailer_scripts['regular'] = removed_scripts
-                print(f"[R Process] 🛡️  Removed {len(removed_scripts)} ADetailer scripts from scripts")
+                print(f"[R Process] Removed {len(removed_scripts)} ADetailer scripts from scripts")
         
         except Exception as e:
             print(f"[R Process] Error removing ADetailer from runner: {e}")
@@ -6883,7 +7639,7 @@ class Script(scripts.Script):
     def _restore_early_adetailer_protection(self, processing_obj=None):
         """Restore ADetailer scripts and flags after an interrupted or completed run."""
         try:
-            print("[R Process] 🛡️  Restoring ADetailer scripts for manual processing")
+            print("[R Process] Restoring ADetailer scripts for manual processing")
 
             # Clear initial pass/block flags so subsequent generations can run ADetailer
             setattr(self.__class__, '_ranbooru_block_all_adetailer', False)
@@ -6902,12 +7658,12 @@ class Script(scripts.Script):
                         for script in stored['alwayson']:
                             if script not in runner.alwayson_scripts:
                                 runner.alwayson_scripts.append(script)
-                        print(f"[R Process] 🔄 Reattached {len(stored['alwayson'])} ADetailer always-on script(s)")
+                        print(f"[R Process] Reattached {len(stored['alwayson'])} ADetailer always-on script(s)")
                     if hasattr(runner, 'scripts') and stored.get('regular'):
                         for script in stored['regular']:
                             if script not in runner.scripts:
                                 runner.scripts.append(script)
-                        print(f"[R Process] 🔄 Reattached {len(stored['regular'])} ADetailer on-demand script(s)")
+                        print(f"[R Process] Reattached {len(stored['regular'])} ADetailer on-demand script(s)")
                 finally:
                     # Clear stored references so we don't duplicate reinsertion
                     delattr(self, '_stored_adetailer_scripts')
@@ -6920,7 +7676,7 @@ class Script(scripts.Script):
             if hasattr(self, '_temp_disabled_adetailer'):
                 delattr(self, '_temp_disabled_adetailer')
 
-            print("[R Process] 🛡️  Early protection restoration complete")
+            print("[R Process] Early protection restoration complete")
 
         except Exception as e:
             print(f"[R Process] Error restoring early ADetailer protection: {e}")
@@ -6981,16 +7737,7 @@ class Script(scripts.Script):
         return random_indices.tolist() if isinstance(random_indices, np.ndarray) else random_indices
 
     def use_autotagger(self, model):
-        if model == 'deepbooru':
-            if isinstance(self.original_prompt, str):
-                orig_prompt = [self.original_prompt]
-            else:
-                orig_prompt = self.original_prompt
-            deepbooru.model.start()
-            for img, prompt in zip(self.last_img, orig_prompt):
-                final_prompts = [prompt + ',' + deepbooru.model.tag_multi(img) for img in self.last_img]
-            deepbooru.model.stop()
-            return final_prompts
+        return None
 
     def _install_scriptrunner_guard(self, p):
         """Wrap p.scripts postprocess and postprocess_image to skip ADetailer when our block flag is active"""
@@ -7011,7 +7758,7 @@ class Script(scripts.Script):
                     return False
             
             # Guard postprocess
-            if hasattr(runner, 'postprocess') and not hasattr(runner, '_ranbooru_original_postprocess'):
+            if self._verify_patch_target(runner, 'postprocess') and not hasattr(runner, '_ranbooru_original_postprocess'):
                 original_postprocess = runner.postprocess
                 runner._ranbooru_original_postprocess = original_postprocess
                 def guarded_postprocess(p_arg, processed_arg, *args, **kwargs):
@@ -7032,7 +7779,7 @@ class Script(scripts.Script):
                             saved_alwayson = list(getattr(runner, 'alwayson_scripts', []) or [])
                             saved_scripts = list(getattr(runner, 'scripts', []) or [])
                             adetailer_count = sum(1 for s in saved_alwayson if is_adetailer(s)) + sum(1 for s in saved_scripts if is_adetailer(s))
-                            print(f"[R Guard] 🛑 BLOCKING {adetailer_count} ADetailer script(s) from postprocess")
+                            print(f"[R Guard] BLOCKING {adetailer_count} ADetailer script(s) from postprocess")
                             if hasattr(runner, 'alwayson_scripts'):
                                 runner.alwayson_scripts = [s for s in saved_alwayson if not is_adetailer(s)]
                             if hasattr(runner, 'scripts'):
@@ -7048,9 +7795,10 @@ class Script(scripts.Script):
                             print(f"[R Guard] Error during postprocess blocking: {e}")
                     return original_postprocess(p_arg, processed_arg, *args, **kwargs)
                 runner.postprocess = guarded_postprocess
+                self._log_patch_event("info", "Installed guarded runner.postprocess patch")
             
             # Guard postprocess_image
-            if hasattr(runner, 'postprocess_image') and not hasattr(runner, '_ranbooru_original_postprocess_image'):
+            if self._verify_patch_target(runner, 'postprocess_image') and not hasattr(runner, '_ranbooru_original_postprocess_image'):
                 original_postprocess_image = runner.postprocess_image
                 runner._ranbooru_original_postprocess_image = original_postprocess_image
                 def guarded_postprocess_image(p_arg, pp_arg, *args, **kwargs):
@@ -7071,7 +7819,7 @@ class Script(scripts.Script):
                             saved_alwayson = list(getattr(runner, 'alwayson_scripts', []) or [])
                             saved_scripts = list(getattr(runner, 'scripts', []) or [])
                             adetailer_count = sum(1 for s in saved_alwayson if is_adetailer(s)) + sum(1 for s in saved_scripts if is_adetailer(s))
-                            print(f"[R Guard] 🛑 BLOCKING {adetailer_count} ADetailer script(s) from postprocess_image")
+                            print(f"[R Guard] BLOCKING {adetailer_count} ADetailer script(s) from postprocess_image")
                             if hasattr(runner, 'alwayson_scripts'):
                                 runner.alwayson_scripts = [s for s in saved_alwayson if not is_adetailer(s)]
                             if hasattr(runner, 'scripts'):
@@ -7087,10 +7835,13 @@ class Script(scripts.Script):
                             print(f"[R Guard] Error during postprocess_image blocking: {e}")
                     return original_postprocess_image(p_arg, pp_arg, *args, **kwargs)
                 runner.postprocess_image = guarded_postprocess_image
+                self._log_patch_event("info", "Installed guarded runner.postprocess_image patch")
             
             runner._ranbooru_guard_installed = True
-            print("[R] 🎯 Installed ScriptRunner guard to skip ADetailer when blocked (postprocess & postprocess_image)")
+            self._log_patch_event("info", "Installed ScriptRunner guard to skip ADetailer when blocked")
+            print("[R] Installed ScriptRunner guard to skip ADetailer when blocked (postprocess & postprocess_image)")
         except Exception as e:
+            self._log_patch_event("warning", f"Failed to install ScriptRunner guard: {e}")
             print(f"[R] Error installing ScriptRunner guard: {e}")
 
     def _prepare_processing_for_manual_adetailer(self, p, processed, img2img_results):
@@ -7159,14 +7910,19 @@ class Script(scripts.Script):
             def guarded_assign_current_image(img):
                 try:
                     if getattr(self.__class__, '_ranbooru_preview_guard_on', False):
+                        if getattr(self.__class__, '_ranbooru_preview_block_all', False):
+                            if not getattr(self.__class__, '_ranbooru_preview_block_notice_emitted', False):
+                                print("[R UI] Preview blocked: withholding intermediary frame until final image is ready")
+                                self.__class__._ranbooru_preview_block_notice_emitted = True
+                            return
                         # If we know final dims, only allow those; otherwise block 640x512
                         final_dims = getattr(self.__class__, '_ranbooru_final_dims', None)
                         if img is not None and hasattr(img, 'size'):
                             if final_dims and img.size != final_dims:
-                                print("[R UI] 🚫 Preview blocked: mismatched size")
+                                print("[R UI] Preview blocked: mismatched size")
                                 return
                             if img.size == (640, 512):
-                                print("[R UI] 🚫 Preview blocked: 640x512 preview")
+                                print("[R UI] Preview blocked: 640x512 preview")
                                 return
                 except Exception:
                     pass
@@ -7174,18 +7930,27 @@ class Script(scripts.Script):
             
             state.assign_current_image = guarded_assign_current_image
             state._ranbooru_preview_guard_installed = True
-            print("[R UI] 🎯 Installed preview guard")
+            print("[R UI] Installed preview guard")
         except Exception as e:
             print(f"[R UI] Error installing preview guard: {e}")
     
-    def _set_preview_guard(self, enabled: bool, final_dims=None):
+    def _set_preview_guard(self, enabled: bool, final_dims=None, block_all: bool = False):
         try:
             self.__class__._ranbooru_preview_guard_on = bool(enabled)
-            if enabled and final_dims is not None:
-                self.__class__._ranbooru_final_dims = final_dims
-            elif not enabled and hasattr(self.__class__, '_ranbooru_final_dims'):
-                delattr(self.__class__, '_ranbooru_final_dims')
-            print(f"[R UI] 🎯 Preview guard set to {enabled} with dims={final_dims}")
+            if enabled:
+                self.__class__._ranbooru_preview_block_all = bool(block_all)
+                self.__class__._ranbooru_preview_block_notice_emitted = False
+                if final_dims is not None:
+                    self.__class__._ranbooru_final_dims = final_dims
+                elif hasattr(self.__class__, '_ranbooru_final_dims'):
+                    delattr(self.__class__, '_ranbooru_final_dims')
+            else:
+                self.__class__._ranbooru_preview_block_all = False
+                if hasattr(self.__class__, '_ranbooru_final_dims'):
+                    delattr(self.__class__, '_ranbooru_final_dims')
+                if hasattr(self.__class__, '_ranbooru_preview_block_notice_emitted'):
+                    delattr(self.__class__, '_ranbooru_preview_block_notice_emitted')
+            print(f"[R UI] Preview guard set to {enabled} with dims={final_dims}, block_all={block_all}")
         except Exception as e:
             print(f"[R UI] Error setting preview guard: {e}")
     
@@ -7213,7 +7978,7 @@ class Script(scripts.Script):
                                         from scripts.ranbooru import Script as RanbooruScript
                                         block = getattr(RanbooruScript, '_ranbooru_block_all_adetailer', False)
                                         if block:
-                                            print(f"[R Direct Patch] 🛑 Blocked ADetailer.postprocess_image")
+                                            print(f"[R Direct Patch] Blocked ADetailer.postprocess_image")
                                             return False
                                         return original_method(self, *args, **kwargs)
                                     
@@ -7229,7 +7994,7 @@ class Script(scripts.Script):
                                         from scripts.ranbooru import Script as RanbooruScript
                                         block = getattr(RanbooruScript, '_ranbooru_block_all_adetailer', False)
                                         if block:
-                                            print(f"[R Direct Patch] 🛑 Blocked ADetailer.postprocess")
+                                            print(f"[R Direct Patch] Blocked ADetailer.postprocess")
                                             return False
                                         return original_method(self, *args, **kwargs)
                                     
@@ -7239,7 +8004,7 @@ class Script(scripts.Script):
                     except Exception as e:
                         continue
             
-            print(f"[R Direct Patch] 🎯 Patched {patched_count} ADetailer methods directly")
+            print(f"[R Direct Patch] Patched {patched_count} ADetailer methods directly")
             
         except Exception as e:
             print(f"[R Direct Patch] Error patching ADetailer methods: {e}")
@@ -7263,7 +8028,7 @@ class Script(scripts.Script):
                                     if 'adetailer' in class_name.lower():
                                         block = getattr(self.__class__, '_ranbooru_block_all_adetailer', False)
                                         if block:
-                                            print(f"[R Nuclear] 🛑 BLOCKED script execution: {class_name}")
+                                            print(f"[R Nuclear] BLOCKED script execution: {class_name}")
                                             return None
                         except Exception:
                             pass
@@ -7271,7 +8036,7 @@ class Script(scripts.Script):
                     
                     modules.scripts.run_script = nuclear_script_hook
                     modules.scripts._ranbooru_nuclear_hook_installed = True
-                    print("[R Nuclear] 🎯 Installed nuclear ADetailer execution hook")
+                    print("[R Nuclear] Installed nuclear ADetailer execution hook")
             
             # Also hook into postprocess_image directly at the modules level
             if hasattr(modules.scripts, 'postprocess_image') and not hasattr(modules.scripts, '_ranbooru_nuclear_postprocess_image_hook'):
@@ -7279,13 +8044,13 @@ class Script(scripts.Script):
                 def nuclear_postprocess_image_hook(*args, **kwargs):
                     block = getattr(self.__class__, '_ranbooru_block_all_adetailer', False)
                     if block:
-                        print("[R Nuclear] 🛑 BLOCKED modules.scripts.postprocess_image")
+                        print("[R Nuclear] BLOCKED modules.scripts.postprocess_image")
                         return False
                     return original_postprocess_image(*args, **kwargs)
                 
                 modules.scripts.postprocess_image = nuclear_postprocess_image_hook
                 modules.scripts._ranbooru_nuclear_postprocess_image_hook = True
-                print("[R Nuclear] 🎯 Installed nuclear postprocess_image hook")
+                print("[R Nuclear] Installed nuclear postprocess_image hook")
             
         except Exception as e:
             print(f"[R Nuclear] Error installing nuclear hook: {e}")
@@ -7293,30 +8058,30 @@ class Script(scripts.Script):
     def _override_all_image_access(self, img2img_results):
         """Final solution: Override ALL possible image access methods to force correct images"""
         try:
-            print(f"[R Final] 🎯 Overriding ALL image access with {len(img2img_results)} img2img results")
+            print(f"[R Final] Overriding ALL image access with {len(img2img_results)} img2img results")
             
             # Store our correct images globally
             self.__class__._force_images = img2img_results.copy()
             
             # Skip PIL.Image.open override as it interferes with normal operations
-            # print("[R Final] 🎯 Skipped PIL.Image.open override to prevent interference")
+            # print("[R Final] Skipped PIL.Image.open override to prevent interference")
             
             # Also override any existing processed.images access
             import modules.processing
             if hasattr(modules.processing, '_current_processed') and modules.processing._current_processed:
                 current_processed = modules.processing._current_processed
                 if hasattr(current_processed, 'images') and current_processed.images:
-                    print(f"[R Final] 🎯 Replacing _current_processed.images ({len(current_processed.images)} -> {len(img2img_results)})")
+                    print(f"[R Final] Replacing _current_processed.images ({len(current_processed.images)} -> {len(img2img_results)})")
                     current_processed.images.clear()
                     current_processed.images.extend(img2img_results)
             
             # Override shared.state images
             import modules.shared
             if hasattr(modules.shared.state, 'current_image'):
-                print("[R Final] 🎯 Replacing shared.state.current_image")
+                print("[R Final] Replacing shared.state.current_image")
                 modules.shared.state.current_image = img2img_results[0] if img2img_results else None
             
-            print("[R Final] 🎯 Image access override complete")
+            print("[R Final] Image access override complete")
             
         except Exception as e:
             print(f"[R Final] Error overriding image access: {e}")
@@ -7324,7 +8089,7 @@ class Script(scripts.Script):
     def _remove_adetailer_from_pipeline_completely(self, p):
         """Nuclear option: Remove ADetailer from all processing pipelines"""
         try:
-            print("[R Nuclear] 🚫 REMOVING ADetailer from processing pipeline completely")
+            print("[R Nuclear] REMOVING ADetailer from processing pipeline completely")
             
             # Remove from the current processing object
             if hasattr(p, 'scripts'):
@@ -7332,13 +8097,13 @@ class Script(scripts.Script):
                     original_count = len(p.scripts.alwayson_scripts)
                     p.scripts.alwayson_scripts = [s for s in p.scripts.alwayson_scripts if not self._is_adetailer_script(s)]
                     new_count = len(p.scripts.alwayson_scripts)
-                    print(f"[R Nuclear] 🚫 Removed {original_count - new_count} ADetailer from p.scripts.alwayson_scripts")
+                    print(f"[R Nuclear] Removed {original_count - new_count} ADetailer from p.scripts.alwayson_scripts")
                 
                 if hasattr(p.scripts, 'scripts'):
                     original_count = len(p.scripts.scripts)
                     p.scripts.scripts = [s for s in p.scripts.scripts if not self._is_adetailer_script(s)]
                     new_count = len(p.scripts.scripts)
-                    print(f"[R Nuclear] 🚫 Removed {original_count - new_count} ADetailer from p.scripts.scripts")
+                    print(f"[R Nuclear] Removed {original_count - new_count} ADetailer from p.scripts.scripts")
             
             # Remove from global script runners
             import modules.scripts
@@ -7349,22 +8114,22 @@ class Script(scripts.Script):
                         original_count = len(runner.alwayson_scripts)
                         runner.alwayson_scripts = [s for s in runner.alwayson_scripts if not self._is_adetailer_script(s)]
                         new_count = len(runner.alwayson_scripts)
-                        print(f"[R Nuclear] 🚫 Removed {original_count - new_count} ADetailer from {runner_attr}.alwayson_scripts")
+                        print(f"[R Nuclear] Removed {original_count - new_count} ADetailer from {runner_attr}.alwayson_scripts")
                     
                     if hasattr(runner, 'scripts'):
                         original_count = len(runner.scripts)
                         runner.scripts = [s for s in runner.scripts if not self._is_adetailer_script(s)]
                         new_count = len(runner.scripts)
-                        print(f"[R Nuclear] 🚫 Removed {original_count - new_count} ADetailer from {runner_attr}.scripts")
+                        print(f"[R Nuclear] Removed {original_count - new_count} ADetailer from {runner_attr}.scripts")
             
             # Remove from script data
             if hasattr(modules.scripts, 'scripts_data'):
                 original_count = len(modules.scripts.scripts_data)
                 modules.scripts.scripts_data = [s for s in modules.scripts.scripts_data if 'adetailer' not in s.path.lower()]
                 new_count = len(modules.scripts.scripts_data)
-                print(f"[R Nuclear] 🚫 Removed {original_count - new_count} ADetailer from scripts_data")
+                print(f"[R Nuclear] Removed {original_count - new_count} ADetailer from scripts_data")
             
-            print("[R Nuclear] 🚫 ADetailer completely removed from processing pipeline")
+            print("[R Nuclear] ADetailer completely removed from processing pipeline")
             
         except Exception as e:
             print(f"[R Nuclear] Error removing ADetailer from pipeline: {e}")
@@ -7401,18 +8166,18 @@ class Script(scripts.Script):
                             # Allow manual ADetailer execution
                             manual_active = getattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
                             if manual_active:
-                                print("[R Hook] ✅ Allowing manual ADetailer postprocess_image execution")
+                                print("[R Hook] Allowing manual ADetailer postprocess_image execution")
                                 return original_method(p_arg, pp_arg, *args, **kwargs)
                             
                             # Check if we've already processed this image
                             if hasattr(p_arg, '_ranbooru_adetailer_already_processed'):
-                                print("[R Hook] 🛑 ADetailer postprocess_image skipped - RanbooruX already processed")
+                                print("[R Hook] ADetailer postprocess_image skipped - RanbooruX already processed")
                                 return False
-                            print(f"[R Hook] ⚠️ ADetailer postprocess_image running on {getattr(p_arg, 'prompt', 'unknown')[:50]}...")
+                            print(f"[R Hook] ADetailer postprocess_image running on {getattr(p_arg, 'prompt', 'unknown')[:50]}...")
                             return original_method(p_arg, pp_arg, *args, **kwargs)
                         
                         module.postprocess_image = hooked_postprocess_image
-                        print(f"[R Hook] 🎯 Installed postprocess_image hook on {module_name}")
+                        print(f"[R Hook] Installed postprocess_image hook on {module_name}")
                         hooked_count += 1
                     
                     # Also hook any postprocess method
@@ -7424,18 +8189,18 @@ class Script(scripts.Script):
                             # Allow manual ADetailer execution
                             manual_active = getattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
                             if manual_active:
-                                print("[R Hook] ✅ Allowing manual ADetailer postprocess execution")
+                                print("[R Hook] Allowing manual ADetailer postprocess execution")
                                 return original_method(p_arg, processed_arg, *args, **kwargs)
                             
                             # Check if we've already processed this image
                             if hasattr(p_arg, '_ranbooru_adetailer_already_processed'):
-                                print("[R Hook] 🛑 ADetailer postprocess skipped - RanbooruX already processed")
+                                print("[R Hook] ADetailer postprocess skipped - RanbooruX already processed")
                                 return False
-                            print(f"[R Hook] ⚠️ ADetailer postprocess running on {getattr(p_arg, 'prompt', 'unknown')[:50]}...")
+                            print(f"[R Hook] ADetailer postprocess running on {getattr(p_arg, 'prompt', 'unknown')[:50]}...")
                             return original_method(p_arg, processed_arg, *args, **kwargs)
                         
                         module.postprocess = hooked_postprocess
-                        print(f"[R Hook] 🎯 Installed postprocess hook on {module_name}")
+                        print(f"[R Hook] Installed postprocess hook on {module_name}")
                         hooked_count += 1
             
             # Try to hook ADetailer scripts directly from the script runners
@@ -7455,12 +8220,12 @@ class Script(scripts.Script):
                                         # Allow manual ADetailer execution
                                         manual_active = getattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
                                         if manual_active:
-                                            print(f"[R Hook] ✅ Allowing manual ADetailer {script_name}.{method_name} execution")
+                                            print(f"[R Hook] Allowing manual ADetailer {script_name}.{method_name} execution")
                                             return orig(p_arg, *args, **kwargs)
                                         
                                         # Skip if RanbooruX already processed
                                         if hasattr(p_arg, '_ranbooru_adetailer_already_processed'):
-                                            print(f"[R Hook] 🛑 {script_name}.{method_name} skipped - RanbooruX already processed")
+                                            print(f"[R Hook] {script_name}.{method_name} skipped - RanbooruX already processed")
                                             return False
                                         return orig(p_arg, *args, **kwargs)
                                     return wrapped
@@ -7472,7 +8237,7 @@ class Script(scripts.Script):
                                             setattr(script, m, wrapped)
                                             setattr(getattr(script, m), '_ranbooru_wrapped', True)
                                             hooked_count += 1
-                                            print(f"[R Hook] 🎯 Hooked instance method {script_name}.{m}")
+                                            print(f"[R Hook] Hooked instance method {script_name}.{m}")
                                     except Exception:
                                         pass
                             except Exception as _e:
@@ -7487,20 +8252,20 @@ class Script(scripts.Script):
                                     # Allow manual ADetailer execution
                                     manual_active = getattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
                                     if manual_active:
-                                        print(f"[R Hook] ✅ Allowing manual ADetailer {script_name}.postprocess_image execution")
+                                        print(f"[R Hook] Allowing manual ADetailer {script_name}.postprocess_image execution")
                                         return original_method(p_arg, pp_arg, *args, **kwargs)
                                     
                                     if hasattr(p_arg, '_ranbooru_adetailer_already_processed'):
-                                        print(f"[R Hook] 🛑 {script_name}.postprocess_image skipped - RanbooruX already processed")
+                                        print(f"[R Hook] {script_name}.postprocess_image skipped - RanbooruX already processed")
                                         return False
-                                    print(f"[R Hook] ⚠️ {script_name}.postprocess_image running...")
+                                    print(f"[R Hook] {script_name}.postprocess_image running...")
                                     return original_method(p_arg, pp_arg, *args, **kwargs)
                                 
                                 script.postprocess_image = hooked_script_postprocess_image
-                                print(f"[R Hook] 🎯 Hooked {script_name}.postprocess_image")
+                                print(f"[R Hook] Hooked {script_name}.postprocess_image")
                                 hooked_count += 1
                             else:
-                                print(f"[R Hook] ❌ Could not hook {script_name}.postprocess_image - method {'exists' if hasattr(script, 'postprocess_image') else 'missing'}, already hooked: {hasattr(script, '_ranbooru_original_postprocess_image')}")
+                                print(f"[R Hook] Could not hook {script_name}.postprocess_image - method {'exists' if hasattr(script, 'postprocess_image') else 'missing'}, already hooked: {hasattr(script, '_ranbooru_original_postprocess_image')}")
                             
                             # Also try to hook postprocess method
                             if hasattr(script, 'postprocess') and not hasattr(script, '_ranbooru_original_postprocess'):
@@ -7511,20 +8276,20 @@ class Script(scripts.Script):
                                     # Allow manual ADetailer execution
                                     manual_active = getattr(self.__class__, '_ranbooru_manual_adetailer_active', False)
                                     if manual_active:
-                                        print(f"[R Hook] ✅ Allowing manual ADetailer {script_name}.postprocess execution")
+                                        print(f"[R Hook] Allowing manual ADetailer {script_name}.postprocess execution")
                                         return original_method(p_arg, processed_arg, *args, **kwargs)
                                     
                                     if hasattr(p_arg, '_ranbooru_adetailer_already_processed'):
-                                        print(f"[R Hook] 🛑 {script_name}.postprocess skipped - RanbooruX already processed")
+                                        print(f"[R Hook] {script_name}.postprocess skipped - RanbooruX already processed")
                                         return False
-                                    print(f"[R Hook] ⚠️ {script_name}.postprocess running...")
+                                    print(f"[R Hook] {script_name}.postprocess running...")
                                     return original_method(p_arg, processed_arg, *args, **kwargs)
                                 
                                 script.postprocess = hooked_script_postprocess
-                                print(f"[R Hook] 🎯 Hooked {script_name}.postprocess")
+                                print(f"[R Hook] Hooked {script_name}.postprocess")
                                 hooked_count += 1
                             else:
-                                print(f"[R Hook] ❌ Could not hook {script_name}.postprocess - method {'exists' if hasattr(script, 'postprocess') else 'missing'}, already hooked: {hasattr(script, '_ranbooru_original_postprocess')}")
+                                print(f"[R Hook] Could not hook {script_name}.postprocess - method {'exists' if hasattr(script, 'postprocess') else 'missing'}, already hooked: {hasattr(script, '_ranbooru_original_postprocess')}")
             
             print(f"[R Hook] ADetailer skip hook installation complete - hooked {hooked_count} methods")
             
@@ -7536,12 +8301,12 @@ class Script(scripts.Script):
     def _suppress_initial_pass_completely(self, p):
         """Ultimate method to completely suppress the initial pass from any processing"""
         try:
-            print("[R Suppress] 🚫 ULTIMATE: Completely suppressing initial pass from all processing")
+            print("[R Suppress] ULTIMATE: Completely suppressing initial pass from all processing")
             
             # Clear any saved initial images from the processing object
             if hasattr(p, '_ranbooru_initial_images'):
                 p._ranbooru_initial_images.clear()
-                print("[R Suppress] 🚫 Cleared initial images from p._ranbooru_initial_images")
+                print("[R Suppress] Cleared initial images from p._ranbooru_initial_images")
             
             # Try to find and clear any cached initial pass results
             import modules.processing
@@ -7553,7 +8318,7 @@ class Script(scripts.Script):
                     current_processed.images = [img for img in current_processed.images if img.size != (640, 512) and img.size != (512, 640)]
                     filtered_count = len(current_processed.images)
                     if filtered_count != original_count:
-                        print(f"[R Suppress] 🚫 Filtered out {original_count - filtered_count} wrong-sized images from _current_processed")
+                        print(f"[R Suppress] Filtered out {original_count - filtered_count} wrong-sized images from _current_processed")
             
             # Set flags to prevent any ADetailer from running on the initial pass
             setattr(p, '_ranbooru_suppress_all_adetailer', True)
@@ -7569,17 +8334,17 @@ class Script(scripts.Script):
                     def suppressed_postprocess_image(p_arg, pp_arg, *args, **kwargs):
                         # Check if this is the initial pass we want to suppress
                         if hasattr(p_arg, '_ranbooru_suppress_all_adetailer'):
-                            print("[R Suppress] 🚫 BLOCKED global postprocess_image - initial pass suppressed")
+                            print("[R Suppress] BLOCKED global postprocess_image - initial pass suppressed")
                             return False  # Don't call the original function and return strict boolean
                         return original_postprocess_image(p_arg, pp_arg, *args, **kwargs)
                     
                     modules.scripts.postprocess_image = suppressed_postprocess_image
                     modules.scripts._ranbooru_suppress_hook = True
-                    print("[R Suppress] 🚫 Installed global postprocess_image suppression hook")
+                    print("[R Suppress] Installed global postprocess_image suppression hook")
             except Exception as e:
                 print(f"[R Suppress] Could not install global hook: {e}")
             
-            print("[R Suppress] 🚫 Initial pass suppression complete")
+            print("[R Suppress] Initial pass suppression complete")
             
         except Exception as e:
             print(f"[R Suppress] Error suppressing initial pass: {e}")
@@ -7589,7 +8354,7 @@ class Script(scripts.Script):
     def _completely_remove_adetailer_from_pipeline(self, p):
         """Nuclear option: Completely remove ADetailer from all processing pipelines for this generation"""
         try:
-            print("[R Nuclear Pipeline] 🚫 NUCLEAR: Completely removing ADetailer from processing pipeline")
+            print("[R Nuclear Pipeline] NUCLEAR: Completely removing ADetailer from processing pipeline")
             
             # Remove from the current processing object
             removed_count = 0
@@ -7599,14 +8364,14 @@ class Script(scripts.Script):
                     p.scripts.alwayson_scripts = [s for s in p.scripts.alwayson_scripts if not self._is_adetailer_script(s)]
                     new_count = len(p.scripts.alwayson_scripts)
                     removed_count += original_count - new_count
-                    print(f"[R Nuclear Pipeline] 🚫 Removed {original_count - new_count} ADetailer from p.scripts.alwayson_scripts")
+                    print(f"[R Nuclear Pipeline] Removed {original_count - new_count} ADetailer from p.scripts.alwayson_scripts")
                 
                 if hasattr(p.scripts, 'scripts'):
                     original_count = len(p.scripts.scripts)
                     p.scripts.scripts = [s for s in p.scripts.scripts if not self._is_adetailer_script(s)]
                     new_count = len(p.scripts.scripts)
                     removed_count += original_count - new_count
-                    print(f"[R Nuclear Pipeline] 🚫 Removed {original_count - new_count} ADetailer from p.scripts.scripts")
+                    print(f"[R Nuclear Pipeline] Removed {original_count - new_count} ADetailer from p.scripts.scripts")
             
             # Remove from global script runners
             import modules.scripts
@@ -7618,14 +8383,14 @@ class Script(scripts.Script):
                         runner.alwayson_scripts = [s for s in runner.alwayson_scripts if not self._is_adetailer_script(s)]
                         new_count = len(runner.alwayson_scripts)
                         removed_count += original_count - new_count
-                        print(f"[R Nuclear Pipeline] 🚫 Removed {original_count - new_count} ADetailer from {runner_attr}.alwayson_scripts")
+                        print(f"[R Nuclear Pipeline] Removed {original_count - new_count} ADetailer from {runner_attr}.alwayson_scripts")
                     
                     if hasattr(runner, 'scripts'):
                         original_count = len(runner.scripts)
                         runner.scripts = [s for s in runner.scripts if not self._is_adetailer_script(s)]
                         new_count = len(runner.scripts)
                         removed_count += original_count - new_count
-                        print(f"[R Nuclear Pipeline] 🚫 Removed {original_count - new_count} ADetailer from {runner_attr}.scripts")
+                        print(f"[R Nuclear Pipeline] Removed {original_count - new_count} ADetailer from {runner_attr}.scripts")
             
             # Store the removed scripts so we can restore them later
             self._removed_adetailer_scripts = []
@@ -7633,12 +8398,10 @@ class Script(scripts.Script):
             # Mark that we've removed ADetailer for this generation
             setattr(p, '_ranbooru_adetailer_removed_from_pipeline', True)
             
-            print(f"[R Nuclear Pipeline] 🚫 NUCLEAR COMPLETE: Removed {removed_count} ADetailer script instances from processing pipeline")
+            print(f"[R Nuclear Pipeline] NUCLEAR COMPLETE: Removed {removed_count} ADetailer script instances from processing pipeline")
             
         except Exception as e:
             print(f"[R Nuclear Pipeline] Error removing ADetailer from pipeline: {e}")
             import traceback
             traceback.print_exc()
-
-
 

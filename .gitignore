@@ -1,22 +1,52 @@
-# IDE settings
+# IDE/editor
 .vscode/
+.idea/
+*.code-workspace
 
-# Python cache
+# OS clutter
+.DS_Store
+Thumbs.db
+
+# Python cache/build/test artifacts
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# Build artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.pyre/
+.tox/
+.nox/
+.pytest_cache_local/
+.cache/
+.eggs/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
 build/
 dist/
-*.egg-info/
-.eggs/
-.tox/
-.coverage
-htmlcov/
-.pytest_cache/
-.cache/
+pip-wheel-metadata/
+__pypackages__/
+
+# Local env/secrets
+.env
+.env.*
+*.env
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Logs/runtime
+*.log
+logs/
+*.pid
 
 # Temporary files
 *.tmp
@@ -24,32 +54,27 @@ htmlcov/
 *.swp
 *.swo
 *~
+tmp_*
+tmp-*
+tmpclaude-*
+tmp_compile_err.txt
+temp_*.py
 
-# Log files
-*.log
-logs/
-# Ignore docs folder entirely
-docs/
-
-# Roo
+# Local tooling / personal notes
 .roomodes
 .rooroo/
-
-# Other
-deploy.ps1
-user
-ranbooru.before_revert.py
-cleancode.md
 docs/
-
-# Development artifacts
-.pytest_cache/
-*.egg-info/
-
-# Personal documents and temp files
-temp_*
-tmp_*
-*backup*
+cleancode.md
+ranbooru.before_revert.py
 block.txt
 line241.txt
-tests/
+tools/debug_lines.py
+adetailer/
+
+# Extension user data
+user/
+
+# Bundled catalog assets are tracked
+!data/catalogs/
+!data/catalogs/**
+.github/workflows/ci.yml

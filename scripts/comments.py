@@ -1,14 +1,13 @@
 import re
 import modules.scripts as scripts
-import sys
 
 
 def _strip_comments_from_single_text(text_content: str) -> str:
     if not isinstance(text_content, str):
         return text_content
-    text_content = re.sub('(^|\n)#[^\n]*(\n|$)', '\n', text_content)
-    text_content = re.sub('(^|\n)//[^\n]*(\n|$)', '\n', text_content)
-    text_content = re.sub('/\*(.*?)\*/', '', text_content, flags=re.S)
+    text_content = re.sub(r'(^|\n)#[^\n]*(\n|$)', '\n', text_content)
+    text_content = re.sub(r'(^|\n)//[^\n]*(\n|$)', '\n', text_content)
+    text_content = re.sub(r'/\*(.*?)\*/', '', text_content, flags=re.S)
     return text_content
 
 

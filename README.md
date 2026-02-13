@@ -1,137 +1,213 @@
 ﻿# RanbooruX
 
-![Logo](pics/ranbooru.png)
+![RanbooruX logo](pics/ranbooru.png)
 
-**RanbooruX** is an enhanced fork of the Ranbooru extension for the Automatic1111/Forge Stable Diffusion WebUI.  
-It pulls tags from popular boorus to build varied prompts, with robust **img2img**, **optional ControlNet handoff**, and **optional ADetailer** post‑processing.
+RanbooruX is a fork of Ranbooru for Stable Diffusion WebUI environments focused on **Forge** and **Forge Neo**.
 
-> Tested primarily on **Forge**. Compatible with A1111.
+It fetches booru tags and source images, builds prompts, and supports a two-stage generation flow with optional Img2Img, ControlNet handoff, and ADetailer postprocessing.
+
+## Platform support
+
+- Supported and tested: **Forge**, **Forge Neo**
+- Not tested by this project owner: **Automatic1111 (A1111 / A111 WebUI)**
+
+As of **February 13, 2026**, this project owner has only tested RanbooruX on Forge/Forge Neo. If you run A1111, treat support as best-effort and validate manually.
 
 ## Why this fork?
-- Fix brittle img2img/ControlNet interactions and make them **reliable on Forge**.
+- Fix brittle img2img/ControlNet interactions and make them **reliable on Forge and Forge Neo**.
 - Split the old “remove bad tags” into **clear, no‑surprise filters**.
 - Make installs easy with `requirements.txt` and a bundled ControlNet helper.
 - Add **favorites**, **file‑driven prompts**, **logging**, and **sensible caching**.
 - ![UI screenshot](pics/image.png)
 
+## What changed since the last published branch
+
+Runtime and workflow changes:
+
+- Hardened Forge/Forge Neo runtime compatibility for Img2Img + ADetailer + ControlNet interactions.
+- Added preview guard behavior so intermediate first-pass frames are hidden until final images are ready.
+- Kept original prompts in first pass (removed fallback `"abstract shapes, minimal"` replacement).
+- Added robust manual ADetailer handling and script-runner guards for extension interoperability.
+- Updated `Gelbooru: Fringe Benefits` visibility logic to appear only when `Booru = gelbooru`.
+- Redesigned LoRAnado controls with PonyXL-aware scanning, selectable detected LoRAs, and blacklist.
+- Added `timm>=0.9.0` to extension requirements for MiDaS depth preprocessor dependency paths.
+
+Filtering and catalog changes:
+
+- Added `Quick Strip` preset in Removal Filters.
+- Removed deprecated weapon-tag filtering controls and code remnants.
+- Added bundled Danbooru catalog support with import/validation for custom CSV catalogs.
+- `Use Danbooru Tag Catalog` is now the default behavior (toggle remains available).
+
+Codebase and maintenance changes:
+
+- Added modular package extraction under `ranboorux/` (`prompting`, `image_ops`, `io_lists`, `catalog`, integrations).
+- Added compatibility/integration test suite under `tests/` with Gradio 3/4 coverage.
+- Added project tooling and guardrails: `.github/workflows/ci.yml`, `.pre-commit-config.yaml`, `pyproject.toml`, and `tools/check_no_gradio_update.py`.
+- Removed bundled `scripts/controlnet.py`; runtime integration now resolves external/builtin ControlNet paths.
+- Kept `scripts/ranbooru.py` as the WebUI entrypoint while moving reusable logic into modules.
+
 ## Installation
 
-1. **Clone or copy** this repo into your WebUI’s extensions folder:  
-   `extensions/sd-webui-ranbooruX`
-2. Start/reload the WebUI. The installer will run:
-   - RanbooruX dependencies via **`requirements.txt`**  
-   - (Optional) bundled **ControlNet helper** requirements
-3. Look for the **“RanbooruX”** panel in the UI.
+1. Copy or clone this repo to your WebUI extensions directory:
+   - `extensions/sd-webui-ranbooruX`
+2. Start or restart WebUI.
+3. `install.py` installs extension dependencies from `requirements.txt`.
+4. Open the `RanbooruX` panel.
 
-> Advanced: You can point RanbooruX at a specific Forge ControlNet install with `SD_FORGE_CONTROLNET_PATH` or `RANBOORUX_CN_PATH` before launch.
+Optional environment overrides for ControlNet detection:
+
+- `SD_FORGE_CONTROLNET_PATH`
+- `RANBOORUX_CN_PATH`
 
 ## Quick start
 
-1. Pick a **Booru** (e.g. `gelbooru`). If you choose Gelbooru, enter your API key and user ID when prompted—you can optionally save them for future sessions. Note: Since Gelbooru is the default selection, you may need to choose a different booru first, then reselect Gelbooru to make the credential fields appear.  
-2. Click **Generate** to fetch tags and build a prompt.  
-3. (Optional) Enable **Use Image for Img2Img** and set **Denoising** for image‑to‑image.  
-4. (Optional) Toggle **Use Image for ControlNet (Unit 0)** to pass the same source image to ControlNet.  
-5. (Optional) Enable **ADetailer support** to post‑process each result.
+1. Select a booru source.
+2. Enter tags and generate.
+3. Optional: enable `Use Image for Img2Img`.
+4. Optional: enable `Use Image for ControlNet (Unit 0)`.
+5. Optional: enable `Enable RanbooruX ADetailer support`.
 
-You can stop here and it already works. The rest of the options are for finer control.
+## Key features
 
-## Features overview
+- Booru sources: `aibooru`, `danbooru`, `e621`, `gelbooru`, `gelbooru-compatible`, `konachan`, `rule34`, `safebooru`, `xbooru`, `yande.re`
+- Fine-grained removal filters (artist, character, series, clothing, text/commentary, furry, headwear, `*_girl`, subject constraints, and more)
+- `Quick Strip` one-click removal preset
+- Danbooru tag catalog normalization/filtering (enabled by default, toggleable)
+- Img2Img and ControlNet handoff flow
+- Optional manual ADetailer pass after Img2Img
+- LoRAnado random LoRA injection with PonyXL compatibility controls
+- Platform diagnostics panel for runtime visibility
+- Caching, file-driven tag sources, favorites, and prompt/source logging
 
-- **Booru Tagging** — Choose from: aibooru, danbooru, e621, gelbooru, gelbooru-compatible, konachan, rule34, safebooru, xbooru, yande.re
-- **Gelbooru credential manager** — Enter API key & user ID inline, optionally save them to `user/gelbooru/credentials.json`, and clear them anytime.
-- **Granular filters** — Artist • Character • Series • Clothing • Furry/Pokémon • Headwear • Keep base hair/eye colors • Enforce subject count
-- ![Removal Filters UI](pics/filters.jpg)
-- **Danbooru Tag Catalog (optional)** - Bring your own `danbooru_tags.csv` to drive alias normalization, copyright/character filtering, and textual tag removal with live diagnostics. (Details in [Danbooru Tag Catalog](#danbooru-tag-catalog-optional).)
-- **Prompt hygiene** — Remove common “bad” tags; strip commentary/metadata; shuffle; convert underscores
-- **Batch controls** — Same prompt/seed/image per batch; mix tags from multiple posts; chaos amount
-- **File inputs** — Add a line from `user/search/*.txt|csv`; remove via `user/remove/*.txt|csv`; import CSV/TXT; favorites
-- **Pipelines** — Img2Img; ControlNet handoff; optional ADetailer pass
-- **Caching & Logging** — Cache API responses; optionally reuse fetched posts; write prompt/source logs
-- **LoRA helpers** — Lock previous LoRAs; random LoRA amount & weights
+## Removal filters and Quick Strip
 
-## Danbooru Tag Catalog (optional)
+`Quick Strip` sets all major removal toggles to ON in one click, including:
 
-RanbooruX can consume a Danbooru tag catalog to drive alias normalization and category-aware filtering. The extension never bundles tag data, so you must supply your own CSV (for example [Hugging Face: newtextdoc1111/danbooru-tag-csv](https://huggingface.co/datasets/newtextdoc1111/danbooru-tag-csv)). When the catalog toggle is enabled you get:
+- common bad tags
+- textual/commentary metadata
+- artist/character/series tags
+- clothing/furry/headwear tags
+- `*_girl` suffix cleanup
+- preserve hair/eye colors
+- subject-count constraints
 
-- **Alias awareness** – canonicalises booru aliases before filtering so prompt tags stay consistent.
-- **Category-driven filtering** – honours the existing “Remove series/character/text tags” toggles with real category IDs instead of heuristics.
-- **Hair/Eye preservation** – the `Preserve base hair & eye colors` option expands to every colour that appears in the catalog.
-- **Textual/meta cleanup** – drops watermark/commentary tags defined in the catalog without touching allowlisted hair/eye tags.
-- **Diagnostics panel** – shows ON/OFF status, counts of kept/dropped/normalised tags, and top suggestions for unknown tags.
+This is intended for aggressive prompt cleanup and can be tuned afterward.
 
-### Enabling the catalog
+## Gelbooru-specific behavior
 
-1. Open **Removal Filters** and toggle **Use Danbooru Tag Catalog (optional)**.
-2. Paste the absolute path to your `danbooru_tags.csv`. The path is saved to `user/tag_catalog.json` for later sessions.
-3. Use **Reload Catalog** whenever you update the CSV. RanbooruX also hot-reloads on the next search if the file timestamp changes.
-4. Check the **Tag Filtering Diagnostics** accordion for a quick summary of what the catalog changed.
+- `Gelbooru API Key` and `Gelbooru User ID` controls are shown only for Gelbooru.
+- `Gelbooru: Fringe Benefits` is shown only when `Booru` is `gelbooru`.
+- Credentials can be saved to `user/gelbooru/credentials.json` from UI.
 
-Disable the toggle at any time to fall back to the legacy heuristics.
+## Danbooru Tag Catalog
 
+RanbooruX includes a bundled catalog used by the redesigned tag-catalog pipeline.
 
-## All controls (explained)
+- Bundled file: `data/catalogs/danbooru_tags.csv`
+- Catalog mode toggle: `Use Danbooru Tag Catalog` (default ON)
+- Source selection: `Bundled` or `Custom file`
 
-| Control | Type | Default | What it does |
-|---|---|---|---|
-| `Booru` | Dropdown | gelbooru | Select which booru API to fetch tags from. |
-| `Gelbooru API Key` | Textbox |  | Visible only when Gelbooru is selected; enter the API key from your Gelbooru account (required). |
-| `Gelbooru User ID` | Textbox |  | Visible only when Gelbooru is selected; enter your Gelbooru user ID (required). |
-| `Save Credentials to Disk` | Button |  | Writes Gelbooru credentials to `user/gelbooru/credentials.json` so fields stay hidden next time. |
-| `Clear Saved Credentials` | Button |  | Deletes the saved Gelbooru credential file so you can re-enter new values. |
-| `Beta: New Tag Filtering` | Checkbox | true | Enable the normalized removal engine with personal lists and favorites guard. Disable to fall back to legacy behavior. |
-| `Use Danbooru Tag Catalog (optional)` | Checkbox | false | Toggle catalog-backed alias and category filtering. Requires a user-supplied `danbooru_tags.csv`. |
-| `CSV Path` | Textbox |  | Absolute path to your `danbooru_tags.csv`. Visible only when the catalog toggle is enabled and persisted between sessions. |
-| `Reload Catalog` | Button |  | Reloads the CSV immediately (otherwise it hot-reloads the next time you fetch tags). |
-| `Remove common 'bad' tags` | Checkbox | true | Cull frequent watermark, commentary, and UI text tags from prompts. |
-| `Remove tag/text/commentary metadata` | Checkbox | true | Strip speech bubbles, watermark text, and similar metadata from fetched prompts. |
-| `Remove artist tags` | Checkbox | false | Drop artist credits drawn from the source post. |
-| `Remove character tags` | Checkbox | false | Filter character/franchise tags sourced from metadata. |
-| `Remove series / franchise tags` | Checkbox | false | Ignore franchise/game/anime tags to keep prompts generic. |
-| `Remove clothing tags` | Checkbox | false | Omit apparel/accessory tags introduced by the booru. |
-| `Filter furry/pokémon tags` | Checkbox | false | Remove furry, pokémon, and animal trait tags. |
-| `Filter headwear / halo tags` | Checkbox | false | Strip hats, halos, and similar head accessories. |
-| `Preserve base hair & eye colors` | Checkbox | false | Keep your prompt's hair/eye colors while removing conflicting imports. |
-| `Keep only subject counts` | Checkbox | false | UI control carried over from Ranbooru with the same general purpose. |
-| `Removal Tags` | Dropdown | personal_choices | UI control carried over from Ranbooru with the same general purpose. |
-| `Add tags` | Textbox |  | UI control carried over from Ranbooru with the same general purpose. |
-| `Import CSV/TXT` | File |  | UI control carried over from Ranbooru with the same general purpose. |
-| `Favorite Tags` | Dropdown | favorite_choices | Manage a list of favorite tags that can be appended or protected from removal. |
-| `Add favorites` | Textbox |  | Manage a list of favorite tags that can be appended or protected from removal. |
-| `Import CSV/TXT` | File |  | UI control carried over from Ranbooru with the same general purpose. |
-| `Shuffle tags` | Checkbox | true | Randomizes the order of collected tags before building the prompt. |
-| `Convert "_" to spaces` | Checkbox | false | Replaces underscores with spaces in tags in the final prompt. |
-| `Use same prompt for batch` | Checkbox | false | Uses exactly the same prompt for every image in the batch. |
-| `Gelbooru: Fringe Benefits` | Checkbox | true | Gelbooru-only option that enables the site’s 'fringe benefits' behavior for broader tag results. |
-| `Limit tags by %` | Slider | 1.0 | Limits the number of tags included in the final prompt. |
-| `Change Background` | Radio | "Don't | Apply simple color/background overrides to tags that support them. |
-| `Change Color` | Radio | "Don't | Apply simple color/background overrides to tags that support them. |
-| `Use Image for Img2Img` | Checkbox | false | Sends the source image to the selected pipeline (Img2Img or ControlNet). |
-| `Img2Img Denoising / CN Weight` | Slider | 0.75 | Sends the source image to the selected pipeline (Img2Img or ControlNet). |
-| `Use same image for batch` | Checkbox | false | UI control carried over from Ranbooru with the same general purpose. |
-| `Crop image to fit target` | Checkbox | false | Center-crops the image to the target resolution/aspect. |
-| `Use Deepbooru on image` | Checkbox | false | Runs Deepbooru on the source image and injects the predicted tags. |
-| `DB Tags Position` | Radio | "Add | Where to place Deepbooru tags in relation to the Ranbooru tags. |
-| `Enable RanbooruX ADetailer support` | Checkbox | false | Run RanbooruX's manual ADetailer integration after img2img when enabled. |
-| `Reuse cached booru posts` | Checkbox | false | Leave disabled to fetch fresh images every generation. Enable when you want RanbooruX to reuse the previously cached posts. |
-| `Add line from Search File` | Checkbox | false | Appends one random line from your `user/search/*.txt` or `.csv` file to the prompt. |
-| `Add tags from Remove File` | Checkbox | false | Removes this category of tags from fetched prompts. |
-| `Mix tags from multiple posts` | Checkbox | false | Build prompts by mixing tags pulled from multiple different posts. |
-| `Posts to mix` | Slider | 2 | How many distinct posts to mix together when building a prompt. |
-| `Chaos Amount %` | Slider | 0.5 | Adds randomness to tag selection; higher values increase variation. |
-| `Use same seed for batch` | Checkbox | false | Uses the same seed for all images in the batch for reproducibility. |
-| `Cache Booru API requests` | Checkbox | true | Caches booru API responses to reduce network calls. |
-| `Log image sources/prompts to txt` | Checkbox | false | When enabled, RanbooruX appends a log entry mapping seeds and prompts to the source posts. |
-| `Lock previous LoRAs` | Checkbox | false | Prevents new LoRAs from replacing already-loaded ones. |
-| `LoRAs Subfolder` | Textbox |  | UI control carried over from Ranbooru with the same general purpose. |
-| `LoRAs Amount` | Slider | 1 | How many random LoRAs to load (if any). |
-| `Min LoRAs Weight` | Slider | 0.6 | Weight range for randomly picked LoRAs. |
-| `Max LoRAs Weight` | Slider | 1.0 | Weight range for randomly picked LoRAs. |
+With catalog mode enabled (default), the catalog pipeline adds:
 
-## Known issues (Inherited from Ranbooru, no fixes made)
+- alias normalization
+- category-aware filtering
+- better hair/eye preservation behavior
+- textual/meta tag cleanup backed by catalog categories
+- diagnostics panel for kept/dropped/unknown tag insight
 
-- Chaos/negative modes may error with batch counts > 1 in some setups; retrying usually works.
-- `sd-dynamic-prompts` can conflict with the multiple prompts option — disable that extension if you see odd prompts.
+Disable the toggle any time to fall back to legacy/non-catalog behavior.
+
+### Custom catalog files
+
+Custom CSV catalogs are supported and imported into `user/catalogs/`.
+
+Accepted formats:
+
+- Header-based CSV (`tag,category,count,alias`)
+- Headerless 4-column CSV (`tag,category,count,alias`)
+
+Validation/import controls:
+
+- `Validate CSV`
+- `Import Custom Catalog`
+- `Reload Catalog`
+
+Implementation details and format notes are documented in:
+
+- `data/catalogs/README.txt`
+- `ranboorux/catalog.py`
+
+### Bundled catalog provenance and licensing notes
+
+`data/catalogs/README.txt` includes provenance/licensing context for the bundled `danbooru_tags.csv`, plus references used for the research notes.
+
+## LoRAnado (PonyXL-aware redesign)
+
+LoRAnado now includes detection and control surfaces to reduce incompatible LoRA picks in PonyXL workflows.
+
+Controls:
+
+- `Auto-detect PonyXL-compatible LoRAs`
+- `Scan LoRAs`
+- `Select All Compatible`
+- `Detected LoRAs (toggle enabled)`
+- `LoRAnado blacklist`
+
+### PonyXL detection behavior
+
+Detection now prefers strict compatibility signals:
+
+1. Filename token matches (word-boundary aware):
+   - `pony`, `pony xl`, `pony-diffusion`, `ponydiffusion`, `pdxl`, `xlp`
+2. Metadata matches from relevant base-model/architecture keys only
+   - avoids scanning unrelated metadata fields that previously caused false positives
+
+If no compatible LoRAs are detected, RanbooruX falls back to all LoRAs in the selected folder so generation is still usable.
+
+## Two-pass Img2Img + ADetailer notes
+
+For Img2Img workflows, RanbooruX runs an initial pass, then a dedicated Img2Img pass, then optional manual ADetailer processing.
+
+Important behavior:
+
+- first-pass previews are suppressed until final images are ready (preview guard)
+- final results are forced back into processed image state for extension/UI consistency
+- ADetailer integration uses guarded manual execution to reduce script collisions
+
+## Verification status
+
+The repository includes automated tests for compatibility wrappers, catalog behavior, parsing, and integration boundaries.
+
+Recommended checks:
+
+```bash
+PYTHONPATH=/path/to/sd-webui-ranbooruX pytest -q
+PYTHONPATH=/path/to/sd-webui-ranbooruX pytest -q --gradio-version=4
+python3 -m py_compile scripts/ranbooru.py
+```
+
+Additional project-level guidance is in:
+
+- `TESTING.md`
+- `PROJECT_STATUS.md`
+
+## Forge/Forge Neo compatibility notes
+
+- Deepbooru support has been removed in RanbooruX.
+- The previously bundled `scripts/controlnet.py` has been removed; runtime integration resolves external/builtin ControlNet paths.
+- InputAccordion has a fallback for environments where it is unavailable.
+- Gradio update calls are routed through compatibility helpers for Gradio 3/4 behavior.
+
+## RanbooruX vs Original Ranbooru
+
+- Project scope: original Ranbooru is mostly a single-script extension; RanbooruX adds a modular package (`ranboorux/`), a full `tests/` suite, CI/pre-commit/tooling config, and contributor/testing docs.
+- Core implementation: `scripts/ranbooru.py` is heavily expanded/refactored (about 1.1k lines in original vs about 7.9k lines here) with compatibility wrappers and integration boundaries.
+- Feature set: RanbooruX adds Danbooru tag-catalog processing (bundled/custom CSV + validation/import), `Quick Strip`, richer removal filters, and a diagnostics panel.
+- Integration flow: RanbooruX hardens Img2Img + ControlNet + ADetailer behavior with safer two-pass processing and guarded/manual ADetailer execution.
+- LoRAnado: RanbooruX introduces PonyXL-aware LoRA detection/selection controls and blacklist support.
+- Compatibility/dependencies: RanbooruX removes Deepbooru and bundled `scripts/controlnet.py`, and switches installer behavior to `requirements.txt`-driven installs with expanded deps (for example `requests`, `Pillow`, `timm`).
 
 ## Credits
 
-- Original Ranbooru by **Inzaniak**  
+- Original Ranbooru by Inzaniak
