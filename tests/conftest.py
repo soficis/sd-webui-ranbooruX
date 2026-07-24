@@ -164,6 +164,17 @@ def stub_modules(tmp_path, request):
     sys.modules["requests_cache"] = requests_cache_mod
 
     requests_mod = types.ModuleType("requests")
+    requests_adapters_mod = types.ModuleType("requests.adapters")
+
+    class _DummyHTTPAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def init_poolmanager(self, *args, **kwargs):
+            return None
+
+        def proxy_manager_for(self, *args, **kwargs):
+            return types.SimpleNamespace()
 
     class _DummyResponse:
         def __init__(self, payload=None):
@@ -188,7 +199,10 @@ def stub_modules(tmp_path, request):
     requests_mod.Response = _DummyResponse
     requests_mod.RequestException = Exception
     requests_mod.Session = lambda: types.SimpleNamespace(get=_dummy_get, post=_dummy_get)
+    requests_adapters_mod.HTTPAdapter = _DummyHTTPAdapter
+    requests_mod.adapters = requests_adapters_mod
     sys.modules["requests"] = requests_mod
+    sys.modules["requests.adapters"] = requests_adapters_mod
 
     numpy_mod = types.ModuleType("numpy")
     sys.modules["numpy"] = numpy_mod
@@ -225,6 +239,7 @@ def stub_modules(tmp_path, request):
         "gradio",
         "requests_cache",
         "requests",
+        "requests.adapters",
         "numpy",
         "PIL.Image",
         "PIL",

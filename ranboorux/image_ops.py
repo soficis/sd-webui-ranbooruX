@@ -5,7 +5,9 @@ from typing import Optional
 from PIL import Image
 
 
-def resize_image(img: Optional[Image.Image], width: int, height: int, cropping: bool = True):
+def resize_image(
+    img: Optional[Image.Image], width: int, height: int, cropping: bool = True
+) -> Optional[Image.Image]:
     if img is None:
         return None
     if width <= 0 or height <= 0:

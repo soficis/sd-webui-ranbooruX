@@ -1,59 +1,42 @@
-﻿# RanbooruX
+# RanbooruX
 
 ![RanbooruX logo](pics/ranbooru.png)
 
-RanbooruX is a fork of Ranbooru for Stable Diffusion WebUI environments focused on **Forge** and **Forge Neo**.
+RanbooruX is a fork of Ranbooru for Stable Diffusion WebUI environments focused on **Forge Neo**.
 
 It fetches booru tags and source images, builds prompts, and supports a two-stage generation flow with optional Img2Img, ControlNet handoff, and ADetailer postprocessing.
 
 ## Platform support
 
-- Supported and tested: **Forge**, **Forge Neo**
-- Not tested by this project owner: **Automatic1111 (A1111 / A111 WebUI)**
-
-As of **February 13, 2026**, this project owner has only tested RanbooruX on Forge/Forge Neo. If you run A1111, treat support as best-effort and validate manually.
-
+> [!IMPORTANT]
+> **Project Owner Testing Disclaimer**: This project is strictly developed and tested **only using Forge Neo**. Other WebUI distributions (including original SD WebUI / Automatic1111 and original SD WebUI Forge) are **not tested** by the repository owner. Support for other environments is strictly best-effort.
+>
 ## Why this fork?
-- Fix brittle img2img/ControlNet interactions and make them **reliable on Forge and Forge Neo**.
-- Split the old “remove bad tags” into **clear, no‑surprise filters**.
+
+- Fix brittle Img2Img/ControlNet interactions and make them reliable on **Forge Neo**.
+- Split the old “remove bad tags” into clear, no‑surprise filters.
 - Make installs easy with `requirements.txt` and a bundled ControlNet helper.
-- Add **favorites**, **file‑driven prompts**, **logging**, and **sensible caching**.
+- Add favorites, file‑driven prompts, logging, and sensible caching.
 - ![UI screenshot](pics/image.png)
-
-## What changed since the last published branch
-
-Runtime and workflow changes:
-
-- Hardened Forge/Forge Neo runtime compatibility for Img2Img + ADetailer + ControlNet interactions.
-- Added preview guard behavior so intermediate first-pass frames are hidden until final images are ready.
-- Kept original prompts in first pass (removed fallback `"abstract shapes, minimal"` replacement).
-- Added robust manual ADetailer handling and script-runner guards for extension interoperability.
-- Updated `Gelbooru: Fringe Benefits` visibility logic to appear only when `Booru = gelbooru`.
-- Redesigned LoRAnado controls with PonyXL-aware scanning, selectable detected LoRAs, and blacklist.
-- Added `timm>=0.9.0` to extension requirements for MiDaS depth preprocessor dependency paths.
-
-Filtering and catalog changes:
-
-- Added `Quick Strip` preset in Removal Filters.
-- Removed deprecated weapon-tag filtering controls and code remnants.
-- Added bundled Danbooru catalog support with import/validation for custom CSV catalogs.
-- `Use Danbooru Tag Catalog` is now the default behavior (toggle remains available).
-
-Codebase and maintenance changes:
-
-- Added modular package extraction under `ranboorux/` (`prompting`, `image_ops`, `io_lists`, `catalog`, integrations).
-- Added compatibility/integration test suite under `tests/` with Gradio 3/4 coverage.
-- Added project tooling and guardrails: `.github/workflows/ci.yml`, `.pre-commit-config.yaml`, `pyproject.toml`, and `tools/check_no_gradio_update.py`.
-- Removed bundled `scripts/controlnet.py`; runtime integration now resolves external/builtin ControlNet paths.
-- Kept `scripts/ranbooru.py` as the WebUI entrypoint while moving reusable logic into modules.
 
 ## Installation
 
-1. Copy or clone this repo to your WebUI extensions directory:
+### Method 1: Install from URL in Forge Neo (Recommended)
+
+1. Open **Forge Neo**.
+2. Navigate to the **Extensions** tab -> **Install from URL** sub-tab.
+3. Paste the URL of this repository into **URL for extension's git repository**:
+   `https://github.com/soficis/sd-webui-ranbooruX`
+4. Click **Install**.
+5. Restart **Forge Neo** or click **Apply and restart UI**.
+
+### Method 2: Manual Installation
+
+1. Copy or clone this repository to your **Forge Neo** extensions directory:
    - `extensions/sd-webui-ranbooruX`
-2. Start or restart WebUI.
+2. Start or restart **Forge Neo**.
 3. `install.py` installs extension dependencies from `requirements.txt`.
-4. Open the `RanbooruX` panel.
+4. Open the **RanbooruX** panel.
 
 Optional environment overrides for ControlNet detection:
 
@@ -76,7 +59,7 @@ Optional environment overrides for ControlNet detection:
 - Danbooru tag catalog normalization/filtering (enabled by default, toggleable)
 - Img2Img and ControlNet handoff flow
 - Optional manual ADetailer pass after Img2Img
-- LoRAnado random LoRA injection with PonyXL compatibility controls
+- LoRAnado random LoRA injection with PonyXL & Anima compatibility controls (legacy feature)
 - Platform diagnostics panel for runtime visibility
 - Caching, file-driven tag sources, favorites, and prompt/source logging
 
@@ -116,7 +99,7 @@ With catalog mode enabled (default), the catalog pipeline adds:
 - textual/meta tag cleanup backed by catalog categories
 - diagnostics panel for kept/dropped/unknown tag insight
 
-Disable the toggle any time to fall back to legacy/non-catalog behavior.
+When the toggle is disabled, RanbooruX still uses the bundled catalog path (catalog-only mode; no legacy filter engine).
 
 ### Custom catalog files
 
@@ -142,24 +125,28 @@ Implementation details and format notes are documented in:
 
 `data/catalogs/README.txt` includes provenance/licensing context for the bundled `danbooru_tags.csv`, plus references used for the research notes.
 
-## LoRAnado (PonyXL-aware redesign)
+## LoRAnado (PonyXL & Anima detection)
 
-LoRAnado now includes detection and control surfaces to reduce incompatible LoRA picks in PonyXL workflows.
+> [!NOTE]
+> LoRAnado is a legacy feature inherited from original Ranbooru and is not extensively tested by the repository owner.
+
+LoRAnado includes detection and control surfaces to reduce incompatible LoRA picks in PonyXL and Anima workflows.
 
 Controls:
 
-- `Auto-detect PonyXL-compatible LoRAs`
+- `Auto-detect PonyXL/Anima-compatible LoRAs`
 - `Scan LoRAs`
 - `Select All Compatible`
 - `Detected LoRAs (toggle enabled)`
 - `LoRAnado blacklist`
 
-### PonyXL detection behavior
+### Detection behavior
 
-Detection now prefers strict compatibility signals:
+Detection prefers strict compatibility signals:
 
 1. Filename token matches (word-boundary aware):
-   - `pony`, `pony xl`, `pony-diffusion`, `ponydiffusion`, `pdxl`, `xlp`
+   - PonyXL: `pony`, `pony xl`, `pony-diffusion`, `ponydiffusion`, `pdxl`, `xlp`
+   - Anima: `anima`, `animapencil`, `anima-xl`, `animaxl`, `animxl`
 2. Metadata matches from relevant base-model/architecture keys only
    - avoids scanning unrelated metadata fields that previously caused false positives
 
@@ -168,6 +155,9 @@ If no compatible LoRAs are detected, RanbooruX falls back to all LoRAs in the se
 ## Two-pass Img2Img + ADetailer notes
 
 For Img2Img workflows, RanbooruX runs an initial pass, then a dedicated Img2Img pass, then optional manual ADetailer processing.
+
+> [!NOTE]
+> Img2Img is currently **not tested with Anima models/LoRAs**.
 
 Important behavior:
 
@@ -192,7 +182,7 @@ Additional project-level guidance is in:
 - `TESTING.md`
 - `PROJECT_STATUS.md`
 
-## Forge/Forge Neo compatibility notes
+## Forge Neo compatibility notes
 
 - Deepbooru support has been removed in RanbooruX.
 - The previously bundled `scripts/controlnet.py` has been removed; runtime integration resolves external/builtin ControlNet paths.
@@ -202,11 +192,10 @@ Additional project-level guidance is in:
 ## RanbooruX vs Original Ranbooru
 
 - Project scope: original Ranbooru is mostly a single-script extension; RanbooruX adds a modular package (`ranboorux/`), a full `tests/` suite, CI/pre-commit/tooling config, and contributor/testing docs.
-- Core implementation: `scripts/ranbooru.py` is heavily expanded/refactored (about 1.1k lines in original vs about 7.9k lines here) with compatibility wrappers and integration boundaries.
+- Core implementation: `scripts/ranbooru.py` is heavily expanded/refactored with compatibility wrappers and integration boundaries for Forge Neo.
 - Feature set: RanbooruX adds Danbooru tag-catalog processing (bundled/custom CSV + validation/import), `Quick Strip`, richer removal filters, and a diagnostics panel.
-- Integration flow: RanbooruX hardens Img2Img + ControlNet + ADetailer behavior with safer two-pass processing and guarded/manual ADetailer execution.
-- LoRAnado: RanbooruX introduces PonyXL-aware LoRA detection/selection controls and blacklist support.
-- Compatibility/dependencies: RanbooruX removes Deepbooru and bundled `scripts/controlnet.py`, and switches installer behavior to `requirements.txt`-driven installs with expanded deps (for example `requests`, `Pillow`, `timm`).
+- Integration flow: RanbooruX hardens Img2Img + ControlNet + ADetailer behavior on Forge Neo with safer two-pass processing and guarded/manual ADetailer execution.
+- LoRAnado: RanbooruX introduces PonyXL & Anima-aware LoRA detection/selection controls and blacklist support.
 
 ## Credits
 

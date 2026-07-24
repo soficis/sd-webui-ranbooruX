@@ -114,14 +114,21 @@ def test_show_fringe_benefits_only_visible_for_gelbooru(active_gradio_version):
         assert danbooru is not None
 
 
-def test_loranado_scan_detects_ponyxl_markers(tmp_path):
+def test_loranado_scan_detects_ponyxl_and_anima_markers(tmp_path):
     import types
+
     import scripts.ranbooru as ranbooru
 
     ranbooru.shared.cmd_opts = types.SimpleNamespace(lora_dir=str(tmp_path))
     _write_dummy_safetensors(tmp_path / "pony_magic.safetensors")
     _write_dummy_safetensors(tmp_path / "xlp_style.safetensors")
     _write_dummy_safetensors(tmp_path / "ponytail_style.safetensors")
+    _write_dummy_safetensors(tmp_path / "anima_style.safetensors")
+    _write_dummy_safetensors(tmp_path / "animapencil_v1.safetensors")
+    _write_dummy_safetensors(tmp_path / "anima-xl_character.safetensors")
+    _write_dummy_safetensors(tmp_path / "animal_ears.safetensors")
+    _write_dummy_safetensors(tmp_path / "animation_test.safetensors")
+    _write_dummy_safetensors(tmp_path / "anime_girl.safetensors")
     _write_dummy_safetensors(
         tmp_path / "metadata_style.safetensors",
         metadata={"ss_base_model_version": "PonyDiffusionXL"},
@@ -131,8 +138,12 @@ def test_loranado_scan_detects_ponyxl_markers(tmp_path):
         metadata={"modelspec.architecture": "Pony XL"},
     )
     _write_dummy_safetensors(
+        tmp_path / "metadata_anima.safetensors",
+        metadata={"modelspec.architecture": "Anima Pencil XL"},
+    )
+    _write_dummy_safetensors(
         tmp_path / "metadata_noise.safetensors",
-        metadata={"ss_tag_frequency": {"pony": 3}},
+        metadata={"ss_tag_frequency": {"pony": 3, "anima": 5}},
     )
     _write_dummy_safetensors(
         tmp_path / "generic_style.safetensors",
@@ -143,10 +154,17 @@ def test_loranado_scan_detects_ponyxl_markers(tmp_path):
     result = script._scan_loranado_candidates("")
     assert "pony_magic" in result["detected_names"]
     assert "xlp_style" in result["detected_names"]
+    assert "anima_style" in result["detected_names"]
+    assert "animapencil_v1" in result["detected_names"]
+    assert "anima-xl_character" in result["detected_names"]
     assert "metadata_style" in result["detected_names"]
     assert "metadata_arch" in result["detected_names"]
+    assert "metadata_anima" in result["detected_names"]
     assert "generic_style" not in result["detected_names"]
     assert "ponytail_style" not in result["detected_names"]
+    assert "animal_ears" not in result["detected_names"]
+    assert "animation_test" not in result["detected_names"]
+    assert "anime_girl" not in result["detected_names"]
     assert "metadata_noise" not in result["detected_names"]
 
 
@@ -162,10 +180,15 @@ def test_loranado_detection_ignores_unrelated_metadata_keys():
         "generic_style.safetensors",
         {"ss_base_model_version": "Pony XL"},
     )
+    assert script._is_ponyxl_lora(
+        "generic_style.safetensors",
+        {"modelspec.architecture": "Anima Pencil XL"},
+    )
 
 
 def test_apply_loranado_respects_enabled_and_blacklist(tmp_path):
     import types
+
     import scripts.ranbooru as ranbooru
 
     ranbooru.shared.cmd_opts = types.SimpleNamespace(lora_dir=str(tmp_path))
@@ -212,16 +235,16 @@ def test_post_rejected_by_filter_does_not_reject_unrelated_tags():
         post,
         filter_ctx=None,
         toggles=(
-            True,   # remove_artist
-            True,   # remove_character
-            True,   # remove_clothing
-            True,   # remove_text
-            True,   # restrict_subject
-            True,   # remove_furry
-            True,   # remove_headwear
-            True,   # remove_girl_suffix
-            True,   # preserve_hair_eye
-            True,   # remove_series
+            True,  # remove_artist
+            True,  # remove_character
+            True,  # remove_clothing
+            True,  # remove_text
+            True,  # restrict_subject
+            True,  # remove_furry
+            True,  # remove_headwear
+            True,  # remove_girl_suffix
+            True,  # preserve_hair_eye
+            True,  # remove_series
         ),
         base_colors=(set(), set()),
         allowed_subjects=set(),

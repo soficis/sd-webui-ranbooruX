@@ -10,10 +10,10 @@ def test_image_ops_import():
     assert hasattr(image_ops, "resize_image")
 
 
-def test_io_lists_import():
-    import ranboorux.io_lists as io_lists
+def test_user_store_import():
+    import ranboorux.user_store as user_store
 
-    assert hasattr(io_lists, "read_list_file")
+    assert hasattr(user_store, "read_list_file")
 
 
 def test_catalog_import():

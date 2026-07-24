@@ -36,6 +36,8 @@ __pypackages__/
 .env.*
 *.env
 .python-version
+.gelbooru_credentials.json
+gelbooru_creds.json
 
 # Virtual environments
 .venv/
@@ -43,12 +45,15 @@ venv/
 env/
 ENV/
 
-# Logs/runtime
+# Logs/runtime/databases
 *.log
 logs/
 *.pid
+*.sqlite
+*.sqlite3
+temp_test_cache.sqlite
 
-# Temporary files
+# Temporary files & junk
 *.tmp
 *.bak
 *.swp
@@ -60,7 +65,7 @@ tmpclaude-*
 tmp_compile_err.txt
 temp_*.py
 
-# Local tooling / personal notes
+# Local tooling / personal notes / standalone scripts
 .roomodes
 .rooroo/
 docs/
@@ -70,6 +75,9 @@ block.txt
 line241.txt
 tools/debug_lines.py
 adetailer/
+scripts/comments.py
+.antigravityignore
+.brain/
 
 # Extension user data
 user/

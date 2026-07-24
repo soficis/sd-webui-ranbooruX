@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Iterable, List, Union
 
 
 def split_prompt_tags(prompt: str) -> List[str]:
@@ -20,7 +20,7 @@ def remove_repeated_tags(prompt: str) -> str:
     return ",".join(dedupe_keep_order(tags))
 
 
-def limit_prompt_tags(prompt: str, limit_val, mode: str) -> str:
+def limit_prompt_tags(prompt: str, limit_val: Union[int, float, str], mode: str) -> str:
     tags = split_prompt_tags(prompt)
     if not tags:
         return ""

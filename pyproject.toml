@@ -25,6 +25,7 @@ files = ["ranboorux"]
 warn_return_any = true
 warn_unused_ignores = true
 ignore_missing_imports = true
+follow_imports = "skip"
 pretty = true
 show_error_codes = true
 
