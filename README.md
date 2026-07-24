@@ -1,8 +1,12 @@
+<div align="center">
+
 # RanbooruX
 
 ![RanbooruX logo](pics/ranbooru.png)
 
-RanbooruX is a fork of Ranbooru for Stable Diffusion WebUI environments focused on **Forge Neo**.
+RanbooruX is a fork of Ranbooru focused on **Forge Neo**.
+
+</div>
 
 It fetches booru tags and source images, builds prompts, and supports a two-stage generation flow with optional Img2Img, ControlNet handoff, and ADetailer postprocessing.
 
@@ -10,7 +14,7 @@ It fetches booru tags and source images, builds prompts, and supports a two-stag
 
 > [!IMPORTANT]
 > **Project Owner Testing Disclaimer**: This project is strictly developed and tested **only using Forge Neo**. Other WebUI distributions (including original SD WebUI / Automatic1111 and original SD WebUI Forge) are **not tested** by the repository owner. Support for other environments is strictly best-effort.
->
+
 ## Why this fork?
 
 - Fix brittle Img2Img/ControlNet interactions and make them reliable on **Forge Neo**.
@@ -54,34 +58,14 @@ Optional environment overrides for ControlNet detection:
 ## Key features
 
 - Booru sources: `aibooru`, `danbooru`, `e621`, `gelbooru`, `gelbooru-compatible`, `konachan`, `rule34`, `safebooru`, `xbooru`, `yande.re`
-- Fine-grained removal filters (artist, character, series, clothing, text/commentary, furry, headwear, `*_girl`, subject constraints, and more)
-- `Quick Strip` one-click removal preset
+- Fine-grained removal filters (artist, character, series, clothing, text/commentary, furry, headwear, `*_girl`, subject constraints, preserve hair/eye colors, and more)
+- `Quick Strip` one-click removal preset (instantly activates all major removal filters for aggressive prompt cleanup)
 - Danbooru tag catalog normalization/filtering (enabled by default, toggleable)
 - Img2Img and ControlNet handoff flow
 - Optional manual ADetailer pass after Img2Img
 - LoRAnado random LoRA injection with PonyXL & Anima compatibility controls (legacy feature)
 - Platform diagnostics panel for runtime visibility
 - Caching, file-driven tag sources, favorites, and prompt/source logging
-
-## Removal filters and Quick Strip
-
-`Quick Strip` sets all major removal toggles to ON in one click, including:
-
-- common bad tags
-- textual/commentary metadata
-- artist/character/series tags
-- clothing/furry/headwear tags
-- `*_girl` suffix cleanup
-- preserve hair/eye colors
-- subject-count constraints
-
-This is intended for aggressive prompt cleanup and can be tuned afterward.
-
-## Gelbooru-specific behavior
-
-- `Gelbooru API Key` and `Gelbooru User ID` controls are shown only for Gelbooru.
-- `Gelbooru: Fringe Benefits` is shown only when `Booru` is `gelbooru`.
-- Credentials can be saved to `user/gelbooru/credentials.json` from UI.
 
 ## Danbooru Tag Catalog
 
@@ -146,7 +130,7 @@ Detection prefers strict compatibility signals:
 
 1. Filename token matches (word-boundary aware):
    - PonyXL: `pony`, `pony xl`, `pony-diffusion`, `ponydiffusion`, `pdxl`, `xlp`
-   - Anima: `anima`, `animapencil`, `anima-xl`, `animaxl`, `animxl`
+   - Anima: `anima`
 2. Metadata matches from relevant base-model/architecture keys only
    - avoids scanning unrelated metadata fields that previously caused false positives
 
@@ -165,30 +149,6 @@ Important behavior:
 - final results are forced back into processed image state for extension/UI consistency
 - ADetailer integration uses guarded manual execution to reduce script collisions
 
-## Verification status
-
-The repository includes automated tests for compatibility wrappers, catalog behavior, parsing, and integration boundaries.
-
-Recommended checks:
-
-```bash
-PYTHONPATH=/path/to/sd-webui-ranbooruX pytest -q
-PYTHONPATH=/path/to/sd-webui-ranbooruX pytest -q --gradio-version=4
-python3 -m py_compile scripts/ranbooru.py
-```
-
-Additional project-level guidance is in:
-
-- `TESTING.md`
-- `PROJECT_STATUS.md`
-
-## Forge Neo compatibility notes
-
-- Deepbooru support has been removed in RanbooruX.
-- The previously bundled `scripts/controlnet.py` has been removed; runtime integration resolves external/builtin ControlNet paths.
-- InputAccordion has a fallback for environments where it is unavailable.
-- Gradio update calls are routed through compatibility helpers for Gradio 3/4 behavior.
-
 ## RanbooruX vs Original Ranbooru
 
 - Project scope: original Ranbooru is mostly a single-script extension; RanbooruX adds a modular package (`ranboorux/`), a full `tests/` suite, CI/pre-commit/tooling config, and contributor/testing docs.
@@ -196,6 +156,7 @@ Additional project-level guidance is in:
 - Feature set: RanbooruX adds Danbooru tag-catalog processing (bundled/custom CSV + validation/import), `Quick Strip`, richer removal filters, and a diagnostics panel.
 - Integration flow: RanbooruX hardens Img2Img + ControlNet + ADetailer behavior on Forge Neo with safer two-pass processing and guarded/manual ADetailer execution.
 - LoRAnado: RanbooruX introduces PonyXL & Anima-aware LoRA detection/selection controls and blacklist support.
+- Deepbooru Removal: Deepbooru support has been removed in RanbooruX.
 
 ## Credits
 
