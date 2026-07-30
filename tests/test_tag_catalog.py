@@ -54,7 +54,7 @@ def test_catalog_passthrough_when_disabled(tmp_path):
         drop_textual=False,
     )
     assert filtered == tags
-    assert diag["mode"] == "legacy"
+    assert diag["mode"] == "catalog"
 
 
 def test_bundled_catalog_exists():
@@ -183,7 +183,7 @@ def test_import_custom_catalog(tmp_path):
     assert os.path.isfile(script._custom_catalog_path)
 
 
-def test_config_migration_v1_to_v2(tmp_path):
+def test_legacy_catalog_config_is_not_migrated(tmp_path):
     import scripts.ranbooru as ranbooru
 
     catalog_path = _write_catalog(tmp_path)
@@ -191,6 +191,21 @@ def test_config_migration_v1_to_v2(tmp_path):
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(
         json.dumps({"enabled": True, "path": str(catalog_path)}),
+        encoding="utf-8",
+    )
+    script = ranbooru.Script()
+    assert script._catalog_source == "bundled"
+    assert script._custom_catalog_path == ""
+
+
+def test_current_catalog_config_loads_custom_path(tmp_path):
+    import scripts.ranbooru as ranbooru
+
+    catalog_path = _write_catalog(tmp_path)
+    cfg = Path(ranbooru.TAG_CATALOG_CONFIG_FILE)
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(
+        json.dumps({"enabled": True, "source": "custom", "custom_path": str(catalog_path)}),
         encoding="utf-8",
     )
     script = ranbooru.Script()

@@ -2,10 +2,13 @@
 .vscode/
 .idea/
 *.code-workspace
+.project
+.settings/
 
 # OS clutter
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Python cache/build/test artifacts
 __pycache__/
@@ -13,13 +16,13 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.pytest_cache_local/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
 .pyre/
 .tox/
 .nox/
-.pytest_cache_local/
 .cache/
 .eggs/
 *.egg-info/
@@ -30,6 +33,11 @@ build/
 dist/
 pip-wheel-metadata/
 __pypackages__/
+
+# SQLite databases & temp test artifacts
+*.sqlite
+*.db
+temp_test_cache.sqlite
 
 # Local env/secrets
 .env
@@ -60,21 +68,25 @@ tmpclaude-*
 tmp_compile_err.txt
 temp_*.py
 
-# Local tooling / personal notes
+# Agent / Tooling runtime clutter
+.omo/
 .roomodes
 .rooroo/
-docs/
+.agent/
+.agents/
+.gemini/
+.claude/
 cleancode.md
 ranbooru.before_revert.py
 block.txt
 line241.txt
 tools/debug_lines.py
-adetailer/
+
+docs/
 
 # Extension user data
 user/
 
-# Bundled catalog assets are tracked
+# Track bundled catalog assets
 !data/catalogs/
 !data/catalogs/**
-.github/workflows/ci.yml

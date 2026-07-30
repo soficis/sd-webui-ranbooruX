@@ -1,18 +1,18 @@
 def test_remove_repeated_tags():
-    import scripts.ranbooru as ranbooru
+    from ranboorux import tag_pipeline
 
-    assert ranbooru.remove_repeated_tags("a, b, a, c") == "a,b,c"
-    assert ranbooru.remove_repeated_tags("") == ""
-    assert ranbooru.remove_repeated_tags(None) == ""
+    assert tag_pipeline.remove_repeated_tags("a, b, a, c") == "a,b,c"
+    assert tag_pipeline.remove_repeated_tags("") == ""
+    assert tag_pipeline.remove_repeated_tags(None) == ""
 
 
 def test_limit_prompt_tags():
-    import scripts.ranbooru as ranbooru
+    from ranboorux import tag_pipeline
 
-    assert ranbooru.limit_prompt_tags("a, b, c, d", 0.5, "Limit") == "a,b"
-    assert ranbooru.limit_prompt_tags("a, b, c, d", 2, "Max") == "a,b"
-    assert ranbooru.limit_prompt_tags("a, b", "bad", "Max") == "a, b"
-    assert ranbooru.limit_prompt_tags("a, b", 1, "Unknown") == "a, b"
+    assert tag_pipeline.limit_prompt_tags("a, b, c, d", 0.5, "Limit") == "a,b"
+    assert tag_pipeline.limit_prompt_tags("a, b, c, d", 2, "Max") == "a,b"
+    assert tag_pipeline.limit_prompt_tags("a, b", "bad", "Max") == "a, b"
+    assert tag_pipeline.limit_prompt_tags("a, b", 1, "Unknown") == "a, b"
 
 
 def test_sanitize_gelbooru_credential_variants():
@@ -35,9 +35,9 @@ def test_sanitize_gelbooru_compat_base_url():
 
 
 def test_gelbooru_compat_parse_json_entities():
-    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus.gelbooru import GelbooruCompatible
 
-    client = ranbooru.GelbooruCompatible("https://example.com")
+    client = GelbooruCompatible("https://example.com")
     payload = {"post": [{"id": "1"}, {"id": "2"}], "@attributes": {"count": "42"}}
     entries, approx = client._parse_json_entities(payload, "post")
     assert [entry["id"] for entry in entries] == ["1", "2"]
@@ -45,9 +45,9 @@ def test_gelbooru_compat_parse_json_entities():
 
 
 def test_gelbooru_compat_parse_xml_entities():
-    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus.gelbooru import GelbooruCompatible
 
-    client = ranbooru.GelbooruCompatible("https://example.com")
+    client = GelbooruCompatible("https://example.com")
     xml_payload = (
         "<posts count='2'>"
         "<post id='1' tags='a b' file_url='http://example.com/1.png' />"
@@ -60,9 +60,9 @@ def test_gelbooru_compat_parse_xml_entities():
 
 
 def test_standardize_post_uses_tag_dict():
-    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus import Booru
 
-    booru = ranbooru.Booru("Test", "https://example.com")
+    booru = Booru("Test", "https://example.com")
     post = booru._standardize_post(
         {
             "tags": {"artist": ["alice"], "character": ["bob"], "copyright": ["copy"]},
@@ -78,9 +78,9 @@ def test_standardize_post_uses_tag_dict():
 
 
 def test_standardize_post_tag_string_override_and_heuristic():
-    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus import Booru
 
-    booru = ranbooru.Booru("Test", "https://example.com")
+    booru = Booru("Test", "https://example.com")
     post = booru._standardize_post(
         {
             "tags": "foo_(series) bar",
@@ -116,6 +116,7 @@ def test_show_fringe_benefits_only_visible_for_gelbooru(active_gradio_version):
 
 def test_loranado_scan_detects_ponyxl_markers(tmp_path):
     import types
+
     import scripts.ranbooru as ranbooru
 
     ranbooru.shared.cmd_opts = types.SimpleNamespace(lora_dir=str(tmp_path))
@@ -166,6 +167,7 @@ def test_loranado_detection_ignores_unrelated_metadata_keys():
 
 def test_apply_loranado_respects_enabled_and_blacklist(tmp_path):
     import types
+
     import scripts.ranbooru as ranbooru
 
     ranbooru.shared.cmd_opts = types.SimpleNamespace(lora_dir=str(tmp_path))
@@ -212,16 +214,16 @@ def test_post_rejected_by_filter_does_not_reject_unrelated_tags():
         post,
         filter_ctx=None,
         toggles=(
-            True,   # remove_artist
-            True,   # remove_character
-            True,   # remove_clothing
-            True,   # remove_text
-            True,   # restrict_subject
-            True,   # remove_furry
-            True,   # remove_headwear
-            True,   # remove_girl_suffix
-            True,   # preserve_hair_eye
-            True,   # remove_series
+            True,  # remove_artist
+            True,  # remove_character
+            True,  # remove_clothing
+            True,  # remove_text
+            True,  # restrict_subject
+            True,  # remove_furry
+            True,  # remove_headwear
+            True,  # remove_girl_suffix
+            True,  # preserve_hair_eye
+            True,  # remove_series
         ),
         base_colors=(set(), set()),
         allowed_subjects=set(),
