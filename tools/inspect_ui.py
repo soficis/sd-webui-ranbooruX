@@ -158,7 +158,7 @@ output_path = "docs/handoff/UI_ARGUMENT_CONTRACT.md"
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
 # We map components back to their indices and variable names
-# The return statement from scripts/ranbooru.py has 62 items:
+# The return statement from scripts/ranbooru.py has 64 items:
 variable_names = [
     "enabled",
     "tags",
