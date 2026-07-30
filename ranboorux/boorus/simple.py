@@ -4,7 +4,6 @@ Each subclass has a unique base_url and slight variations in get_posts().
 """
 
 import random
-from typing import List, Optional
 
 from ranboorux.boorus import Booru
 
@@ -13,9 +12,7 @@ class Danbooru(Booru):
     def __init__(self):
         from scripts.ranbooru import POST_AMOUNT
 
-        super().__init__(
-            "Danbooru", f"https://danbooru.donmai.us/posts.json?limit={POST_AMOUNT}"
-        )
+        super().__init__("Danbooru", f"https://danbooru.donmai.us/posts.json?limit={POST_AMOUNT}")
 
     def get_posts(self, tags_query="", max_pages=10, post_id=None):
         import scripts.ranbooru as _r
@@ -150,9 +147,7 @@ class Konachan(Booru):
     def __init__(self):
         from scripts.ranbooru import POST_AMOUNT
 
-        super().__init__(
-            "Konachan", f"https://konachan.com/post.json?limit={POST_AMOUNT}"
-        )
+        super().__init__("Konachan", f"https://konachan.com/post.json?limit={POST_AMOUNT}")
 
     def get_posts(self, tags_query="", max_pages=10, post_id=None):
         import scripts.ranbooru as _r
@@ -176,9 +171,7 @@ class Yandere(Booru):
     def __init__(self):
         from scripts.ranbooru import POST_AMOUNT
 
-        super().__init__(
-            "Yandere", f"https://yande.re/post.json?limit={POST_AMOUNT}"
-        )
+        super().__init__("Yandere", f"https://yande.re/post.json?limit={POST_AMOUNT}")
 
     def get_posts(self, tags_query="", max_pages=10, post_id=None):
         import scripts.ranbooru as _r
@@ -202,13 +195,10 @@ class AIBooru(Booru):
     def __init__(self):
         from scripts.ranbooru import POST_AMOUNT
 
-        super().__init__(
-            "AIBooru", f"https://aibooru.online/posts.json?limit={POST_AMOUNT}"
-        )
+        super().__init__("AIBooru", f"https://aibooru.online/posts.json?limit={POST_AMOUNT}")
 
     def get_posts(self, tags_query="", max_pages=10, post_id=None):
         import scripts.ranbooru as _r
-
         from scripts.ranbooru import POST_AMOUNT
 
         _r.COUNT = 0
@@ -235,9 +225,7 @@ class e621(Booru):
     def __init__(self):
         from scripts.ranbooru import POST_AMOUNT
 
-        super().__init__(
-            "e621", f"https://e621.net/posts.json?limit={POST_AMOUNT}"
-        )
+        super().__init__("e621", f"https://e621.net/posts.json?limit={POST_AMOUNT}")
 
     def get_posts(self, tags_query="", max_pages=10, post_id=None):
         import scripts.ranbooru as _r

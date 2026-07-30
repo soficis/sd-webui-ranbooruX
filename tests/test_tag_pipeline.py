@@ -1,5 +1,4 @@
 from ranboorux.tag_pipeline import (
-    FilterContext,
     build_removal_context,
     build_synonym_lookup,
     canonicalize_raw_tag,
@@ -223,10 +222,13 @@ def test_post_rejected_by_filter_remove_furry():
     post = {"id": "1", "booru_name": "danbooru", "tags": "kemonomimi, 1girl, blonde_hair"}
     cache = {}
     rejected, reason = post_rejected_by_filter(
-        post, filter_ctx=None,
+        post,
+        filter_ctx=None,
         toggles=(False, False, False, False, False, True, False, False, False, False),
-        base_colors=(set(), set()), allowed_subjects=set(),
-        cache=cache, favorites_guard=set(),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
     )
     assert rejected is True
     assert reason["rule"] == "furry"
@@ -237,10 +239,13 @@ def test_post_rejected_by_filter_remove_clothing():
     post = {"id": "2", "booru_name": "danbooru", "tags": "dress, 1girl, no_clothing"}
     cache = {}
     rejected, reason = post_rejected_by_filter(
-        post, filter_ctx=None,
+        post,
+        filter_ctx=None,
         toggles=(False, False, True, False, False, False, False, False, False, False),
-        base_colors=(set(), set()), allowed_subjects=set(),
-        cache=cache, favorites_guard=set(),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
     )
     assert rejected is True
     assert reason["rule"] == "clothing"
@@ -251,10 +256,13 @@ def test_post_rejected_by_filter_remove_headwear():
     post = {"id": "3", "booru_name": "danbooru", "tags": "halo, 1girl, blonde_hair"}
     cache = {}
     rejected, reason = post_rejected_by_filter(
-        post, filter_ctx=None,
+        post,
+        filter_ctx=None,
         toggles=(False, False, False, False, False, False, True, False, False, False),
-        base_colors=(set(), set()), allowed_subjects=set(),
-        cache=cache, favorites_guard=set(),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
     )
     assert rejected is True
     assert reason["rule"] == "headwear"
@@ -265,10 +273,13 @@ def test_post_rejected_by_filter_remove_girl_suffix():
     post = {"id": "4", "booru_name": "danbooru", "tags": "cat_girl, 1girl, girl, blonde_hair"}
     cache = {}
     rejected, reason = post_rejected_by_filter(
-        post, filter_ctx=None,
+        post,
+        filter_ctx=None,
         toggles=(False, False, False, False, False, False, False, True, False, False),
-        base_colors=(set(), set()), allowed_subjects=set(),
-        cache=cache, favorites_guard=set(),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
     )
     assert rejected is True
     assert reason["rule"] == "girl-suffix"
@@ -277,14 +288,16 @@ def test_post_rejected_by_filter_remove_girl_suffix():
 
 def test_post_rejected_by_filter_remove_character():
     """Test remove_character rejects character tags."""
-    post = {"id": "5", "booru_name": "danbooru",
-            "tags": "1girl", "character_tags": "heroine"}
+    post = {"id": "5", "booru_name": "danbooru", "tags": "1girl", "character_tags": "heroine"}
     cache = {}
     rejected, reason = post_rejected_by_filter(
-        post, filter_ctx=None,
+        post,
+        filter_ctx=None,
         toggles=(False, True, False, False, False, False, False, False, False, False),
-        base_colors=(set(), set()), allowed_subjects=set(),
-        cache=cache, favorites_guard=set(),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
     )
     assert rejected is True
     assert reason["rule"] == "character"
@@ -298,9 +311,12 @@ def test_post_rejected_by_filter_favorites_guard():
     cache = {}
     # With favorites_guard containing "bad_tag" - should NOT be rejected
     rejected, reason = post_rejected_by_filter(
-        post, filter_ctx=ctx,
+        post,
+        filter_ctx=ctx,
         toggles=(False, False, False, False, False, False, False, False, False, False),
-        base_colors=(set(), set()), allowed_subjects=set(),
-        cache=cache, favorites_guard={"bad tag"},
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard={"bad tag"},
     )
     assert rejected is False

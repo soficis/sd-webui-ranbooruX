@@ -66,6 +66,8 @@ def _args(**overrides):
         "catalog_path": "",
         "lora_auto_detect_pony": True,
         "lora_detected_loras": [],
+        "anima_auto_detect": False,
+        "anima_tune_img2img": True,
         "lora_blacklist": [],
     }
     defaults.update(overrides)

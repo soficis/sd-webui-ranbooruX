@@ -33,7 +33,6 @@ class Gelbooru(Booru):
 
     def get_posts(self, tags_query="", max_pages=10, post_id=None):
         import scripts.ranbooru as _r
-
         from scripts.ranbooru import BooruError
 
         _r.COUNT = 0
@@ -234,11 +233,10 @@ class GelbooruCompatible(Booru):
                 f"{self.booru_name} returned HTML. Expected DAPI XML/JSON. Verify the base URL (e.g., https://realbooru.com) or that the site allows API access."
             )
         entries, approx = self._parse_xml_entities(text2, entity_key)
-        return entries, approx
+        return entries, approx or 0
 
     def get_posts(self, tags_query: str = "", max_pages: int = 10, post_id: Optional[int] = None):
         import scripts.ranbooru as _r
-
         from scripts.ranbooru import POST_AMOUNT
 
         _r.COUNT = 0

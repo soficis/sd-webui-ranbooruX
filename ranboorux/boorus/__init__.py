@@ -1,7 +1,6 @@
 """Booru base class and factory function."""
 
-import random
-from typing import Dict, List, Optional
+import time
 
 from ranboorux import http_client as rb_http_client
 
@@ -19,14 +18,38 @@ class Booru:
         from scripts.ranbooru import BooruError, _log
 
         _log(f"Querying {self.booru_name}: {rb_http_client.redact_url(query_url)}")
-        try:
-            return self.http.get_json(query_url, headers=self.headers, timeout=30)
-        except Exception as e:
-            message = rb_http_client.safe_exception_message(
-                f"fetching data from {self.booru_name}", query_url, e
-            )
-            _log(f"Error {message}")
-            raise BooruError(f"HTTP Error {message}") from e
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return self.http.get_json(query_url, headers=self.headers, timeout=30)
+            except Exception as e:
+                from requests.exceptions import HTTPError, RequestException
+
+                if isinstance(e, HTTPError):
+                    status = getattr(e.response, "status_code", 0) if hasattr(e, "response") else 0
+                    if status and 400 <= status < 500:
+                        message = rb_http_client.safe_exception_message(
+                            f"fetching data from {self.booru_name}", query_url, e
+                        )
+                        _log(f"Error {message}")
+                        raise BooruError(f"HTTP Error {message}") from e
+                elif not isinstance(e, RequestException):
+                    message = rb_http_client.safe_exception_message(
+                        f"fetching data from {self.booru_name}", query_url, e
+                    )
+                    _log(f"Error {message}")
+                    raise BooruError(f"HTTP Error {message}") from e
+
+                if attempt < max_retries - 1:
+                    sleep_time = 2**attempt
+                    _log(f"[R] Retry {attempt + 1}/{max_retries} after {sleep_time}s: {e}")
+                    time.sleep(sleep_time)
+                else:
+                    message = rb_http_client.safe_exception_message(
+                        f"fetching data from {self.booru_name}", query_url, e
+                    )
+                    _log(f"Error {message}")
+                    raise BooruError(f"HTTP Error {message}") from e
 
     def _is_direct_image_url(self, url):
         """Check if URL is a direct image URL (not from external sites like Pixiv/Twitter)"""

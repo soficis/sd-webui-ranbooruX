@@ -11,9 +11,11 @@ and accesses Script-owned state (``_adetailer_state``, ``_adetailer_patches``,
 
 import logging
 import types
-from contextlib import contextmanager
 from enum import Enum, auto
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, List
+
+from ranboorux import http_client as rb_http_client
+from ranboorux.integrations import adetailer_runtime as rb_adetailer_runtime
 
 
 class AdetailerState(Enum):
@@ -34,8 +36,6 @@ class AdetailerState(Enum):
     DONE = auto()
     """Processing complete; guard flags cleared, ready for next generation."""
 
-from ranboorux import http_client as rb_http_client
-from ranboorux.integrations import adetailer_runtime as rb_adetailer_runtime
 
 _logger = logging.getLogger("ranboorux.adetailer_orch")
 
@@ -47,8 +47,8 @@ class AdetailerOrchestrator:
     Script-owned state access through ``self._script``.
     """
 
-    def __init__(self, script_instance: object) -> None:
-        self._script = script_instance
+    def __init__(self, script_instance: Any) -> None:
+        self._script: Any = script_instance
         self._state: AdetailerState = AdetailerState.IDLE
 
     # ------------------------------------------------------------------
@@ -194,15 +194,37 @@ class AdetailerOrchestrator:
             # Remove ADetailer from regular scripts
             if hasattr(p.scripts, "scripts") and p.scripts.scripts:
                 original_scripts = list(p.scripts.scripts)
-                filtered_scripts = [
-                    s for s in original_scripts if not self._is_adetailer_script(s)
-                ]
+                filtered_scripts = [s for s in original_scripts if not self._is_adetailer_script(s)]
                 removed_scripts = [s for s in original_scripts if self._is_adetailer_script(s)]
 
                 p.scripts.scripts = filtered_scripts
                 self._script._stored_adetailer_scripts["regular"] = removed_scripts
                 print(f"[R Process] Removed {len(removed_scripts)} ADetailer scripts from scripts")
 
+            # Also check global script lists (ADetailer-Neo on Forge Neo)
+            try:
+                import modules.scripts as scripts_module
+
+                for attr in ("scripts_txt2img", "scripts_img2img"):
+                    global_runner = getattr(scripts_module, attr, None)
+                    if global_runner is None or global_runner is p.scripts:
+                        continue
+                    for list_attr in ("alwayson_scripts", "scripts"):
+                        script_list = getattr(global_runner, list_attr, None)
+                        if not script_list:
+                            continue
+                        adetailer_global = [s for s in script_list if self._is_adetailer_script(s)]
+                        if adetailer_global:
+                            self._script._stored_adetailer_scripts[list_attr] = adetailer_global
+                            print(
+                                f"[R Process] Found {len(adetailer_global)} ADetailer "
+                                f"scripts in global {attr}.{list_attr} "
+                                "(blocking via flags)"
+                            )
+            except Exception:
+                pass
+
+        # Also check global script lists (ADetailer-Neo on Forge Neo)
         except Exception as e:
             print(f"[R Process] Error removing ADetailer from runner: {e}")
 
@@ -427,14 +449,13 @@ class AdetailerOrchestrator:
                                 )
                 if debug_entries:
                     print(
-                        "[R Before] Native ADetailer scripts detected: "
-                        + ", ".join(debug_entries)
+                        "[R Before] Native ADetailer scripts detected: " + ", ".join(debug_entries)
                     )
             except Exception:
                 pass
         return restored_count
 
-    def _ensure_native_adetailer_enable_flags(self, processing_obj: object) -> None:
+    def _ensure_native_adetailer_enable_flags(self, processing_obj: Any) -> None:
         """Ensure ADetailer enable/skip flags in script_args are set correctly."""
         if not getattr(self._script, "_adetailer_support_enabled", False):
             return
@@ -603,9 +624,7 @@ class AdetailerOrchestrator:
     # Manual ADetailer execution
     # ------------------------------------------------------------------
 
-    def _execute_manual_adetailer(
-        self, p: object, processed: object, img2img_results: List[Any]
-    ) -> bool:
+    def _execute_manual_adetailer(self, p: Any, processed: Any, img2img_results: List[Any]) -> bool:
         """Run manual ADetailer on img2img results via the deterministic runtime executor."""
         if not self.is_adetailer_enabled() or not img2img_results:
             return False
@@ -650,8 +669,7 @@ class AdetailerOrchestrator:
                     p,
                     script_obj,
                     keep_controlnet=self._script._manual_adetailer_requires_controlnet(
-                        self._script._extract_adetailer_script_args(script_obj, p).get("args")
-                        or []
+                        self._script._extract_adetailer_script_args(script_obj, p).get("args") or []
                     ),
                 ),
             )
@@ -697,9 +715,7 @@ class AdetailerOrchestrator:
                 "info", "Installed ScriptRunner guard to skip ADetailer when blocked"
             )
         except Exception as e:
-            self._script._log_patch_event(
-                "warning", f"Failed to install ScriptRunner guard: {e}"
-            )
+            self._script._log_patch_event("warning", f"Failed to install ScriptRunner guard: {e}")
             print(f"[R] Error installing ScriptRunner guard: {e}")
 
     # ------------------------------------------------------------------
@@ -758,9 +774,7 @@ class AdetailerOrchestrator:
             self._script._host_scope.patch_attr(
                 state, "assign_current_image", guarded_assign_current_image
             )
-            self._script._host_scope.set_attr(
-                state, "_ranbooru_preview_guard_installed", True
-            )
+            self._script._host_scope.set_attr(state, "_ranbooru_preview_guard_installed", True)
             self._script._host_scope.set_attr(
                 state, "_ranbooru_preview_guard_wrapper", guarded_assign_current_image
             )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # SIZE_OK — cohesive dataclass/schema module; splitting by count scatters related definitions
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 UI_ARGUMENT_FIELDS: Tuple[str, ...] = (
     "enabled",
@@ -67,6 +67,8 @@ UI_ARGUMENT_FIELDS: Tuple[str, ...] = (
     "lora_auto_detect_pony",
     "lora_detected_loras",
     "lora_blacklist",
+    "anima_auto_detect",
+    "anima_tune_img2img",
 )
 
 
@@ -189,6 +191,8 @@ class RunOptions:
     lora_auto_detect_pony: object
     lora_detected_loras: object
     lora_blacklist: object
+    anima_auto_detect: bool = True
+    anima_tune_img2img: bool = True
 
     @classmethod
     def from_script_args(cls, args: Sequence[object]) -> "RunOptions":
@@ -196,7 +200,8 @@ class RunOptions:
         expected = len(UI_ARGUMENT_FIELDS)
         if len(values) != expected:
             raise ValueError(f"Expected {expected} RanbooruX script args, got {len(values)}")
-        return cls(**dict(zip(UI_ARGUMENT_FIELDS, values)))
+        kw: Dict[str, Any] = dict(zip(UI_ARGUMENT_FIELDS, values))
+        return cls(**kw)
 
     def as_dict(self) -> Dict[str, object]:
         return {field: getattr(self, field) for field in UI_ARGUMENT_FIELDS}

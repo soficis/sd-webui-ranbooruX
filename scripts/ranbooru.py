@@ -7,21 +7,16 @@ import random
 import re
 import shutil
 import sys
-import time
 import traceback
-import types
 import unicodedata
-import xml.etree.ElementTree as ET
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from io import BytesIO
 from typing import Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import quote_plus
 
 import gradio as gr
 import modules.scripts as scripts
 import numpy as np
-import requests
 from modules import shared
 from modules.processing import (
     StableDiffusionProcessing,
@@ -37,19 +32,20 @@ except ImportError:
 from modules.scripts import basedir
 
 from ranboorux import catalog as rb_catalog
-from ranboorux import mutation_scope as rb_mutation_scope
+from ranboorux import http_client as rb_http_client
 from ranboorux import image_ops as rb_image_ops
 from ranboorux import loranado as rb_loranado
-from ranboorux import http_client as rb_http_client
+from ranboorux import mutation_scope as rb_mutation_scope
 from ranboorux import run_options as rb_run_options
 from ranboorux import tag_pipeline as rb_tag_pipeline
 from ranboorux import user_store as rb_user_store
+from ranboorux.anima_detect import get_anima_model_info
+from ranboorux.boorus import Booru
 from ranboorux.integrations import adetailer as rb_adetailer_integration
 from ranboorux.integrations import adetailer_orchestration as rb_adetailer_orch
 from ranboorux.integrations import adetailer_runtime as rb_adetailer_runtime
 from ranboorux.integrations import controlnet as rb_controlnet_integration
 from ranboorux.integrations import img2img_lifecycle as rb_img2img_lifecycle
-from ranboorux.boorus import Booru
 
 # --- Constants and Paths ---
 EXTENSION_ROOT = basedir()
@@ -338,14 +334,13 @@ def generate_chaos(pos_tags, neg_tags, chaos_amount):
     pos_add = chaos_list[len_list:]
     final_pos = list(set(pos_tag_list) - set(neg_add)) + pos_add
     final_neg = list(set(neg_tag_list) - set(pos_add)) + neg_add
-    return ",".join(rb_tag_pipeline.dedupe_keep_order(final_pos)), ",".join(rb_tag_pipeline.dedupe_keep_order(final_neg))
+    return ",".join(rb_tag_pipeline.dedupe_keep_order(final_pos)), ",".join(
+        rb_tag_pipeline.dedupe_keep_order(final_neg)
+    )
 
 
 class BooruError(Exception):
     pass
-
-
-
 
 
 class TagCatalogProvider:
@@ -632,6 +627,7 @@ class Script(scripts.Script):
         self._gelbooru_effective_credentials: Optional[Dict[str, str]] = None
         self._personal_remove_tags: Set[str] = set()
         self._favorite_tags: Set[str] = set()
+        self._is_anima_model: bool = False
         self._removal_context: Dict[str, object] = {}
         self._tag_normal_cache: Dict[str, str] = {}
         self._synonym_groups: Tuple[Set[str], ...] = tuple()
@@ -1793,9 +1789,7 @@ class Script(scripts.Script):
         with gr.Group(
             visible=bool(self._use_tag_catalog and self._catalog_source == "custom")
         ) as custom_catalog_group:
-            catalog_upload = gr.File(
-                label="Upload CSV", file_types=[".csv"], file_count="single"
-            )
+            catalog_upload = gr.File(label="Upload CSV", file_types=[".csv"], file_count="single")
             catalog_path = gr.Textbox(
                 label="Custom CSV Path",
                 value=self._custom_catalog_path,
@@ -1805,12 +1799,8 @@ class Script(scripts.Script):
                 catalog_import_btn = gr.Button("Import Custom Catalog")
                 catalog_validate_btn = gr.Button("Validate CSV")
 
-        reload_catalog = gr.Button(
-            "Reload Catalog", visible=bool(self._use_tag_catalog)
-        )
-        catalog_status = gr.Markdown(
-            self._tag_catalog_status_text or "Catalog mode: OFF"
-        )
+        reload_catalog = gr.Button("Reload Catalog", visible=bool(self._use_tag_catalog))
+        catalog_status = gr.Markdown(self._tag_catalog_status_text or "Catalog mode: OFF")
 
         self._catalog_status_md = catalog_status
         self._tag_diag_md = None
@@ -2432,6 +2422,16 @@ class Script(scripts.Script):
                             favorites_export_btn = gr.DownloadButton("Export")
             shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
             change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
+            anima_auto_detect = gr.Checkbox(
+                label="Auto-detect Anima model",
+                value=True,
+                info="Automatically enable space-separated tags when an Anima model is loaded",
+            )
+            anima_tune_img2img = gr.Checkbox(
+                label="Auto-tune Img2Img parameters for Anima",
+                value=True,
+                info="Automatically optimize steps, CFG scale, and denoising for Anima flow-matching",
+            )
             same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
             fringe_benefits = gr.Checkbox(
                 label="Gelbooru: Fringe Benefits", value=True, visible=False
@@ -2693,6 +2693,8 @@ class Script(scripts.Script):
             lora_auto_detect_pony,
             lora_detected_loras,
             lora_blacklist,
+            anima_auto_detect,
+            anima_tune_img2img,
         ]
         return rb_run_options.RunComponents.from_sequence(components).script_args()
 
@@ -3151,8 +3153,17 @@ class Script(scripts.Script):
     def _get_booru_api(
         self, booru_name, fringe_benefits, gelbooru_credentials: Optional[Dict[str, str]] = None
     ):
-        from ranboorux.boorus.gelbooru import GelbooruCompatible, Gelbooru
-        from ranboorux.boorus.simple import Danbooru, XBooru, Rule34, Safebooru, Konachan, Yandere, AIBooru, e621
+        from ranboorux.boorus.gelbooru import Gelbooru, GelbooruCompatible
+        from ranboorux.boorus.simple import (
+            AIBooru,
+            Danbooru,
+            Konachan,
+            Rule34,
+            Safebooru,
+            XBooru,
+            Yandere,
+            e621,
+        )
 
         booru_name = (booru_name or "").strip().lower()
         if booru_name == "gelbooru-compatible":
@@ -3302,7 +3313,7 @@ class Script(scripts.Script):
                     print(f"[R] Fetching {i+1}/{len(image_urls)}: {safe_url[:80]}...")
                     content = self._http_client.get_bytes(
                         img_url,
-                        headers=api.headers,
+                        headers=self._get_image_fetch_headers(api, img_url),
                         timeout=30,
                         max_bytes=MAX_SOURCE_IMAGE_BYTES,
                     )
@@ -3339,6 +3350,19 @@ class Script(scripts.Script):
         if None in fetched_images:
             print("[R] Warn: Some images failed.")
         return fetched_images
+
+    def _get_image_fetch_headers(self, api, img_url: str) -> dict:
+        base = dict(api.headers)
+        if "gelbooru" in img_url.lower() or "img4.gelbooru.com" in img_url.lower():
+            base.update(
+                {
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "referer": "https://gelbooru.com/",
+                    "accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    "accept-language": "en-US,en;q=0.9",
+                }
+            )
+        return base
 
     def _process_single_prompt(
         self, index, raw_prompt, base_positive, base_negative, initial_additions, settings
@@ -3463,15 +3487,31 @@ class Script(scripts.Script):
                     or (t_norm and (t_norm.endswith(" series") or t_norm.endswith(" franchise")))
                 ):
                     should_remove = True
-                if not should_remove and remove_clothing_tags and rb_tag_pipeline.is_clothing_tag(t):
+                if (
+                    not should_remove
+                    and remove_clothing_tags
+                    and rb_tag_pipeline.is_clothing_tag(t)
+                ):
                     should_remove = True
-                if not should_remove and remove_text_tags and rb_tag_pipeline.is_textual_tag(t, catalog.is_textual if catalog else None):
+                if (
+                    not should_remove
+                    and remove_text_tags
+                    and rb_tag_pipeline.is_textual_tag(t, catalog.is_textual if catalog else None)
+                ):
                     should_remove = True
                 if not should_remove and remove_furry_tags and rb_tag_pipeline.is_furry_tag(t):
                     should_remove = True
-                if not should_remove and remove_headwear_tags and rb_tag_pipeline.is_headwear_tag(t):
+                if (
+                    not should_remove
+                    and remove_headwear_tags
+                    and rb_tag_pipeline.is_headwear_tag(t)
+                ):
                     should_remove = True
-                if not should_remove and remove_series_tags and rb_tag_pipeline.is_series_tag(t, catalog.category if catalog else None):
+                if (
+                    not should_remove
+                    and remove_series_tags
+                    and rb_tag_pipeline.is_series_tag(t, catalog.category if catalog else None)
+                ):
                     should_remove = True
                 if not should_remove and preserve_hair_eye_colors:
                     if base_hair_colors and canonical_tag in base_hair_colors:
@@ -3480,7 +3520,9 @@ class Script(scripts.Script):
                         pass
                     elif (
                         base_hair_colors
-                        and rb_tag_pipeline.is_hair_color_tag(t, catalog.is_hair if catalog else None)
+                        and rb_tag_pipeline.is_hair_color_tag(
+                            t, catalog.is_hair if catalog else None
+                        )
                         and canonical_tag not in base_hair_colors
                     ):
                         should_remove = True
@@ -3490,7 +3532,11 @@ class Script(scripts.Script):
                         and canonical_tag not in base_eye_colors
                     ):
                         should_remove = True
-                if not should_remove and restrict_subject_tags and rb_tag_pipeline.is_subject_tag(t):
+                if (
+                    not should_remove
+                    and restrict_subject_tags
+                    and rb_tag_pipeline.is_subject_tag(t)
+                ):
                     subject_norm = t_norm
                     if allowed_subjects:
                         if subject_norm not in allowed_subjects:
@@ -3521,9 +3567,13 @@ class Script(scripts.Script):
         elif chaos_mode == "Shuffle Negative":
             _, current_negative = generate_chaos("", current_negative, chaos_amount)
         if limit_tags_pct < 1.0:
-            current_prompt = rb_tag_pipeline.limit_prompt_tags(current_prompt, limit_tags_pct, "Limit")
+            current_prompt = rb_tag_pipeline.limit_prompt_tags(
+                current_prompt, limit_tags_pct, "Limit"
+            )
         if max_tags_count > 0:
-            current_prompt = rb_tag_pipeline.limit_prompt_tags(current_prompt, max_tags_count, "Max")
+            current_prompt = rb_tag_pipeline.limit_prompt_tags(
+                current_prompt, max_tags_count, "Max"
+            )
         if change_dash:
             current_prompt = current_prompt.replace("_", " ")
             current_negative = current_negative.replace("_", " ")
@@ -3669,6 +3719,20 @@ class Script(scripts.Script):
             self.img2img_denoising = min(
                 0.6, self.img2img_denoising
             )  # Cap at 0.6 to prevent distortion
+
+            # Anima-specific img2img overrides
+            options = getattr(self, "options", None)
+            if getattr(self, "_is_anima_model", False) and getattr(
+                options, "anima_tune_img2img", getattr(options, "anima_auto_detect", True)
+            ):
+                self.img2img_denoising = min(0.5, self.img2img_denoising)
+                initial_steps = max(8, min(15, p.steps // 3))
+                self._host_scope.set_attr(p, "steps", initial_steps)
+                p.cfg_scale = max(3.0, min(p.cfg_scale, 6.0))
+                print(
+                    f"[R] Anima: using flow-matching optimized parameters "
+                    f"(denoise={self.img2img_denoising}, steps={initial_steps}, cfg={p.cfg_scale})"
+                )
 
             self.run_img2img_pass = True
 
@@ -3924,6 +3988,33 @@ class Script(scripts.Script):
                 processing_obj=new_processing_obj,
             )
 
+    @staticmethod
+    def _anima_quality_prefix() -> str:
+        """Return Anima's recommended positive quality prefix."""
+        return "masterpiece, best quality, score_7, safe, "
+
+    @staticmethod
+    def _anima_negative_default() -> str:
+        """Return Anima's recommended negative prompt."""
+        return "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration"
+
+    @staticmethod
+    def _has_quality_prefix(prompt: str) -> bool:
+        """Check if prompt already has quality tokens (case-insensitive)."""
+        if not prompt:
+            return False
+        quality_tokens = {
+            "masterpiece",
+            "best quality",
+            "high quality",
+            "score_7",
+            "score_8",
+            "score_9",
+            "safe",
+        }
+        first_10 = [t.strip().lower() for t in prompt.split(",")[:10]]
+        return any(token in tag for token in quality_tokens for tag in first_10)
+
     def before_process(self, p: StableDiffusionProcessing, *args):
         try:
             # Fast-path for our own internal img2img calls: initialize seeds and exit
@@ -4099,6 +4190,20 @@ class Script(scripts.Script):
         self._manual_adetailer_prev_enabled = self._adetailer_support_enabled
         self._log_prompt_sources = bool(log_prompt_sources_ui)
 
+        # Anima model detection
+        try:
+            info = get_anima_model_info(shared.sd_model)
+            self._is_anima_model = info["detected"]
+            if self._is_anima_model:
+                anima_auto_detect = getattr(options, "anima_auto_detect", True)
+                if anima_auto_detect:
+                    change_dash = True
+                    print(
+                        f"[R] Anima model detected ({info['model_name']}) - auto-enabling space-separated tags"
+                    )
+        except Exception:
+            self._is_anima_model = False
+
         self._current_booru_name = booru
         if booru == "gelbooru":
             self._gelbooru_effective_credentials = self._resolve_gelbooru_credentials(
@@ -4264,6 +4369,15 @@ class Script(scripts.Script):
             if isinstance(p.prompt, str)
             else (p.prompt[0] if isinstance(p.prompt, list) and p.prompt else "")
         )
+
+        # Anima: apply default prompts
+        if self._is_anima_model and getattr(options, "anima_auto_detect", True):
+            if not self._has_quality_prefix(self.original_prompt):
+                self.original_prompt = f"{self._anima_quality_prefix()}{self.original_prompt}"
+                print("[R] Anima: applied default quality tags")
+            if not isinstance(p.negative_prompt, str) or not p.negative_prompt.strip():
+                p.negative_prompt = self._anima_negative_default()
+
         base_hair_colors, base_eye_colors = self._extract_color_tags(self.original_prompt)
         self._base_hair_color_tags = base_hair_colors
         self._base_eye_color_tags = base_eye_colors
@@ -4573,69 +4687,58 @@ class Script(scripts.Script):
 
             if use_ip and self.last_img and self.last_img[0] is not None:
                 cn_configured = False
-                # Preferred: external_code API from ControlNet
+                # Forge Neo direct: find ControlNet script in alwayson_scripts
                 try:
-                    cn_module = self._load_cn_external_code()
-                    if hasattr(cn_module, "get_all_units_in_processing") and hasattr(
-                        cn_module, "update_cn_script_in_processing"
-                    ):
-                        cn_units = cn_module.get_all_units_in_processing(p)
-                        if cn_units and len(cn_units) > 0:
-                            copied_unit = cn_units[0].__dict__.copy()
-                            copied_unit["enabled"] = True
-                            copied_unit["weight"] = float(self.img2img_denoising)
-                            img_for_cn = (
-                                self.last_img[0].convert("RGB")
-                                if self.last_img[0].mode != "RGB"
-                                else self.last_img[0]
-                            )
-                            copied_unit["image"]["image"] = np.array(img_for_cn)
-                            cn_module.update_cn_script_in_processing(
-                                p, [copied_unit] + cn_units[1:]
-                            )
-                            cn_configured = True
-                            print("[R Before] ControlNet configured via external_code.")
-                    # else: module loaded but does not expose update helpers; silently skip to fallback
-                except Exception:
-                    # Silently fallback if external_code path not supported in this build
-                    pass
+                    scripts_runner = getattr(p, "scripts", None)
+                    cn_script = None
+                    if scripts_runner is not None:
+                        for s in getattr(scripts_runner, "alwayson_scripts", []):
+                            filename = getattr(s, "filename", "") or ""
+                            title = getattr(s, "title", lambda: "")()
+                            if "controlnet" in filename.lower() or "controlnet" in title.lower():
+                                cn_script = s
+                                break
 
-                # Fallback: p.script_args hack (fragile but effective)
-                if not cn_configured:
-                    cn_arg_start_guess = 0
-                    num_controls_per_unit = 20
-                    if num_controls_per_unit > 0:
-                        target_unit_arg_start = cn_arg_start_guess
-                        enabled_idx = target_unit_arg_start + 0
-                        weight_idx = target_unit_arg_start + 3
-                        image_idx = target_unit_arg_start + 4
-                        args_source = p.script_args
-                        if isinstance(args_source, tuple):
-                            args_target_list = list(args_source)
-                            max_idx = max(enabled_idx, weight_idx, image_idx)
-                            if max_idx < len(args_target_list):
-                                try:
-                                    img_for_cn = (
-                                        self.last_img[0].convert("RGB")
-                                        if self.last_img[0].mode != "RGB"
-                                        else self.last_img[0]
-                                    )
-                                    cn_image_input = {"image": np.array(img_for_cn), "mask": None}
-                                    args_target_list[enabled_idx] = True
-                                    args_target_list[weight_idx] = float(self.img2img_denoising)
-                                    args_target_list[image_idx] = cn_image_input
-                                    p.script_args = tuple(args_target_list)
-                                    print(
-                                        "[R Before] ControlNet using fallback p.script_args hack."
-                                    )
-                                except Exception as e:
-                                    print(f"[R Before] Error setting CN via p.script_args: {e}")
-                            else:
-                                print(
-                                    f"[R Before] Error: CN arg index ({max_idx}) OOB ({len(args_target_list)})."
+                    if cn_script is not None:
+                        start = getattr(cn_script, "args_from", None)
+                        end = getattr(cn_script, "args_to", None)
+                        if isinstance(start, int) and isinstance(end, int) and 0 <= start < end:
+                            full_args = (
+                                list(p.script_args)
+                                if isinstance(p.script_args, tuple)
+                                else list(p.script_args or [])
+                            )
+                            if end <= len(full_args):
+                                unit = full_args[start]
+                                img_for_cn = (
+                                    self.last_img[0].convert("RGB")
+                                    if self.last_img[0].mode != "RGB"
+                                    else self.last_img[0]
                                 )
-                        else:
-                            print("[R Before] Error: p.script_args is not a tuple.")
+                                cn_image = {"image": np.array(img_for_cn), "mask": None}
+
+                                if isinstance(unit, dict):
+                                    unit["enabled"] = True
+                                    unit["weight"] = float(self.img2img_denoising)
+                                    unit["image"] = cn_image
+                                elif hasattr(unit, "enabled"):
+                                    unit.enabled = True
+                                    unit.weight = float(self.img2img_denoising)
+                                    unit.image = cn_image
+
+                                setattr(p, "resize_mode", 1)
+                                p.script_args = tuple(full_args)
+                                cn_configured = True
+                                print(
+                                    "[R Before] ControlNet configured via Forge Neo direct (p.script_args slice)."
+                                )
+                except Exception as e:
+                    print(f"[R Before] ControlNet config error: {e}")
+
+                if not cn_configured and use_ip:
+                    if not hasattr(p, "resize_mode"):
+                        setattr(p, "resize_mode", 1)
+                    print("[R Before] ControlNet script not found; p.resize_mode safeguard set.")
 
             self._prepare_img2img_pass(p, use_img2img, use_ip)
 

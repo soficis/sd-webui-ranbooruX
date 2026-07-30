@@ -3,10 +3,12 @@ def test_prompt_wrappers_match_module():
     from ranboorux import tag_pipeline
 
     prompt = "a, b, a, c"
-    assert ranbooru.rb_tag_pipeline.remove_repeated_tags(prompt) == tag_pipeline.remove_repeated_tags(prompt)
-    assert ranbooru.rb_tag_pipeline.limit_prompt_tags("a, b, c, d", 2, "Max") == tag_pipeline.limit_prompt_tags(
+    assert ranbooru.rb_tag_pipeline.remove_repeated_tags(
+        prompt
+    ) == tag_pipeline.remove_repeated_tags(prompt)
+    assert ranbooru.rb_tag_pipeline.limit_prompt_tags(
         "a, b, c, d", 2, "Max"
-    )
+    ) == tag_pipeline.limit_prompt_tags("a, b, c, d", 2, "Max")
 
 
 def test_controlnet_wrapper_uses_integration(monkeypatch):

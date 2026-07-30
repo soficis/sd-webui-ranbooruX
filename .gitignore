@@ -87,6 +87,9 @@ docs/
 # Extension user data
 user/
 
+# Ignore nested extension directory
+adetailer/
+
 # Track bundled catalog assets
 !data/catalogs/
 !data/catalogs/**
