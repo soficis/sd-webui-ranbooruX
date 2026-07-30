@@ -199,7 +199,6 @@ class AIBooru(Booru):
 
     def get_posts(self, tags_query="", max_pages=10, post_id=None):
         import scripts.ranbooru as _r
-        from scripts.ranbooru import POST_AMOUNT
 
         _r.COUNT = 0
         all_fetched_posts = []
@@ -207,7 +206,7 @@ class AIBooru(Booru):
             print("[R] Warn: AIBooru does not support post IDs.")
             return []
         page = random.randint(1, max_pages)
-        query_url = f"{self.base_api_url}?limit={POST_AMOUNT}&page={page}{tags_query}"
+        query_url = f"{self.base_api_url}&page={page}{tags_query}"
         fetched_data = self._fetch_data(query_url)
         if isinstance(fetched_data, list):
             all_fetched_posts = fetched_data
@@ -236,7 +235,7 @@ class e621(Booru):
             print("[R] Warn: e621 does not support post IDs.")
             return []
         page = random.randint(1, max_pages)
-        query_url = f"{self.base_api_url}?page={page}{tags_query}"
+        query_url = f"{self.base_api_url}&page={page}{tags_query}"
         fetched_data = self._fetch_data(query_url)
         if (
             isinstance(fetched_data, dict)

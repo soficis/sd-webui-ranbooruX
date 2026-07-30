@@ -42,7 +42,10 @@ class Booru:
 
                 if attempt < max_retries - 1:
                     sleep_time = 2**attempt
-                    _log(f"[R] Retry {attempt + 1}/{max_retries} after {sleep_time}s: {e}")
+                    message = rb_http_client.safe_exception_message(
+                        f"fetching data from {self.booru_name}", query_url, e
+                    )
+                    _log(f"[R] Retry {attempt + 1}/{max_retries} after {sleep_time}s: {message}")
                     time.sleep(sleep_time)
                 else:
                     message = rb_http_client.safe_exception_message(
@@ -127,8 +130,8 @@ class Booru:
                 # Common patterns for character tags: contains parentheses (series name) or ends with specific patterns
                 if (
                     ("(" in tag and ")" in tag)
-                    or tag.endswith(r"_\(series\)")
-                    or tag.endswith(r"_\(character\)")
+                    or tag.endswith("_(series)")
+                    or tag.endswith("_(character)")
                 ):
                     character_tags.append(tag)
                 # Also catch some common character name patterns (this is heuristic but should catch most)
