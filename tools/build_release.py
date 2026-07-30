@@ -68,6 +68,7 @@ TEXT_CONTENT_EXTENSIONS = {
     ".txt",
     ".yml",
 }
+LOCAL_FILE_URI_RE = re.compile(rb"\bfile:///")
 WINDOWS_ABSOLUTE_PATH_RE = re.compile(rb"\b[A-Za-z]:(?:\\[^\\\r\n\t]+)+")
 
 def matches_any(path, patterns):
