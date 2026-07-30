@@ -216,12 +216,13 @@ variable_names = [
     "remove_headwear_tags",
     "remove_girl_suffix_tags",
     "preserve_hair_eye_colors",
-    "remove_series_tags",
     "use_tag_catalog",
     "catalog_path",
     "lora_auto_detect_pony",
     "lora_detected_loras",
     "lora_blacklist",
+    "anima_auto_detect",
+    "anima_tune_img2img",
 ]
 
 with open(output_path, "w", encoding="utf-8") as f:
