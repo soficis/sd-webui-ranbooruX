@@ -15,7 +15,7 @@ ALLOWLIST_PATTERNS = [
     "pyproject.toml",
     "README.md",
     "requirements.txt",
-    "adetailer/**/*",
+    # "adetailer/**/*",  # local nested extension dir (ignored by .gitignore); do not package
     "data/**/*",
     "docs/CHANGELOG.md",
     "docs/CONFIG.md",
