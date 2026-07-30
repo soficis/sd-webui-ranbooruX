@@ -15,7 +15,7 @@ ALLOWLIST_PATTERNS = [
     "pyproject.toml",
     "README.md",
     "requirements.txt",
-    "adetailer/**/*",
+    # "adetailer/**/*",  # local nested extension dir (ignored by .gitignore); do not package
     "data/**/*",
     "docs/CHANGELOG.md",
     "docs/CONFIG.md",
@@ -68,8 +68,8 @@ TEXT_CONTENT_EXTENSIONS = {
     ".txt",
     ".yml",
 }
-LOCAL_FILE_URI_RE = re.compile(rb"file:" + rb"///", re.IGNORECASE)
-WINDOWS_ABSOLUTE_PATH_RE = re.compile(rb"\b[A-Za-z]:\\[^\\\r\n\t ]+\\[^\\\r\n\t ]+")
+LOCAL_FILE_URI_RE = re.compile(rb"\bfile:///")
+WINDOWS_ABSOLUTE_PATH_RE = re.compile(rb"\b[A-Za-z]:(?:\\[^\\\r\n\t]+)+")
 
 
 def matches_any(path, patterns):
@@ -192,7 +192,6 @@ def run_self_tests():
             "README.md",
             "install.py",
             "scripts/ranbooru.py",
-            "ranboorux/prompting.py",
             "docs/usage.md",
         ]
         for f in allowed:

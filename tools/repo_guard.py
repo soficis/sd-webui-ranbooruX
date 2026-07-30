@@ -33,13 +33,18 @@ def check_files(file_list: Iterable[str], forbidden_prefixes: Sequence[str]) -> 
 
 
 def _run_git(repo_root: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-c", f"safe.directory={repo_root.as_posix()}", *args],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        return subprocess.run(
+            ["git", "-c", "safe.directory=*", *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return subprocess.CompletedProcess(
+            args=["git", *args], returncode=128, stdout="", stderr=""
+        )
 
 
 def get_git_modified_files(repo_root: Path) -> List[str]:

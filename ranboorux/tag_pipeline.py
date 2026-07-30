@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
 
 # --- Regex Patterns ---
 _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
@@ -350,6 +351,23 @@ REMOVAL_SYNONYM_GROUPS_RAW = (
 )
 
 
+@dataclass(frozen=True)
+class FilterContext:
+    toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool]
+    base_colors: Tuple[Set[str], Set[str]]
+    allowed_subjects: Set[str]
+    cache: Dict[str, str]
+    favorites_guard: Set[str]
+
+
+class CatalogResolver(Protocol):
+    def resolve_alias(self, tag: str) -> Optional[str]: ...
+    def is_textual(self, tag: str) -> bool: ...
+    def is_hair(self, tag: str) -> bool: ...
+    def is_eye(self, tag: str) -> bool: ...
+    def category(self, tag: str) -> int: ...
+
+
 # --- Core Tag Pipeline Functions ---
 
 
@@ -368,6 +386,30 @@ def remove_repeated_tags(prompt: str) -> str:
     if not tags:
         return ""
     return ",".join(dedupe_keep_order(tags))
+
+
+def limit_prompt_tags(prompt: str, limit_val: Union[int, float, str], mode: str) -> str:
+    tags = split_prompt_tags(prompt)
+    if not tags:
+        return ""
+    if mode == "Limit":
+        try:
+            pct = float(limit_val)
+        except (ValueError, TypeError):
+            return prompt
+        if pct <= 0:
+            return ""
+        max_count = max(1, int(len(tags) * pct))
+        return ",".join(tags[:max_count])
+    if mode == "Max":
+        try:
+            max_count = int(limit_val)
+        except (ValueError, TypeError):
+            return prompt
+        if max_count <= 0:
+            return prompt
+        return ",".join(tags[:max_count])
+    return prompt
 
 
 def canonicalize_raw_tag(tag: str) -> str:

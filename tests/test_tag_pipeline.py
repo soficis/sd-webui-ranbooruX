@@ -215,3 +215,108 @@ def test_post_rejected_by_filter():
         favorites_guard=set(),
     )
     assert rejected is False
+
+
+def test_post_rejected_by_filter_remove_furry():
+    """Test that remove_furry flag rejects furry tags."""
+    post = {"id": "1", "booru_name": "danbooru", "tags": "kemonomimi, 1girl, blonde_hair"}
+    cache = {}
+    rejected, reason = post_rejected_by_filter(
+        post,
+        filter_ctx=None,
+        toggles=(False, False, False, False, False, True, False, False, False, False),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
+    )
+    assert rejected is True
+    assert reason["rule"] == "furry"
+
+
+def test_post_rejected_by_filter_remove_clothing():
+    """Test that remove_clothing rejects clothing tags but not 'no_clothing'."""
+    post = {"id": "2", "booru_name": "danbooru", "tags": "dress, 1girl, no_clothing"}
+    cache = {}
+    rejected, reason = post_rejected_by_filter(
+        post,
+        filter_ctx=None,
+        toggles=(False, False, True, False, False, False, False, False, False, False),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
+    )
+    assert rejected is True
+    assert reason["rule"] == "clothing"
+
+
+def test_post_rejected_by_filter_remove_headwear():
+    """Test remove_headwear with halo edge case."""
+    post = {"id": "3", "booru_name": "danbooru", "tags": "halo, 1girl, blonde_hair"}
+    cache = {}
+    rejected, reason = post_rejected_by_filter(
+        post,
+        filter_ctx=None,
+        toggles=(False, False, False, False, False, False, True, False, False, False),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
+    )
+    assert rejected is True
+    assert reason["rule"] == "headwear"
+
+
+def test_post_rejected_by_filter_remove_girl_suffix():
+    """Test remove_girl_suffix rejects _girl tags but not 1girl/girl."""
+    post = {"id": "4", "booru_name": "danbooru", "tags": "cat_girl, 1girl, girl, blonde_hair"}
+    cache = {}
+    rejected, reason = post_rejected_by_filter(
+        post,
+        filter_ctx=None,
+        toggles=(False, False, False, False, False, False, False, True, False, False),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
+    )
+    assert rejected is True
+    assert reason["rule"] == "girl-suffix"
+    assert reason["tag"] == "cat_girl"
+
+
+def test_post_rejected_by_filter_remove_character():
+    """Test remove_character rejects character tags."""
+    post = {"id": "5", "booru_name": "danbooru", "tags": "1girl", "character_tags": "heroine"}
+    cache = {}
+    rejected, reason = post_rejected_by_filter(
+        post,
+        filter_ctx=None,
+        toggles=(False, True, False, False, False, False, False, False, False, False),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard=set(),
+    )
+    assert rejected is True
+    assert reason["rule"] == "character"
+
+
+def test_post_rejected_by_filter_favorites_guard():
+    """Test that favorites_guard bypasses removal matching."""
+    post = {"id": "6", "booru_name": "danbooru", "tags": "bad_tag, 1girl"}
+    removal_raw = ["bad_tag"]
+    ctx = build_removal_context(removal_raw, favorites_raw=[], synonym_lookup={})
+    cache = {}
+    # With favorites_guard containing "bad_tag" - should NOT be rejected
+    rejected, reason = post_rejected_by_filter(
+        post,
+        filter_ctx=ctx,
+        toggles=(False, False, False, False, False, False, False, False, False, False),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache=cache,
+        favorites_guard={"bad tag"},
+    )
+    assert rejected is False

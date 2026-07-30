@@ -1,7 +1,7 @@
 def test_prompting_import():
-    import ranboorux.prompting as prompting
+    import ranboorux.tag_pipeline as tag_pipeline
 
-    assert prompting.remove_repeated_tags("a, b, a") == "a,b"
+    assert tag_pipeline.remove_repeated_tags("a, b, a") == "a,b"
 
 
 def test_image_ops_import():

@@ -4,7 +4,7 @@ from ranboorux.run_options import UI_ARGUMENT_FIELDS, RunComponents, RunOptions
 
 
 def test_ui_argument_field_order_is_frozen():
-    assert len(UI_ARGUMENT_FIELDS) == 62
+    assert len(UI_ARGUMENT_FIELDS) == 64
     assert UI_ARGUMENT_FIELDS[:6] == (
         "enabled",
         "tags",
@@ -13,12 +13,13 @@ def test_ui_argument_field_order_is_frozen():
         "gelbooru_user_id",
         "gelbooru_compat_base_url",
     )
-    assert UI_ARGUMENT_FIELDS[-5:] == (
-        "use_tag_catalog",
+    assert UI_ARGUMENT_FIELDS[-6:] == (
         "catalog_path",
         "lora_auto_detect_pony",
         "lora_detected_loras",
         "lora_blacklist",
+        "anima_auto_detect",
+        "anima_tune_img2img",
     )
 
 
@@ -33,11 +34,12 @@ def test_run_options_from_script_args_maps_names_once():
     assert options.image_workflow.use_img2img == 12
     assert options.tag_filters.remove_text_tags == 50
     assert options.loranado.blacklist == 61
+    assert options.anima_tune_img2img == 63
     assert options.as_dict() == dict(zip(UI_ARGUMENT_FIELDS, values))
 
 
 def test_run_options_rejects_wrong_count():
-    with pytest.raises(ValueError, match="Expected 62"):
+    with pytest.raises(ValueError, match="Expected 64"):
         RunOptions.from_script_args([object()])
 
 

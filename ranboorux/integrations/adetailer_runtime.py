@@ -359,23 +359,44 @@ def runner_isolation(
         )
 
 
-def _images_differ(original: object, updated: object) -> bool:
+def _images_differ(original: object, updated: object, _debug: bool = False) -> bool:
     if updated is None:
+        if _debug:
+            print("[R] _images_differ: updated is None → False")
         return False
     if original is None:
+        if _debug:
+            print("[R] _images_differ: original is None → True")
         return True
+    if original is updated:
+        if _debug:
+            print("[R] _images_differ: same object → False")
+        return False
     original_size = getattr(original, "size", None)
     updated_size = getattr(updated, "size", None)
     if original_size is not None and updated_size is not None and original_size != updated_size:
+        if _debug:
+            print(f"[R] _images_differ: size {original_size} vs {updated_size} → True")
         return True
     try:
         original_bytes = original.tobytes() if hasattr(original, "tobytes") else None
         updated_bytes = updated.tobytes() if hasattr(updated, "tobytes") else None
         if original_bytes is not None and updated_bytes is not None:
-            return bool(original_bytes != updated_bytes)
+            differ = bool(original_bytes != updated_bytes)
+            if _debug:
+                o_token = getattr(original, "token", "?")
+                u_token = getattr(updated, "token", "?")
+                print(
+                    f"[R] _images_differ: tobytes {o_token} vs {u_token} len={len(original_bytes)}/{len(updated_bytes)} → {differ}"
+                )
+            return differ
     except Exception:
-        return original is not updated
-    return original is not updated
+        if _debug:
+            print("[R] _images_differ: tobytes exception → identity check")
+        return True
+    if _debug:
+        print("[R] _images_differ: no tobytes → identity check → True")
+    return True
 
 
 def _candidate_scripts(adetailer_scripts: Iterable[object]) -> List[object]:
@@ -394,12 +415,13 @@ def _candidate_scripts(adetailer_scripts: Iterable[object]) -> List[object]:
 
 
 def _extract_processed_image(temp_processed: object, fallback: object) -> object:
-    images = getattr(temp_processed, "images", None)
-    if isinstance(images, list) and images:
-        return images[0]
+    # ADetailer modifies pp.image in place; check it BEFORE pp.images
     image = getattr(temp_processed, "image", None)
     if image is not None:
         return image
+    images = getattr(temp_processed, "images", None)
+    if isinstance(images, list) and images:
+        return images[0]
     return fallback
 
 
@@ -478,10 +500,22 @@ def execute_manual_adetailer(
 
 
 def gather_adetailer_scripts(processing_obj: object) -> List[object]:
-    runner = getattr(processing_obj, "scripts", None)
-    if runner is None:
-        return []
     scripts_list: List[object] = []
-    scripts_list.extend(list(getattr(runner, "alwayson_scripts", []) or []))
-    scripts_list.extend(list(getattr(runner, "scripts", []) or []))
+
+    runner = getattr(processing_obj, "scripts", None)
+    if runner is not None:
+        scripts_list.extend(list(getattr(runner, "alwayson_scripts", []) or []))
+        scripts_list.extend(list(getattr(runner, "scripts", []) or []))
+
+    try:
+        import modules.scripts as scripts_module
+
+        for attr in ("scripts_txt2img", "scripts_img2img"):
+            global_runner = getattr(scripts_module, attr, None)
+            if global_runner is not None and global_runner is not runner:
+                scripts_list.extend(list(getattr(global_runner, "alwayson_scripts", []) or []))
+                scripts_list.extend(list(getattr(global_runner, "scripts", []) or []))
+    except Exception:
+        pass
+
     return _candidate_scripts(scripts_list)

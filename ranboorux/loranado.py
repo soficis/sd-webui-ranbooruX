@@ -11,7 +11,6 @@ def normalize_lora_name(value: object) -> str:
     text = str(value).strip()
     if not text:
         return ""
-    # Strip extension and return lowercase
     return os.path.splitext(text)[0].strip().lower()
 
 
@@ -38,12 +37,10 @@ def filter_candidates(
         normalize_lora_name(name) for name in blacklist_loras if normalize_lora_name(name)
     }
 
-    # 1. Filter enabled candidates if any are selected
     filtered = list(candidates)
     if enabled_selection:
         filtered = [c for c in filtered if normalize_lora_name(c) in enabled_selection]
 
-    # 2. Filter blacklist candidates
     if blacklist_selection:
         filtered = [c for c in filtered if normalize_lora_name(c) not in blacklist_selection]
 
@@ -77,7 +74,6 @@ def select_loras(
         chosen_file = chosen_files[i]
         lora_name = os.path.splitext(chosen_file)[0]
 
-        # Use custom weight if available, otherwise draw randomly
         if i < len(weights):
             weight = weights[i]
         else:

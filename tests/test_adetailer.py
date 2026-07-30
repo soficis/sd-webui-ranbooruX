@@ -565,9 +565,9 @@ def test_manual_per_image_execution():
 
         def postprocess_image(self, p, temp_processed, *args):
             self.calls.append(temp_processed.image.token)
-            temp_processed.images = [
-                DummyImage(f"{temp_processed.image.token}-ad", temp_processed.image.size)
-            ]
+            temp_processed.image = DummyImage(
+                f"{temp_processed.image.token}-ad", temp_processed.image.size
+            )
             return True
 
     adetailer_script = AfterDetailerScript()
@@ -611,7 +611,7 @@ def test_manual_execution_clears_adetailer_disable_flag():
         def postprocess_image(self, p, temp_processed, *args):
             if getattr(p, "_ad_disabled", False):
                 return True
-            temp_processed.images = [DummyImage(f"{temp_processed.image.token}-ad")]
+            temp_processed.image = DummyImage(f"{temp_processed.image.token}-ad")
             return True
 
     adetailer_script = AfterDetailerScript()
@@ -766,7 +766,7 @@ def test_failure_path_cleanup(monkeypatch):
             subseed=getattr(proc, "subseed", 0),
         ),
     )
-    monkeypatch.setattr(ranbooru, "resize_image", lambda img, *_args, **_kwargs: img)
+    monkeypatch.setattr(ranbooru.rb_image_ops, "resize_image", lambda img, *_args, **_kwargs: img)
     monkeypatch.setattr(script, "_force_ui_update", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         script, "_prepare_processing_for_manual_adetailer", lambda *_args, **_kwargs: None

@@ -1,6 +1,6 @@
 import types
 
-from ranboorux.host_state import HostMutationScope, RunContext
+from ranboorux.mutation_scope import HostMutationScope, RunContext
 
 
 def test_host_mutation_scope_restores_changed_and_missing_attrs():

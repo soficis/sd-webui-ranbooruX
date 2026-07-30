@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import importlib
 import importlib.util
 import logging
 import os
 from types import ModuleType
 
-from ranboorux.requesting import sanitize_exception_text
+from ranboorux.http_client import sanitize_exception_text
 
 logger = logging.getLogger("ranboorux")
 

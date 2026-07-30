@@ -170,8 +170,9 @@ def append_text_log(file_path: PathLike, lines: Iterable[str]) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8", newline="\n") as handle:
             for line in lines:
-                handle.write(str(line))
-                if not str(line).endswith("\n"):
+                text = str(line)
+                handle.write(text)
+                if not text.endswith("\n"):
                     handle.write("\n")
     except OSError as exc:
         raise UserStoreError(f"Could not append text log {target}: {exc}") from exc

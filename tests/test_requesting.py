@@ -1,12 +1,12 @@
 import json
 import types
 
-from ranboorux import requesting
+from ranboorux import http_client
 
 
 def _public_dns(monkeypatch):
     monkeypatch.setattr(
-        requesting.socket,
+        http_client.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
             (None, None, None, None, ("93.184.216.34", 443)),
@@ -17,7 +17,7 @@ def _public_dns(monkeypatch):
 def test_redact_url_hides_credential_query_values():
     url = "https://site.test/api?api_key=secret&user_id=123&tags=1girl"
 
-    assert requesting.redact_url(url) == (
+    assert http_client.redact_url(url) == (
         "https://site.test/api?api_key=<redacted>&user_id=<redacted>&tags=1girl"
     )
 
@@ -45,9 +45,9 @@ def test_booru_session_uses_cached_session_without_global_patch(monkeypatch):
             AssertionError("global install_cache should not be called")
         ),
     )
-    monkeypatch.setattr(requesting, "requests_cache", fake_cache)
+    monkeypatch.setattr(http_client, "requests_cache", fake_cache)
 
-    session = requesting.BooruSession(use_cache=True)
+    session = http_client.BooruSession(use_cache=True)
 
     assert isinstance(session._session, FakeCachedSession)
     assert calls
@@ -66,12 +66,12 @@ def test_get_bytes_rejects_large_response(monkeypatch):
                 close=lambda: None,
             )
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get_bytes("https://site.test/image.png", max_bytes=4)
-    except requesting.ResponseTooLargeError as exc:
+    except http_client.ResponseTooLargeError as exc:
         assert "exceeded 4 bytes" in str(exc)
     else:
         raise AssertionError("expected ResponseTooLargeError")
@@ -85,12 +85,12 @@ def test_get_rejects_private_ip_before_request(monkeypatch):
             calls.append(True)
             return types.SimpleNamespace(status_code=200, headers={})
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get("http://127.0.0.1/private")
-    except requesting.UnsafeUrlError:
+    except http_client.UnsafeUrlError:
         pass
     else:
         raise AssertionError("expected UnsafeUrlError")
@@ -100,8 +100,8 @@ def test_get_rejects_private_ip_before_request(monkeypatch):
 
 def test_validate_outbound_url_rejects_carrier_grade_nat():
     try:
-        requesting.validate_outbound_url("http://100.64.0.1/api")
-    except requesting.UnsafeUrlError:
+        http_client.validate_outbound_url("http://100.64.0.1/api")
+    except http_client.UnsafeUrlError:
         pass
     else:
         raise AssertionError("expected UnsafeUrlError")
@@ -109,8 +109,8 @@ def test_validate_outbound_url_rejects_carrier_grade_nat():
 
 def test_validate_outbound_url_rejects_ipv6_loopback():
     try:
-        requesting.validate_outbound_url("http://[::1]/api")
-    except requesting.UnsafeUrlError:
+        http_client.validate_outbound_url("http://[::1]/api")
+    except http_client.UnsafeUrlError:
         pass
     else:
         raise AssertionError("expected UnsafeUrlError")
@@ -118,7 +118,7 @@ def test_validate_outbound_url_rejects_ipv6_loopback():
 
 def test_validate_outbound_url_rejects_hostname_alias_with_private_result(monkeypatch):
     monkeypatch.setattr(
-        requesting.socket,
+        http_client.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
             (None, None, None, None, ("93.184.216.34", 443)),
@@ -127,8 +127,8 @@ def test_validate_outbound_url_rejects_hostname_alias_with_private_result(monkey
     )
 
     try:
-        requesting.validate_outbound_url("https://site.test/api")
-    except requesting.UnsafeUrlError:
+        http_client.validate_outbound_url("https://site.test/api")
+    except http_client.UnsafeUrlError:
         pass
     else:
         raise AssertionError("expected UnsafeUrlError")
@@ -148,8 +148,8 @@ def test_connected_socket_rejects_rebound_private_peer_before_request():
     sock = FakeSocket()
 
     try:
-        requesting._validate_connected_socket(sock)
-    except requesting.UnsafeUrlError:
+        http_client._validate_connected_socket(sock)
+    except http_client.UnsafeUrlError:
         pass
     else:
         raise AssertionError("expected UnsafeUrlError")
@@ -173,12 +173,12 @@ def test_get_rejects_redirect_to_private_ip(monkeypatch):
             )
 
     fake = FakeSession()
-    monkeypatch.setattr(requesting.requests, "Session", lambda: fake)
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: fake)
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get("https://site.test/start")
-    except requesting.UnsafeUrlError:
+    except http_client.UnsafeUrlError:
         pass
     else:
         raise AssertionError("expected UnsafeUrlError")
@@ -208,14 +208,14 @@ def test_cached_session_bypasses_cache_for_sensitive_urls(monkeypatch):
             uncached_calls.append(url)
             return FakeResponse()
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeUncachedSession())
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeUncachedSession())
     monkeypatch.setattr(
-        requesting,
+        http_client,
         "requests_cache",
         types.SimpleNamespace(CachedSession=FakeCachedSession),
     )
 
-    session = requesting.BooruSession(use_cache=True)
+    session = http_client.BooruSession(use_cache=True)
     session.get("https://site.test/api?api_key=secret&user_id=123")
 
     assert cached_calls == []
@@ -244,14 +244,14 @@ def test_cached_session_bypasses_cache_for_sensitive_redirect(monkeypatch):
             uncached_calls.append(url)
             return types.SimpleNamespace(status_code=200, headers={})
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeUncachedSession())
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeUncachedSession())
     monkeypatch.setattr(
-        requesting,
+        http_client,
         "requests_cache",
         types.SimpleNamespace(CachedSession=FakeCachedSession),
     )
 
-    session = requesting.BooruSession(use_cache=True)
+    session = http_client.BooruSession(use_cache=True)
     session.get("https://site.test/start")
 
     assert cached_calls == ["https://site.test/start"]
@@ -286,12 +286,12 @@ def test_get_bytes_streams_until_limit_without_materializing_full_response(monke
         def get(self, *_args, **_kwargs):
             return response
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get_bytes("https://site.test/image.png", max_bytes=5)
-    except requesting.ResponseTooLargeError:
+    except http_client.ResponseTooLargeError:
         pass
     else:
         raise AssertionError("expected ResponseTooLargeError")
@@ -311,12 +311,12 @@ def test_get_bytes_rejects_non_image_content_type(monkeypatch):
                 close=lambda: None,
             )
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get_bytes("https://site.test/not-image")
-    except requesting.InvalidContentTypeError as exc:
+    except http_client.InvalidContentTypeError as exc:
         assert "text/html" in str(exc)
     else:
         raise AssertionError("expected InvalidContentTypeError")
@@ -344,8 +344,8 @@ def test_get_json_parses_bounded_response_with_missing_content_type(monkeypatch)
         def get(self, *_args, **_kwargs):
             return FakeResponse()
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     assert session.get_json("https://site.test/api") == {"ok": True}
 
@@ -370,12 +370,12 @@ def test_get_json_rejects_declared_oversized_response_before_parsing(monkeypatch
         def get(self, *_args, **_kwargs):
             return FakeResponse()
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get_json("https://site.test/api", max_bytes=10)
-    except requesting.ResponseTooLargeError:
+    except http_client.ResponseTooLargeError:
         pass
     else:
         raise AssertionError("expected ResponseTooLargeError")
@@ -407,12 +407,12 @@ def test_get_json_rejects_chunked_oversized_response(monkeypatch):
         def get(self, *_args, **_kwargs):
             return response
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get_json("https://site.test/api", max_bytes=6)
-    except requesting.ResponseTooLargeError:
+    except http_client.ResponseTooLargeError:
         pass
     else:
         raise AssertionError("expected ResponseTooLargeError")
@@ -437,12 +437,12 @@ def test_get_json_rejects_non_json_content_type(monkeypatch):
         def get(self, *_args, **_kwargs):
             return FakeResponse()
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get_json("https://site.test/api")
-    except requesting.InvalidContentTypeError:
+    except http_client.InvalidContentTypeError:
         pass
     else:
         raise AssertionError("expected InvalidContentTypeError")
@@ -469,8 +469,8 @@ def test_get_json_surfaces_invalid_json(monkeypatch):
         def get(self, *_args, **_kwargs):
             return FakeResponse()
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     try:
         session.get_json("https://site.test/api")
@@ -482,7 +482,7 @@ def test_get_json_surfaces_invalid_json(monkeypatch):
 
 def test_redact_url_mixed_case_and_percent_encoding():
     url1 = "https://site.test/api?X-Amz-Signature=secret123&X-goog-Credential=secret456&sig=secret789&normal=hello"
-    redacted1 = requesting.redact_url(url1)
+    redacted1 = http_client.redact_url(url1)
     assert "secret123" not in redacted1
     assert "secret456" not in redacted1
     assert "secret789" not in redacted1
@@ -492,7 +492,7 @@ def test_redact_url_mixed_case_and_percent_encoding():
     assert "normal=hello" in redacted1
 
     url2 = "https://site.test/api?api_key=secret%20key&password=hello%26world"
-    redacted2 = requesting.redact_url(url2)
+    redacted2 = http_client.redact_url(url2)
     assert "secret%20key" not in redacted2
     assert "hello%26world" not in redacted2
     assert "api_key=<redacted>" in redacted2
@@ -504,7 +504,7 @@ def test_exception_sanitization_mixed_content():
         "Error accessing file E:\\private\\forge\\extensions\\sd_forge_controlnet "
         "when calling https://cdn.test/foo?X-Amz-Signature=supersecret&normal=param"
     )
-    sanitized = requesting.sanitize_exception_text(exc_text)
+    sanitized = http_client.sanitize_exception_text(exc_text)
     assert "E:\\private" not in sanitized
     assert "supersecret" not in sanitized
     assert "<redacted-path>" in sanitized
@@ -569,14 +569,14 @@ def test_cache_redirect_history_purged(monkeypatch):
         def get(self, url, **kwargs):
             return FakeResponse(200, {})
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeUncachedSession())
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeUncachedSession())
     monkeypatch.setattr(
-        requesting,
+        http_client,
         "requests_cache",
         types.SimpleNamespace(CachedSession=FakeCachedSession),
     )
 
-    session = requesting.BooruSession(use_cache=True)
+    session = http_client.BooruSession(use_cache=True)
     session.get("https://site.test/start")
 
     assert not session._session.cache.contains("https://site.test/start")
@@ -600,7 +600,7 @@ def test_sanitize_exception_invalid_url_with_secrets_and_paths():
 
     exc = InvalidURL(err_msg)
 
-    sanitized_exc = requesting.sanitize_exception(exc)
+    sanitized_exc = http_client.sanitize_exception(exc)
 
     assert isinstance(sanitized_exc, RuntimeError)
     message = str(sanitized_exc)
@@ -638,8 +638,8 @@ def test_get_json_parser_failure_contains_sanitized_error(monkeypatch):
         def get(self, *_args, **_kwargs):
             return FakeResponse()
 
-    monkeypatch.setattr(requesting.requests, "Session", lambda: FakeSession())
-    session = requesting.BooruSession(use_cache=False)
+    monkeypatch.setattr(http_client.requests, "Session", lambda: FakeSession())
+    session = http_client.BooruSession(use_cache=False)
 
     def mock_loads(*_args, **_kwargs):
         raise json.JSONDecodeError(
@@ -648,11 +648,11 @@ def test_get_json_parser_failure_contains_sanitized_error(monkeypatch):
             0,
         )
 
-    monkeypatch.setattr(requesting.json, "loads", mock_loads)
+    monkeypatch.setattr(http_client.json, "loads", mock_loads)
 
     try:
         session.get_json("https://site.test/api")
-    except requesting.BooruResponseError as exc:
+    except http_client.BooruResponseError as exc:
         message = str(exc)
         assert exc.__cause__ is not None
         assert isinstance(exc.__cause__, json.JSONDecodeError)
@@ -671,16 +671,16 @@ def test_path_redaction_with_spaces():
     posix_path = "/home/user/Private Folder/file.py"
     file_path = "file:" + "///C:/Users/user/Private Folder/file.py"
 
-    assert "user profile" not in requesting.sanitize_exception_text(
+    assert "user profile" not in http_client.sanitize_exception_text(
         "Error C:\\Users\\user profile\\Private Folder\\file.py."
     )
-    assert "share name" not in requesting.sanitize_exception_text(
+    assert "share name" not in http_client.sanitize_exception_text(
         "Error \\\\server\\share name\\folder\\file.py."
     )
-    assert "Private Folder" not in requesting.sanitize_exception_text(
+    assert "Private Folder" not in http_client.sanitize_exception_text(
         "Error /home/user/Private Folder/file.py."
     )
-    assert "Private Folder" not in requesting.sanitize_exception_text(
+    assert "Private Folder" not in http_client.sanitize_exception_text(
         "Error file:" + "///C:/Users/user/Private Folder/file.py."
     )
 
@@ -690,7 +690,7 @@ def test_path_redaction_with_spaces():
         f"and {file_path} with signed URL {signed_url}"
     )
 
-    sanitized = requesting.sanitize_exception_text(mixed_msg)
+    sanitized = http_client.sanitize_exception_text(mixed_msg)
 
     assert "user profile" not in sanitized
     assert "share name" not in sanitized

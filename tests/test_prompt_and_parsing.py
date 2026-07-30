@@ -1,18 +1,18 @@
 def test_remove_repeated_tags():
-    import scripts.ranbooru as ranbooru
+    from ranboorux import tag_pipeline
 
-    assert ranbooru.remove_repeated_tags("a, b, a, c") == "a,b,c"
-    assert ranbooru.remove_repeated_tags("") == ""
-    assert ranbooru.remove_repeated_tags(None) == ""
+    assert tag_pipeline.remove_repeated_tags("a, b, a, c") == "a,b,c"
+    assert tag_pipeline.remove_repeated_tags("") == ""
+    assert tag_pipeline.remove_repeated_tags(None) == ""
 
 
 def test_limit_prompt_tags():
-    import scripts.ranbooru as ranbooru
+    from ranboorux import tag_pipeline
 
-    assert ranbooru.limit_prompt_tags("a, b, c, d", 0.5, "Limit") == "a,b"
-    assert ranbooru.limit_prompt_tags("a, b, c, d", 2, "Max") == "a,b"
-    assert ranbooru.limit_prompt_tags("a, b", "bad", "Max") == "a, b"
-    assert ranbooru.limit_prompt_tags("a, b", 1, "Unknown") == "a, b"
+    assert tag_pipeline.limit_prompt_tags("a, b, c, d", 0.5, "Limit") == "a,b"
+    assert tag_pipeline.limit_prompt_tags("a, b, c, d", 2, "Max") == "a,b"
+    assert tag_pipeline.limit_prompt_tags("a, b", "bad", "Max") == "a, b"
+    assert tag_pipeline.limit_prompt_tags("a, b", 1, "Unknown") == "a, b"
 
 
 def test_sanitize_gelbooru_credential_variants():
@@ -35,9 +35,9 @@ def test_sanitize_gelbooru_compat_base_url():
 
 
 def test_gelbooru_compat_parse_json_entities():
-    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus.gelbooru import GelbooruCompatible
 
-    client = ranbooru.GelbooruCompatible("https://example.com")
+    client = GelbooruCompatible("https://example.com")
     payload = {"post": [{"id": "1"}, {"id": "2"}], "@attributes": {"count": "42"}}
     entries, approx = client._parse_json_entities(payload, "post")
     assert [entry["id"] for entry in entries] == ["1", "2"]
@@ -45,9 +45,9 @@ def test_gelbooru_compat_parse_json_entities():
 
 
 def test_gelbooru_compat_parse_xml_entities():
-    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus.gelbooru import GelbooruCompatible
 
-    client = ranbooru.GelbooruCompatible("https://example.com")
+    client = GelbooruCompatible("https://example.com")
     xml_payload = (
         "<posts count='2'>"
         "<post id='1' tags='a b' file_url='http://example.com/1.png' />"
@@ -60,9 +60,9 @@ def test_gelbooru_compat_parse_xml_entities():
 
 
 def test_standardize_post_uses_tag_dict():
-    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus import Booru
 
-    booru = ranbooru.Booru("Test", "https://example.com")
+    booru = Booru("Test", "https://example.com")
     post = booru._standardize_post(
         {
             "tags": {"artist": ["alice"], "character": ["bob"], "copyright": ["copy"]},
@@ -78,9 +78,9 @@ def test_standardize_post_uses_tag_dict():
 
 
 def test_standardize_post_tag_string_override_and_heuristic():
-    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus import Booru
 
-    booru = ranbooru.Booru("Test", "https://example.com")
+    booru = Booru("Test", "https://example.com")
     post = booru._standardize_post(
         {
             "tags": "foo_(series) bar",
@@ -114,7 +114,7 @@ def test_show_fringe_benefits_only_visible_for_gelbooru(active_gradio_version):
         assert danbooru is not None
 
 
-def test_loranado_scan_detects_ponyxl_and_anima_markers(tmp_path):
+def test_loranado_scan_detects_ponyxl_markers(tmp_path):
     import types
 
     import scripts.ranbooru as ranbooru
@@ -123,12 +123,6 @@ def test_loranado_scan_detects_ponyxl_and_anima_markers(tmp_path):
     _write_dummy_safetensors(tmp_path / "pony_magic.safetensors")
     _write_dummy_safetensors(tmp_path / "xlp_style.safetensors")
     _write_dummy_safetensors(tmp_path / "ponytail_style.safetensors")
-    _write_dummy_safetensors(tmp_path / "anima_style.safetensors")
-    _write_dummy_safetensors(tmp_path / "animapencil_v1.safetensors")
-    _write_dummy_safetensors(tmp_path / "anima-xl_character.safetensors")
-    _write_dummy_safetensors(tmp_path / "animal_ears.safetensors")
-    _write_dummy_safetensors(tmp_path / "animation_test.safetensors")
-    _write_dummy_safetensors(tmp_path / "anime_girl.safetensors")
     _write_dummy_safetensors(
         tmp_path / "metadata_style.safetensors",
         metadata={"ss_base_model_version": "PonyDiffusionXL"},
@@ -138,12 +132,8 @@ def test_loranado_scan_detects_ponyxl_and_anima_markers(tmp_path):
         metadata={"modelspec.architecture": "Pony XL"},
     )
     _write_dummy_safetensors(
-        tmp_path / "metadata_anima.safetensors",
-        metadata={"modelspec.architecture": "Anima Pencil XL"},
-    )
-    _write_dummy_safetensors(
         tmp_path / "metadata_noise.safetensors",
-        metadata={"ss_tag_frequency": {"pony": 3, "anima": 5}},
+        metadata={"ss_tag_frequency": {"pony": 3}},
     )
     _write_dummy_safetensors(
         tmp_path / "generic_style.safetensors",
@@ -154,17 +144,10 @@ def test_loranado_scan_detects_ponyxl_and_anima_markers(tmp_path):
     result = script._scan_loranado_candidates("")
     assert "pony_magic" in result["detected_names"]
     assert "xlp_style" in result["detected_names"]
-    assert "anima_style" in result["detected_names"]
-    assert "animapencil_v1" in result["detected_names"]
-    assert "anima-xl_character" in result["detected_names"]
     assert "metadata_style" in result["detected_names"]
     assert "metadata_arch" in result["detected_names"]
-    assert "metadata_anima" in result["detected_names"]
     assert "generic_style" not in result["detected_names"]
     assert "ponytail_style" not in result["detected_names"]
-    assert "animal_ears" not in result["detected_names"]
-    assert "animation_test" not in result["detected_names"]
-    assert "anime_girl" not in result["detected_names"]
     assert "metadata_noise" not in result["detected_names"]
 
 
@@ -179,10 +162,6 @@ def test_loranado_detection_ignores_unrelated_metadata_keys():
     assert script._is_ponyxl_lora(
         "generic_style.safetensors",
         {"ss_base_model_version": "Pony XL"},
-    )
-    assert script._is_ponyxl_lora(
-        "generic_style.safetensors",
-        {"modelspec.architecture": "Anima Pencil XL"},
     )
 
 

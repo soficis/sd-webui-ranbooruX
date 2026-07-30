@@ -265,7 +265,8 @@ def test_runner_guard_restores_owned_callback_map():
 def test_execute_manual_adetailer_counts_changed_image():
     class AfterDetailerScript:
         def postprocess_image(self, _p, temp_processed, *_args):
-            temp_processed.images = [DummyImage(f"{temp_processed.image.token}-ad")]
+            # Real ADetailer updates pp.image, not pp.images
+            temp_processed.image = DummyImage(f"{temp_processed.image.token}-ad")
 
     state = adetailer_runtime.AdetailerRunState()
     result = adetailer_runtime.execute_manual_adetailer(
@@ -287,7 +288,7 @@ def test_execute_manual_adetailer_counts_changed_image():
 def test_execute_manual_adetailer_treats_unchanged_as_noop():
     class AfterDetailerScript:
         def postprocess_image(self, _p, temp_processed, *_args):
-            temp_processed.images = [temp_processed.image]
+            temp_processed.image = temp_processed.image
 
     result = adetailer_runtime.execute_manual_adetailer(
         adetailer_scripts=[AfterDetailerScript()],
@@ -308,9 +309,9 @@ def test_execute_manual_adetailer_batch_counts_only_changed_images():
         def postprocess_image(self, _p, temp_processed, *_args):
             token = temp_processed.image.token
             if token == "img-2":
-                temp_processed.images = [temp_processed.image]
+                temp_processed.image = temp_processed.image
             else:
-                temp_processed.images = [DummyImage(f"{token}-ad")]
+                temp_processed.image = DummyImage(f"{token}-ad")
 
     result = adetailer_runtime.execute_manual_adetailer(
         adetailer_scripts=[AfterDetailerScript()],
@@ -331,7 +332,7 @@ def test_execute_manual_adetailer_continues_after_single_image_exception():
         def postprocess_image(self, _p, temp_processed, *_args):
             if temp_processed.image.token == "img-2":
                 raise RuntimeError("simulated failure")
-            temp_processed.images = [DummyImage(f"{temp_processed.image.token}-ad")]
+            temp_processed.image = DummyImage(f"{temp_processed.image.token}-ad")
 
     state = adetailer_runtime.AdetailerRunState()
     result = adetailer_runtime.execute_manual_adetailer(

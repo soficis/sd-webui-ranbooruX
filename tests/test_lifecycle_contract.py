@@ -66,6 +66,8 @@ def _args(**overrides):
         "catalog_path": "",
         "lora_auto_detect_pony": True,
         "lora_detected_loras": [],
+        "anima_auto_detect": False,
+        "anima_tune_img2img": True,
         "lora_blacklist": [],
     }
     defaults.update(overrides)
@@ -162,6 +164,7 @@ def test_argument_parse_failure_releases_processing_guards(stub_modules):
 
 def test_booru_error_redacts_credential_url(stub_modules):
     import scripts.ranbooru as ranbooru
+    from ranboorux.boorus import Booru
 
     secret_url = "https://site.test/api?api_key=secret&user_id=123&tags=1girl"
 
@@ -169,7 +172,7 @@ def test_booru_error_redacts_credential_url(stub_modules):
         def get_json(self, *_args, **_kwargs):
             raise RuntimeError(f"boom while fetching {secret_url}")
 
-    booru = ranbooru.Booru("Gelbooru", "https://site.test")
+    booru = Booru("Gelbooru", "https://site.test")
     booru.http = FakeHttp()
 
     try:
