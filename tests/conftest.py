@@ -160,7 +160,27 @@ def stub_modules(tmp_path, request):
     requests_cache_mod.uninstall_cache = uninstall_cache
     sys.modules["requests_cache"] = requests_cache_mod
 
+    try:
+        import requests.exceptions as _real_exceptions
+        requests_exceptions_mod = _real_exceptions
+    except ImportError:
+        requests_exceptions_mod = types.ModuleType("requests.exceptions")
+
+        class _RequestException(Exception):
+            pass
+
+        class _HTTPError(_RequestException):
+            pass
+
+        class _InvalidURL(_RequestException):
+            pass
+
+        requests_exceptions_mod.RequestException = _RequestException
+        requests_exceptions_mod.HTTPError = _HTTPError
+        requests_exceptions_mod.InvalidURL = _InvalidURL
+
     requests_mod = types.ModuleType("requests")
+    requests_mod.__path__ = []  # treat as package for submodule imports
     requests_adapters_mod = types.ModuleType("requests.adapters")
 
     class _DummyHTTPAdapter:
@@ -194,12 +214,15 @@ def stub_modules(tmp_path, request):
     requests_mod.put = _dummy_get
     requests_mod.delete = _dummy_get
     requests_mod.Response = _DummyResponse
-    requests_mod.RequestException = Exception
+    requests_mod.RequestException = requests_exceptions_mod.RequestException
+    requests_mod.HTTPError = getattr(requests_exceptions_mod, "HTTPError", Exception)
+    requests_mod.exceptions = requests_exceptions_mod
     requests_mod.Session = lambda: types.SimpleNamespace(get=_dummy_get, post=_dummy_get)
     requests_adapters_mod.HTTPAdapter = _DummyHTTPAdapter
     requests_mod.adapters = requests_adapters_mod
     sys.modules["requests"] = requests_mod
     sys.modules["requests.adapters"] = requests_adapters_mod
+    sys.modules["requests.exceptions"] = requests_exceptions_mod
 
     numpy_mod = types.ModuleType("numpy")
     sys.modules["numpy"] = numpy_mod
@@ -237,6 +260,7 @@ def stub_modules(tmp_path, request):
         "requests_cache",
         "requests",
         "requests.adapters",
+        "requests.exceptions",
         "numpy",
         "PIL.Image",
         "PIL",

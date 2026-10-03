@@ -273,3 +273,28 @@ def test_initialize_seeds_policies():
     assert p3.all_subseeds == [60, 61]
     assert p3.seeds == [999]  # Existing alias not overwritten
     assert p3.subseeds == [60, 61]  # Missing alias mirrored
+
+
+def test_bail_releases_guards():
+    import scripts.ranbooru as ranbooru
+
+    script = ranbooru.Script()
+    p = types.SimpleNamespace()
+
+    # Set guards
+    key = f"_ranbooru_processing_{id(p)}"
+    setattr(script, key, True)
+    script._current_processing_key = key
+    setattr(ranbooru.Script, "_ranbooru_global_processing", True)
+    setattr(p, "_ranbooru_already_processing", True)
+    script._current_processing_object = p
+
+    # Call _bail
+    script._bail(p, use_cache=True, reason="Test bail reason")
+
+    # Assert guards are released
+    assert not hasattr(script, key)
+    assert not getattr(ranbooru.Script, "_ranbooru_global_processing", False)
+    assert not getattr(p, "_ranbooru_already_processing", False)
+    assert not hasattr(script, "_current_processing_object")
+

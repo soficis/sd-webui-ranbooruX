@@ -4917,44 +4917,47 @@ class Script(scripts.Script):
             except Exception as exc:
                 print(f"[R Before] Warn: Failed handling ADetailer toggle change: {exc}")
 
-    def postprocess(self, p: StableDiffusionProcessing, processed, *args):
-        try:
-            # If this generation already finalized, avoid looping
-            if getattr(p, "_ranbooru_finalized", False):
-                print("[R Post] Already finalized this generation; skipping repeat postprocess")
-                return
-            # If this call is re-entered during our manual ADetailer run, skip to avoid loops
-            if getattr(self.__class__, "_ranbooru_manual_adetailer_active", False):
-                print("[R Post] Skipping RanbooruX postprocess during manual ADetailer run")
-                return
-            # Prevent duplicate img2img runs within the same generation
-            if getattr(p, "_ranbooru_img2img_started", False):
-                print(
-                    "[R Post] Img2Img already started for this generation; skipping duplicate postprocess entry"
-                )
-                return
-            enabled = getattr(self, "_post_enabled", False)
-            use_img2img = getattr(self, "_post_use_img2img", False)
-            getattr(self, "_post_use_last_img", False)
-            crop_center = getattr(self, "_post_crop_center", False)
-            use_cache = getattr(self, "_post_use_cache", True)
-            use_adetailer = (
-                getattr(self, "_post_adetailer_enabled", False)
-                and self._adetailer_orch.is_adetailer_enabled()
-            )
+    def _bail(self, p: Any, use_cache: bool, reason: str = "") -> None:
+        if reason:
+            print(f"[R Post] {reason}")
+        self._cleanup_after_run(use_cache)
+        self._clear_processing_guards(p)
 
-            # Validate essential objects
+    def _validate_postconditions(
+        self, p: StableDiffusionProcessing, processed: Any
+    ) -> Optional[Tuple[bool, bool, bool]]:
+        # If this generation already finalized, avoid looping
+        if getattr(p, "_ranbooru_finalized", False):
+            print("[R Post] Already finalized this generation; skipping repeat postprocess")
+            return None
+        # If this call is re-entered during our manual ADetailer run, skip to avoid loops
+        if getattr(self.__class__, "_ranbooru_manual_adetailer_active", False):
+            print("[R Post] Skipping RanbooruX postprocess during manual ADetailer run")
+            return None
+        # Prevent duplicate img2img runs within the same generation
+        if getattr(p, "_ranbooru_img2img_started", False):
+            print(
+                "[R Post] Img2Img already started for this generation; skipping duplicate postprocess entry"
+            )
+            return None
+
+        use_cache = getattr(self, "_post_use_cache", True)
+        crop_center = getattr(self, "_post_crop_center", False)
+        use_adetailer = (
+            getattr(self, "_post_adetailer_enabled", False)
+            and self._adetailer_orch.is_adetailer_enabled()
+        )
+        enabled = getattr(self, "_post_enabled", False)
+        use_img2img = getattr(self, "_post_use_img2img", False)
+
+        try:
             if not processed or not hasattr(processed, "images"):
-                print("[R Post] Error: Invalid processed object, skipping img2img")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
-                return
+                self._bail(p, use_cache, "Error: Invalid processed object, skipping img2img")
+                return None
 
             if not enabled:
-                print("[R Post] RanbooruX disabled, skipping img2img")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
-                return
+                self._bail(p, use_cache, "RanbooruX disabled, skipping img2img")
+                return None
 
             if not (
                 getattr(self, "run_img2img_pass", False)
@@ -4966,21 +4969,237 @@ class Script(scripts.Script):
                 if not use_adetailer and not getattr(self, "_adetailer_support_enabled", False):
                     fallback_ran = self._force_native_adetailer_execution(p, processed)
                 if fallback_ran:
-                    self._cleanup_after_run(use_cache)
-                    self._clear_processing_guards(p)
-                    return
-                print("[R Post] Img2Img conditions not met, skipping")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
-                return
+                    self._bail(p, use_cache)
+                    return None
+                self._bail(p, use_cache, "Img2Img conditions not met, skipping")
+                return None
 
+            return use_cache, crop_center, use_adetailer
         except Exception as e:
-            print(f"[R Post] Error in postprocess validation: {e}")
-            self._cleanup_after_run(getattr(self, "_post_use_cache", True))
-            self._clear_processing_guards(p)
-            return
+            self._bail(p, use_cache, f"Error in postprocess validation: {e}")
+            return None
 
-        # Main img2img processing block
+    def _run_img2img_batch(
+        self,
+        p: StableDiffusionProcessing,
+        processed: Any,
+        crop_center: bool,
+        use_cache: bool,
+    ) -> Optional[List[Any]]:
+        print("[R Post] Starting separate Img2Img run...")
+        valid_images = [img for img in self.last_img if img is not None]
+        if not valid_images:
+            self._bail(p, use_cache, "No valid images for Img2Img.")
+            return None
+        if len(valid_images) < len(self.last_img):
+            print(
+                f"[R Post] Warn: Only {len(valid_images)}/{len(self.last_img)} valid. Filling gaps."
+            )
+            if valid_images:
+                self.last_img = [
+                    (img if img is not None else valid_images[0]) for img in self.last_img
+                ]
+            else:
+                self._bail(p, use_cache, "No valid images left.")
+                return None
+        target_w, target_h = (
+            (p.width, p.height) if crop_center else self.check_orientation(self.last_img[0])
+        )
+        print(
+            f"[R Post] Preparing {len(self.last_img)} images ({'Crop' if crop_center else 'Resize'}) to {target_w}x{target_h} for Img2Img."
+        )
+        prepared_images = [
+            rb_image_ops.resize_image(img, target_w, target_h, cropping=crop_center)
+            for img in self.last_img
+            if img is not None
+        ]
+        if not prepared_images:
+            self._bail(p, use_cache, "No images left after resize.")
+            return None
+
+        # Use the original RanbooruX-generated prompts, not the simplified initial prompts
+        if hasattr(self, "original_full_prompt") and self.original_full_prompt:
+            print(
+                "[R Post] Using original RanbooruX prompts for img2img (not simplified initial prompts)"
+            )
+            final_prompts = self.original_full_prompt
+        else:
+            final_prompts = processed.prompt
+        final_negative_prompts = processed.negative_prompt
+        num_imgs = len(prepared_images)
+        final_prompts = rb_img2img_lifecycle.repeat_to_length(final_prompts, num_imgs)
+        final_negative_prompts = rb_img2img_lifecycle.repeat_to_length(
+            final_negative_prompts,
+            num_imgs,
+        )
+        img2img_width, img2img_height = prepared_images[0].size
+
+        print(
+            f"[R] Processing {len(prepared_images)} images individually to ensure compatibility"
+        )
+        print(
+            f"[R] Running Img2Img ({len(prepared_images)} images) steps={self.real_steps}, Denoise={self.img2img_denoising}"
+        )
+
+        all_img2img_results = []
+        all_infotexts = []
+        last_seed = processed.seed
+        last_subseed = processed.subseed
+
+        for i, img in enumerate(prepared_images):
+            current_prompt = final_prompts[i] if i < len(final_prompts) else final_prompts[0]
+            current_negative = (
+                final_negative_prompts[i]
+                if i < len(final_negative_prompts)
+                else final_negative_prompts[0]
+            )
+
+            p_img2img = StableDiffusionProcessingImg2Img(
+                sd_model=shared.sd_model,
+                outpath_samples=shared.opts.outdir_samples
+                or shared.opts.outdir_img2img_samples,
+                outpath_grids=shared.opts.outdir_grids or shared.opts.outdir_img2img_grids,
+                prompt=current_prompt,
+                negative_prompt=current_negative,
+                seed=processed.seed + i,
+                subseed=processed.subseed + i,
+                sampler_name=p.sampler_name,
+                scheduler=getattr(p, "scheduler", None),
+                batch_size=1,
+                n_iter=1,
+                steps=self.real_steps,
+                cfg_scale=p.cfg_scale,
+                width=img2img_width,
+                height=img2img_height,
+                init_images=[img],
+                denoising_strength=self.img2img_denoising,
+            )
+            try:
+                setattr(p_img2img, "_ranbooru_internal_img2img", True)
+            except Exception:
+                pass
+
+            p_img2img.do_not_save_samples = False
+            p_img2img.do_not_save_grid = False
+
+            final_outpath = getattr(self, "_img2img_final_outpath_samples", None)
+            if final_outpath:
+                p_img2img.outpath_samples = final_outpath
+                print(f"[R Save] Saving img2img result {i+1} to: {final_outpath}")
+            else:
+                p_img2img.outpath_samples = (
+                    shared.opts.outdir_img2img_samples or shared.opts.outdir_samples
+                )
+                print(
+                    f"[R Save] Saving img2img result {i+1} to default: {p_img2img.outpath_samples}"
+                )
+
+            final_batch_size = getattr(self, "_img2img_final_batch_size", None)
+            if final_batch_size:
+                p_img2img.batch_size = final_batch_size
+
+            print(f"[R] Processing image {i+1}/{len(prepared_images)} individually")
+            single_result = process_images(p_img2img)
+            all_img2img_results.extend(single_result.images)
+            all_infotexts.extend(single_result.infotexts)
+            last_seed = single_result.seed
+            last_subseed = single_result.subseed
+
+        print(
+            "[R Post] Performing COMPLETE processed object replacement for extension compatibility"
+        )
+        rb_img2img_lifecycle.replace_processed_results(
+            processed,
+            images=all_img2img_results,
+            prompts=final_prompts,
+            negative_prompts=final_negative_prompts,
+            infotexts=all_infotexts,
+            seed=last_seed,
+            subseed=last_subseed,
+            width=img2img_width,
+            height=img2img_height,
+        )
+
+        if hasattr(p, "processed_result"):
+            p.processed_result = processed
+        if hasattr(p, "_processed"):
+            p._processed = processed
+
+        return all_img2img_results
+
+    def _run_manual_adetailer(
+        self,
+        p: StableDiffusionProcessing,
+        processed: Any,
+        all_img2img_results: List[Any],
+        use_adetailer: bool,
+    ) -> List[Any]:
+        if not use_adetailer:
+            print(
+                "[R Post] Manual ADetailer support disabled; skipping manual ADetailer execution"
+            )
+            return all_img2img_results
+
+        print("[R Post] Attempting manual ADetailer run on img2img results...")
+        self._prepare_processing_for_manual_adetailer(p, processed, all_img2img_results)
+        try:
+            self._set_adetailer_block(False)
+            setattr(self.__class__, "_ranbooru_block_all_adetailer", False)
+            setattr(p, "_ranbooru_skip_initial_adetailer", False)
+            print("[R Post] Unblocked ADetailer guard for manual run")
+        except Exception:
+            pass
+        try:
+            final_dims = (
+                all_img2img_results[0].size
+                if all_img2img_results and hasattr(all_img2img_results[0], "size")
+                else None
+            )
+            self._install_preview_guard()
+            self._set_preview_guard(True, final_dims, block_all=True)
+        except Exception:
+            pass
+        adetailer_ran_successfully = self._execute_manual_adetailer(
+            p, processed, all_img2img_results
+        )
+        if adetailer_ran_successfully:
+            print("[R Post] SUCCESS: ADetailer processed img2img results")
+            all_img2img_results = processed.images.copy()
+            try:
+                setattr(p, "_ranbooru_manual_adetailer_complete", True)
+            except Exception:
+                pass
+        else:
+            print(
+                "[R Post] WARN: ADetailer manual run failed - img2img results will be unprocessed by ADetailer"
+            )
+        return all_img2img_results
+
+    def _finalize_results(
+        self,
+        p: StableDiffusionProcessing,
+        processed: Any,
+        all_img2img_results: List[Any],
+    ) -> None:
+        setattr(self, "_ranbooru_processing_complete", True)
+        if hasattr(self, "_ranbooru_intermediate_results"):
+            delattr(self, "_ranbooru_intermediate_results")
+
+        print("[R Post] Img2Img finished.")
+        print(
+            f"[R Post] Updated processed object with {len(all_img2img_results)} img2img results"
+        )
+        self._force_ui_update(p, processed, all_img2img_results)
+        print(
+            "[R Post] RanbooruX processing complete - final results ready for UI and other extensions"
+        )
+
+    def postprocess(self, p: StableDiffusionProcessing, processed, *args):
+        valid = self._validate_postconditions(p, processed)
+        if valid is None:
+            return
+        use_cache, crop_center, use_adetailer = valid
+
         try:
             # Mark as started to avoid re-entrant img2img runs
             try:
@@ -4998,220 +5217,14 @@ class Script(scripts.Script):
                     "[R Post] Manual ADetailer support disabled; skipping ADetailer preparation steps"
                 )
 
-            print("[R Post] Starting separate Img2Img run...")
-            valid_images = [img for img in self.last_img if img is not None]
-            if not valid_images:
-                print("[R Post] No valid images for Img2Img.")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
+            all_img2img_results = self._run_img2img_batch(p, processed, crop_center, use_cache)
+            if all_img2img_results is None:
                 return
-            if len(valid_images) < len(self.last_img):
-                print(
-                    f"[R Post] Warn: Only {len(valid_images)}/{len(self.last_img)} valid. Filling gaps."
-                )
-                if valid_images:
-                    self.last_img = [
-                        (img if img is not None else valid_images[0]) for img in self.last_img
-                    ]
-                else:
-                    print("[R Post] No valid images left.")
-                    self._cleanup_after_run(use_cache)
-                    self._clear_processing_guards(p)
-                    return
-            target_w, target_h = (
-                (p.width, p.height) if crop_center else self.check_orientation(self.last_img[0])
+
+            all_img2img_results = self._run_manual_adetailer(
+                p, processed, all_img2img_results, use_adetailer
             )
-            print(
-                f"[R Post] Preparing {len(self.last_img)} images ({'Crop' if crop_center else 'Resize'}) to {target_w}x{target_h} for Img2Img."
-            )
-            prepared_images = [
-                rb_image_ops.resize_image(img, target_w, target_h, cropping=crop_center)
-                for img in self.last_img
-                if img is not None
-            ]
-            if not prepared_images:
-                print("[R Post] No images left after resize.")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
-                return
-            # Use the original RanbooruX-generated prompts, not the simplified initial prompts
-            if hasattr(self, "original_full_prompt") and self.original_full_prompt:
-                print(
-                    "[R Post] Using original RanbooruX prompts for img2img (not simplified initial prompts)"
-                )
-                final_prompts = self.original_full_prompt
-            else:
-                final_prompts = processed.prompt
-            final_negative_prompts = processed.negative_prompt
-            num_imgs = len(prepared_images)
-            final_prompts = rb_img2img_lifecycle.repeat_to_length(final_prompts, num_imgs)
-            final_negative_prompts = rb_img2img_lifecycle.repeat_to_length(
-                final_negative_prompts,
-                num_imgs,
-            )
-            img2img_width, img2img_height = prepared_images[0].size
-            # Process images in batches that match WebUI expectations
-            # Use batch_size=1 to ensure compatibility with all configurations
-            print(
-                f"[R] Processing {len(prepared_images)} images individually to ensure compatibility"
-            )
-
-            # Process all prepared images (do not limit by original txt2img batch size)
-
-            print(
-                f"[R] Running Img2Img ({len(prepared_images)} images) steps={self.real_steps}, Denoise={self.img2img_denoising}"
-            )
-
-            # Process images individually to avoid batch size issues
-            all_img2img_results = []
-            all_infotexts = []
-            last_seed = processed.seed
-            last_subseed = processed.subseed
-
-            for i, img in enumerate(prepared_images):
-                current_prompt = final_prompts[i] if i < len(final_prompts) else final_prompts[0]
-                current_negative = (
-                    final_negative_prompts[i]
-                    if i < len(final_negative_prompts)
-                    else final_negative_prompts[0]
-                )
-
-                p_img2img = StableDiffusionProcessingImg2Img(
-                    sd_model=shared.sd_model,
-                    outpath_samples=shared.opts.outdir_samples
-                    or shared.opts.outdir_img2img_samples,
-                    outpath_grids=shared.opts.outdir_grids or shared.opts.outdir_img2img_grids,
-                    prompt=current_prompt,
-                    negative_prompt=current_negative,
-                    seed=processed.seed + i,
-                    subseed=processed.subseed + i,
-                    sampler_name=p.sampler_name,
-                    scheduler=getattr(p, "scheduler", None),
-                    batch_size=1,
-                    n_iter=1,
-                    steps=self.real_steps,
-                    cfg_scale=p.cfg_scale,
-                    width=img2img_width,
-                    height=img2img_height,
-                    init_images=[img],
-                    denoising_strength=self.img2img_denoising,
-                )
-                # Mark as internal so our before_process performs a minimal seed init instead of blocking
-                try:
-                    setattr(p_img2img, "_ranbooru_internal_img2img", True)
-                except Exception:
-                    pass
-
-                # CRITICAL: Explicitly enable saving for img2img pass (was disabled for initial pass)
-                p_img2img.do_not_save_samples = False  # Always enable saving for final results
-                p_img2img.do_not_save_grid = False  # Always enable grid saving for final results
-
-                # Ensure correct output path for img2img results
-                final_outpath = getattr(self, "_img2img_final_outpath_samples", None)
-                if final_outpath:
-                    p_img2img.outpath_samples = final_outpath
-                    print(f"[R Save] Saving img2img result {i+1} to: {final_outpath}")
-                else:
-                    # Fallback to default img2img output directory
-                    p_img2img.outpath_samples = (
-                        shared.opts.outdir_img2img_samples or shared.opts.outdir_samples
-                    )
-                    print(
-                        f"[R Save] Saving img2img result {i+1} to default: {p_img2img.outpath_samples}"
-                    )
-
-                # Restore original batch size
-                final_batch_size = getattr(self, "_img2img_final_batch_size", None)
-                if final_batch_size:
-                    p_img2img.batch_size = final_batch_size
-
-                print(f"[R] Processing image {i+1}/{len(prepared_images)} individually")
-                single_result = process_images(p_img2img)
-                all_img2img_results.extend(single_result.images)
-                all_infotexts.extend(single_result.infotexts)
-                last_seed = single_result.seed
-                last_subseed = single_result.subseed
-
-            # CRITICAL: Complete replacement of processed object to force all extensions to see new results
-            print(
-                "[R Post] Performing COMPLETE processed object replacement for extension compatibility"
-            )
-
-            rb_img2img_lifecycle.replace_processed_results(
-                processed,
-                images=all_img2img_results,
-                prompts=final_prompts,
-                negative_prompts=final_negative_prompts,
-                infotexts=all_infotexts,
-                seed=last_seed,
-                subseed=last_subseed,
-                width=img2img_width,
-                height=img2img_height,
-            )
-
-            # Force update the main processing result references
-            if hasattr(p, "processed_result"):
-                p.processed_result = processed
-            if hasattr(p, "_processed"):
-                p._processed = processed
-
-            adetailer_ran_successfully = False
-            if use_adetailer:
-                print("[R Post] Attempting manual ADetailer run on img2img results...")
-                # Ensure processing object is aligned to our img2img result for ADetailer
-                self._prepare_processing_for_manual_adetailer(p, processed, all_img2img_results)
-                try:
-                    self._set_adetailer_block(False)
-                    setattr(self.__class__, "_ranbooru_block_all_adetailer", False)
-                    setattr(p, "_ranbooru_skip_initial_adetailer", False)
-                    print("[R Post] Unblocked ADetailer guard for manual run")
-                except Exception:
-                    pass
-                try:
-                    final_dims = (
-                        all_img2img_results[0].size
-                        if all_img2img_results and hasattr(all_img2img_results[0], "size")
-                        else None
-                    )
-                    self._install_preview_guard()
-                    self._set_preview_guard(True, final_dims, block_all=True)
-                except Exception:
-                    pass
-                adetailer_ran_successfully = self._execute_manual_adetailer(
-                    p, processed, all_img2img_results
-                )
-                if adetailer_ran_successfully:
-                    print("[R Post] SUCCESS: ADetailer processed img2img results")
-                    all_img2img_results = processed.images.copy()
-                    try:
-                        setattr(p, "_ranbooru_manual_adetailer_complete", True)
-                    except Exception:
-                        pass
-                else:
-                    print(
-                        "[R Post] WARN: ADetailer manual run failed - img2img results will be unprocessed by ADetailer"
-                    )
-            else:
-                adetailer_ran_successfully = False
-                print(
-                    "[R Post] Manual ADetailer support disabled; skipping manual ADetailer execution"
-                )
-
-            # Mark processing as complete for other extensions and UI
-            setattr(self, "_ranbooru_processing_complete", True)
-            if hasattr(self, "_ranbooru_intermediate_results"):
-                delattr(self, "_ranbooru_intermediate_results")
-
-            print("[R Post] Img2Img finished.")
-            print(
-                f"[R Post] Updated processed object with {len(all_img2img_results)} img2img results"
-            )
-            # CRITICAL: Force UI to display our final results
-            self._force_ui_update(p, processed, all_img2img_results)
-
-            print(
-                "[R Post] RanbooruX processing complete - final results ready for UI and other extensions"
-            )
+            self._finalize_results(p, processed, all_img2img_results)
 
         except Exception as e:
             print(f"[R Post] Critical error during img2img processing: {e}")
