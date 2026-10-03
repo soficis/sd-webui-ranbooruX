@@ -297,3 +297,51 @@ def test_lock_webui_hook_symbols_presence():
     for hook in hooks:
         assert hasattr(ranbooru.Script, hook), f"Missing WebUI hook: {hook}"
         assert callable(getattr(ranbooru.Script, hook)), f"Hook {hook} is not callable"
+
+
+# Task B3: AST verification that dead symbols are absent and Script._extract_color_tags is preserved
+def test_dead_symbols_absent():
+    import ast
+    from pathlib import Path
+
+    dead_specs = {
+        Path("scripts/ranbooru.py"): [
+            "_images_visibly_different",
+            "_normalize_post_tags",
+            "_ensure_pil_images_in_processed",
+            "_ensure_pil_in_processing",
+            "_normalize_lora_name",
+            "_clear_runner_callback_cache",
+            "_ensure_user_file",
+            "_expand_with_synonyms",
+            "use_autotagger",
+        ],
+        Path("ranboorux/tag_pipeline.py"): [
+            "extract_color_tags",
+        ],
+        Path("ranboorux/boorus/gelbooru.py"): [
+            "get_tags",
+            "get_tag_aliases",
+        ],
+        Path("ranboorux/http_client.py"): [
+            "get_text",
+        ],
+    }
+
+    for file_path, dead_names in dead_specs.items():
+        tree = ast.parse(file_path.read_text(encoding="utf-8"))
+        defined_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined_names.add(node.name)
+        for dead_name in dead_names:
+            assert dead_name not in defined_names, f"{dead_name} still defined in {file_path}"
+
+    ranbooru_tree = ast.parse(Path("scripts/ranbooru.py").read_text(encoding="utf-8"))
+    ranbooru_defs = {
+        node.name
+        for node in ast.walk(ranbooru_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "_extract_color_tags" in ranbooru_defs, "Script._extract_color_tags must NOT be deleted!"
+

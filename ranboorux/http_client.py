@@ -547,29 +547,6 @@ class BooruSession:
             _close_socket(response)
             raise
 
-    def get_text(
-        self,
-        url: str,
-        *,
-        headers: Optional[Mapping[str, str]] = None,
-        timeout: int = 30,
-        max_bytes: int = DEFAULT_API_MAX_BYTES,
-    ) -> BoundedResponse:
-        response = self.get(url, headers=headers, timeout=timeout, stream=True)
-        try:
-            response.raise_for_status()
-            content = self._read_bounded_response(response, url, max_bytes)
-            return BoundedResponse(
-                url=str(getattr(response, "url", url) or url),
-                status_code=int(getattr(response, "status_code", 200) or 200),
-                headers=getattr(response, "headers", {}) or {},
-                content=content,
-                encoding=getattr(response, "encoding", None),
-            )
-        except Exception:
-            _close_socket(response)
-            raise
-
     def get_bytes(
         self,
         url: str,
