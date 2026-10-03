@@ -4230,18 +4230,34 @@ class Script(scripts.Script):
 
         # Anima model detection
         try:
-            info = get_anima_model_info(shared.sd_model)
+            pending_ckpt = None
+            if hasattr(p, "override_settings") and isinstance(p.override_settings, dict):
+                pending_ckpt = p.override_settings.get("sd_model_checkpoint")
+            if not pending_ckpt and hasattr(shared, "opts"):
+                pending_ckpt = getattr(shared.opts, "sd_model_checkpoint", None)
+
+            info = None
+            if pending_ckpt:
+                info = get_anima_model_info(pending_ckpt)
+            if not info or not info.get("detected"):
+                info = get_anima_model_info(getattr(shared, "sd_model", None))
+            if not info or not info.get("detected"):
+                info = getattr(Script, "_last_loaded_model_info", None)
+            if not info:
+                info = {"detected": False, "method": "none", "model_name": "", "variant": "base"}
+
             self._is_anima_model = info["detected"]
             if self._is_anima_model:
                 self._anima_model_variant = info.get("variant") or self._resolve_anima_variant(
                     info.get("model_name", "")
                 )
+                self._anima_capabilities = info.get("capabilities")
                 anima_auto_detect = getattr(options, "anima_auto_detect", True)
                 if anima_auto_detect:
                     change_dash = True
                     shuffle_tags = False
                     print(
-                        f"[R] Anima model detected ({info['model_name']}, variant={self._anima_model_variant}) - auto-enabling space-separated tags and disabling tag shuffling"
+                        f"[R] Anima model detected ({info['model_name']}, variant={self._anima_model_variant}, method={info.get('method')}) - auto-enabling space-separated tags and disabling tag shuffling"
                     )
         except Exception:
             self._is_anima_model = False
@@ -5815,6 +5831,23 @@ class Script(scripts.Script):
     def process(self, p, *args):
         """Process method - runs during main processing, can intercept results early"""
         try:
+            # Anima late-detection check: runs after model load (processing.py:917)
+            # Catches first generation after cold-load / checkpoint switch
+            if not getattr(self, "_is_anima_model", False):
+                try:
+                    late_info = get_anima_model_info(getattr(shared, "sd_model", None))
+                    if late_info and late_info.get("detected"):
+                        self._is_anima_model = True
+                        self._anima_model_variant = late_info.get(
+                            "variant"
+                        ) or self._resolve_anima_variant(late_info.get("model_name", ""))
+                        self._anima_capabilities = late_info.get("capabilities")
+                        print(
+                            f"[R Process] Anima model detected on engine load ({late_info['model_name']}, variant={self._anima_model_variant}, method={late_info.get('method')})"
+                        )
+                except Exception:
+                    pass
+
             # This method runs during the main processing phase
             # We can use it to prepare for result interception
             if getattr(self, "run_img2img_pass", False):
@@ -5992,3 +6025,18 @@ class Script(scripts.Script):
             )
         except Exception as e:
             print(f"[R UI] Error setting preview guard: {e}")
+
+
+try:
+    from modules import script_callbacks
+
+    def _ranbooru_on_model_loaded(sd_model):
+        try:
+            info = get_anima_model_info(sd_model)
+            Script._last_loaded_model_info = info
+        except Exception:
+            pass
+
+    script_callbacks.on_model_loaded(_ranbooru_on_model_loaded)
+except Exception:
+    pass

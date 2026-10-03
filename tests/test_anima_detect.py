@@ -53,6 +53,69 @@ def test_is_anima_model_multiple_attr_paths():
     assert is_anima_model(obj2) is True
 
 
+def test_is_anima_model_negative_fixtures():
+    """Negative fixtures: substrings of anima like Animate, AnimateDiff, animal must NOT detect as True."""
+    for fixture in (
+        "Wan2.2-Animate-2-14B.safetensors",
+        "AnimateDiff-motion.safetensors",
+        "animal_is_fine.safetensors",
+    ):
+        obj = _Obj()
+        obj.sd_model_checkpoint = fixture
+        assert is_anima_model(obj) is False, f"Expected False for {fixture}"
+
+
+def test_is_anima_model_forge_engine_attributes():
+    """Forge diffusion engines set sd_model.filename and sd_model.sd_checkpoint_info.filename."""
+    # Direct filename on engine
+    obj1 = _Obj()
+    obj1.filename = "C:/models/checkpoints/anima-base-v1.0.safetensors"
+    assert is_anima_model(obj1) is True
+
+    # Via sd_checkpoint_info
+    obj2 = _Obj()
+    obj2.sd_checkpoint_info = _Obj()
+    obj2.sd_checkpoint_info.filename = "D:/Forge/models/Anima-2.9B.safetensors"
+    assert is_anima_model(obj2) is True
+
+
+def test_identifier_ranking():
+    """Ranking: model_config > dynamic_args > class_name > filename."""
+    from ranboorux.anima_detect import ModelCapabilities
+
+    # 1. model_config takes precedence
+    obj1 = _Obj()
+    obj1.model_config = type("Anima", (), {"huggingface_repo": "circlestone-labs/Anima"})()
+    obj1.filename = "sd_xl_base_1.0.safetensors"  # non-anima filename
+    info1 = get_anima_model_info(obj1)
+    assert info1["detected"] is True
+    assert info1["method"] == "model_config"
+    assert isinstance(info1["capabilities"], ModelCapabilities)
+
+    # 2. dynamic_args takes precedence over class_name
+    obj2 = _Obj()
+    obj2.dynamic_args = _Obj()
+    obj2.dynamic_args.anima = True
+    info2 = get_anima_model_info(obj2)
+    assert info2["detected"] is True
+    assert info2["method"] == "dynamic_args"
+
+    # 3. class_name
+    obj3 = type("Anima", (), {})()
+    info3 = get_anima_model_info(obj3)
+    assert info3["detected"] is True
+    assert info3["method"] == "class_name"
+
+    # 4. filename
+    obj4 = _Obj()
+    obj4.filename = "anima-turbo-v1.0.safetensors"
+    info4 = get_anima_model_info(obj4)
+    assert info4["detected"] is True
+    assert info4["method"] == "filename"
+    assert info4["variant"] == "turbo"
+    assert info4["capabilities"].cfg_range == (1.0, 2.0)
+
+
 def test_anima_tune_img2img_can_be_disabled():
     import types
 
