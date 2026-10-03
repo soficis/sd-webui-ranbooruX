@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
 
 _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -715,6 +715,28 @@ def tag_matches_removal(normalized_tag: str, context: Optional[Dict[str, object]
     return False
 
 
+def _make_normalized_getter(
+    cache: Dict[str, str],
+    normalize_fn: Callable[[str], str] = normalize_tag,
+    catalog_resolve_alias_fn: Optional[Callable[[str], Optional[str]]] = None,
+) -> Callable[[str], str]:
+    def get_normalized_cached(tag_val: str) -> str:
+        cached = cache.get(tag_val)
+        if cached is not None:
+            return cached
+        normalized: str = str(normalize_fn(tag_val) or "")
+        if normalized:
+            if catalog_resolve_alias_fn:
+                catalog_token = normalized.replace(" ", "_")
+                canonical = catalog_resolve_alias_fn(catalog_token)
+                if canonical and canonical != catalog_token:
+                    normalized = canonical.replace("_", " ")
+        cache[tag_val] = normalized
+        return normalized
+
+    return get_normalized_cached
+
+
 def normalize_post_tags(
     post: Optional[Dict[str, object]],
     cache: Dict[str, str],
@@ -761,19 +783,9 @@ def normalize_post_tags(
         else:
             buckets[key] = []
 
-    def get_normalized_cached(tag_val: str) -> str:
-        cached = cache.get(tag_val)
-        if cached is not None:
-            return cached
-        normalized = normalize_tag(tag_val)
-        if normalized:
-            if catalog_resolve_alias_fn:
-                catalog_token = normalized.replace(" ", "_")
-                canonical = catalog_resolve_alias_fn(catalog_token)
-                if canonical and canonical != catalog_token:
-                    normalized = canonical.replace("_", " ")
-        cache[tag_val] = normalized
-        return normalized
+    get_normalized_cached = _make_normalized_getter(
+        cache, normalize_tag, catalog_resolve_alias_fn
+    )
 
     for key, values in buckets.items():
         cleaned: List[str] = []
@@ -822,20 +834,9 @@ def post_rejected_by_filter(
     base_hair, base_eye = base_colors
     _, buckets = normalize_post_tags(post, cache, catalog_resolve_alias_fn)
     primary_subject: Optional[str] = None
-
-    def get_normalized_cached(tag_val: str) -> str:
-        cached = cache.get(tag_val)
-        if cached is not None:
-            return cached
-        normalized = normalize_tag(tag_val)
-        if normalized:
-            if catalog_resolve_alias_fn:
-                catalog_token = normalized.replace(" ", "_")
-                canonical = catalog_resolve_alias_fn(catalog_token)
-                if canonical and canonical != catalog_token:
-                    normalized = canonical.replace("_", " ")
-        cache[tag_val] = normalized
-        return normalized
+    get_normalized_cached = _make_normalized_getter(
+        cache, normalize_tag, catalog_resolve_alias_fn
+    )
 
     for bucket_name, tags in buckets.items():
         for raw_tag in tags:
