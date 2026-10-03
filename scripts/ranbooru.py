@@ -3371,7 +3371,9 @@ class Script(scripts.Script):
             remove_series_tags,
         ) = settings
         current_prompt = f"{initial_additions},{raw_prompt}" if initial_additions else raw_prompt
-        prompt_tags = [tag.strip() for tag in re.split(r"[\,\t\s]+", current_prompt) if tag.strip()]
+        prompt_tags = [
+            tag.strip().lower() for tag in re.split(r"[\,\t\s]+", current_prompt) if tag.strip()
+        ]
         base_hair_colors = set(getattr(self, "_base_hair_color_tags", set()) or [])
         base_eye_colors = set(getattr(self, "_base_eye_color_tags", set()) or [])
         # If removal flags are set, remove tags coming from selected post's artist/character lists
@@ -3457,7 +3459,7 @@ class Script(scripts.Script):
                 t_orig = (t or "").strip().lower()
                 is_favorite = bool(t_norm and t_norm in favorites_guard)
                 if is_favorite:
-                    filtered_prompt_tags.append(t)
+                    filtered_prompt_tags.append(self._strip_disambiguator(t))
                     continue
                 should_remove = False
                 if remove_artist_tags and (
@@ -3535,13 +3537,13 @@ class Script(scripts.Script):
                 if not should_remove and filter_ctx and t_norm:
                     should_remove = self._tag_matches_removal(t_norm, filter_ctx)
                 if not should_remove:
-                    filtered_prompt_tags.append(t)
+                    filtered_prompt_tags.append(self._strip_disambiguator(t))
             prompt_tags = filtered_prompt_tags
         except Exception:
             # fallback: ignore removal if anything goes wrong
             pass
-        current_prompt = ",".join(prompt_tags)
-        if shuffle_tags:
+        current_prompt = ",".join(self._strip_disambiguator(t) for t in prompt_tags)
+        if shuffle_tags and not getattr(self, "_is_anima_model", False):
             tags_list = [t.strip() for t in current_prompt.split(",") if t.strip()]
             random.shuffle(tags_list)
             current_prompt = ",".join(tags_list)
@@ -3561,8 +3563,8 @@ class Script(scripts.Script):
                 current_prompt, max_tags_count, "Max"
             )
         if change_dash:
-            current_prompt = current_prompt.replace("_", " ")
-            current_negative = current_negative.replace("_", " ")
+            current_prompt = self._transform_dash_preserve_score(current_prompt)
+            current_negative = self._transform_dash_preserve_score(current_negative)
         if base_positive:
             current_prompt = (
                 f"{base_positive}, {current_prompt}" if current_prompt else base_positive
@@ -3714,10 +3716,15 @@ class Script(scripts.Script):
                 self.img2img_denoising = min(0.5, self.img2img_denoising)
                 initial_steps = max(8, min(15, p.steps // 3))
                 self._host_scope.set_attr(p, "steps", initial_steps)
-                p.cfg_scale = max(3.0, min(p.cfg_scale, 6.0))
+                variant = getattr(self, "_anima_model_variant", "base")
+                if variant == "turbo":
+                    tuned_cfg = max(1.0, min(self.original_cfg, 6.0))
+                else:
+                    tuned_cfg = max(3.0, min(self.original_cfg, 6.0))
+                self._host_scope.set_attr(p, "cfg_scale", tuned_cfg)
                 print(
                     f"[R] Anima: using flow-matching optimized parameters "
-                    f"(denoise={self.img2img_denoising}, steps={initial_steps}, cfg={p.cfg_scale})"
+                    f"(denoise={self.img2img_denoising}, steps={initial_steps}, cfg={tuned_cfg})"
                 )
 
             self.run_img2img_pass = True
@@ -3975,8 +3982,50 @@ class Script(scripts.Script):
             )
 
     @staticmethod
-    def _anima_quality_prefix() -> str:
+    def _transform_dash_preserve_score(text: str) -> str:
+        """Replace underscores with spaces except for score_* tags (e.g. score_7, score_1)."""
+        if not text:
+            return ""
+        return re.sub(
+            r"(?<![a-zA-Z0-9])score_\d+(?![a-zA-Z0-9])|_",
+            lambda m: m.group(0) if m.group(0).lower().startswith("score_") else " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+    @staticmethod
+    def _strip_disambiguator(tag: str) -> str:
+        """Strip booru disambiguator like _(vocaloid) from tag to prevent unintended attention syntax."""
+        if not tag:
+            return ""
+        if "(" in tag and ")" in tag and not tag.strip().startswith("("):
+            return re.sub(r"[_ ]*\([^)]+\)$", "", tag).strip()
+        return tag
+
+    @staticmethod
+    def _resolve_anima_variant(model_name: str) -> str:
+        """Derive Anima variant from model/checkpoint name."""
+        if not model_name:
+            return "base"
+        name = model_name.lower()
+        if "aesthetic" in name:
+            return "aesthetic"
+        if "turbo" in name:
+            return "turbo"
+        if "2.9b" in name:
+            return "2.9b"
+        if "3.8b" in name:
+            return "3.8b"
+        return "base"
+
+    def _anima_quality_prefix(self=None, variant: Optional[str] = None) -> str:
         """Return Anima's recommended positive quality prefix."""
+        if isinstance(self, str) and variant is None:
+            variant = self
+            self = None
+        var = variant or getattr(self, "_anima_model_variant", "base")
+        if var == "aesthetic":
+            return "masterpiece, best quality, safe, "
         return "masterpiece, best quality, score_7, safe, "
 
     @staticmethod
@@ -3986,7 +4035,7 @@ class Script(scripts.Script):
 
     @staticmethod
     def _has_quality_prefix(prompt: str) -> bool:
-        """Check if prompt already has quality tokens (case-insensitive)."""
+        """Check if prompt already has quality tokens (case-insensitive exact token match)."""
         if not prompt:
             return False
         quality_tokens = {
@@ -3996,10 +4045,13 @@ class Script(scripts.Script):
             "score_7",
             "score_8",
             "score_9",
+            "score 7",
+            "score 8",
+            "score 9",
             "safe",
         }
-        first_10 = [t.strip().lower() for t in prompt.split(",")[:10]]
-        return any(token in tag for token in quality_tokens for tag in first_10)
+        tags = [t.strip().lower() for t in prompt.split(",") if t.strip()]
+        return any(tag in quality_tokens for tag in tags)
 
     def before_process(self, p: StableDiffusionProcessing, *args):
         try:
@@ -4181,14 +4233,19 @@ class Script(scripts.Script):
             info = get_anima_model_info(shared.sd_model)
             self._is_anima_model = info["detected"]
             if self._is_anima_model:
+                self._anima_model_variant = info.get("variant") or self._resolve_anima_variant(
+                    info.get("model_name", "")
+                )
                 anima_auto_detect = getattr(options, "anima_auto_detect", True)
                 if anima_auto_detect:
                     change_dash = True
+                    shuffle_tags = False
                     print(
-                        f"[R] Anima model detected ({info['model_name']}) - auto-enabling space-separated tags"
+                        f"[R] Anima model detected ({info['model_name']}, variant={self._anima_model_variant}) - auto-enabling space-separated tags and disabling tag shuffling"
                     )
         except Exception:
             self._is_anima_model = False
+            self._anima_model_variant = "base"
 
         self._current_booru_name = booru
         if booru == "gelbooru":
