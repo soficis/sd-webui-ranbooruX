@@ -40,7 +40,7 @@ from ranboorux import run_options as rb_run_options
 from ranboorux import tag_pipeline as rb_tag_pipeline
 from ranboorux import user_store as rb_user_store
 from ranboorux.anima_detect import get_anima_model_info
-from ranboorux.safe_paths import contained_path
+from ranboorux.safe_paths import contained_path, safe_join
 from ranboorux.boorus import Booru
 from ranboorux.integrations import adetailer as rb_adetailer_integration
 from ranboorux.integrations import adetailer_orchestration as rb_adetailer_orch
@@ -2741,8 +2741,41 @@ class Script(scripts.Script):
 
     def _resolve_lora_target_folder(self, lora_folder: Optional[str]) -> str:
         lora_dir = self._get_lora_base_dir()
+        if not lora_dir:
+            return ""
         folder = (lora_folder or "").strip()
-        return os.path.join(lora_dir, folder) if folder else lora_dir
+        if not folder:
+            return lora_dir
+        try:
+            return str(safe_join(lora_dir, folder))
+        except ValueError:
+            clean_name = os.path.basename(folder)
+            print(f"[Ranbooru] Warn: Refused uncontained LoRA folder: {clean_name}")
+            return ""
+
+    def _read_remove_file(self, remove_file: str) -> List[str]:
+        if not remove_file:
+            return []
+        try:
+            clean_name = os.path.basename(str(remove_file).strip())
+            filepath = safe_join(USER_REMOVE_DIR, clean_name)
+            with open(filepath, "r", encoding="utf-8") as f:
+                return [t.strip() for t in f.read().split(",") if t.strip()]
+        except Exception as e:
+            print(f"[R] Warn: Read remove file failed {os.path.basename(str(remove_file))}: {e}")
+            return []
+
+    def _read_search_file(self, search_file: str) -> List[str]:
+        if not search_file:
+            return []
+        try:
+            clean_name = os.path.basename(str(search_file).strip())
+            filepath = safe_join(USER_SEARCH_DIR, clean_name)
+            with open(filepath, "r", encoding="utf-8") as f:
+                return [line.strip() for line in f.readlines() if line.strip()]
+        except Exception as e:
+            print(f"[R] Warn: Read search file failed {os.path.basename(str(search_file))}: {e}")
+            return []
 
     def _read_safetensors_metadata(self, file_path: str) -> Dict[str, object]:
         try:
@@ -2828,7 +2861,7 @@ class Script(scripts.Script):
                 "all_names": [],
                 "detected_files": [],
                 "detected_names": [],
-                "message": f"LoRA folder not found: {target_folder}",
+                "message": f"LoRA folder not found: {os.path.basename(target_folder)}",
             }
         try:
             all_files = sorted(
@@ -2853,7 +2886,7 @@ class Script(scripts.Script):
                 "all_names": [],
                 "detected_files": [],
                 "detected_names": [],
-                "message": f"No .safetensors files found in {target_folder}",
+                "message": f"No .safetensors files found in {os.path.basename(target_folder)}",
             }
 
         snapshot: List[Tuple[str, float, int]] = []
@@ -2884,7 +2917,7 @@ class Script(scripts.Script):
             "all_names": [os.path.splitext(file_name)[0] for file_name in all_files],
             "detected_files": detected_files,
             "detected_names": [os.path.splitext(file_name)[0] for file_name in detected_files],
-            "message": f"Scanned {len(all_files)} LoRA(s) in {target_folder}",
+            "message": f"Scanned {len(all_files)} LoRA(s) in {os.path.basename(target_folder)}",
         }
         self._loranado_scan_cache[target_folder] = {
             "snapshot": snapshot_key,
@@ -2902,13 +2935,14 @@ class Script(scripts.Script):
         scan = self._scan_loranado_candidates(lora_folder)
         all_names = list(scan.get("all_names") or [])
         detected_names = list(scan.get("detected_names") or [])
+        folder_display = os.path.basename(scan.get("target_folder", "") or "") or "root"
         if auto_detect_pony:
             choice_names = detected_names or all_names
             if detected_names:
-                status = f"Detected {len(detected_names)} PonyXL-compatible LoRAs in `{scan.get('target_folder', '')}`."
+                status = f"Detected {len(detected_names)} PonyXL-compatible LoRAs in `{folder_display}`."
             elif all_names:
                 status = (
-                    f"No PonyXL markers detected in `{scan.get('target_folder', '')}`. "
+                    f"No PonyXL markers detected in `{folder_display}`. "
                     f"Falling back to all {len(all_names)} LoRAs."
                 )
             else:
@@ -2916,7 +2950,7 @@ class Script(scripts.Script):
         else:
             choice_names = all_names
             if all_names:
-                status = f"Auto-detect disabled. {len(all_names)} LoRAs available in `{scan.get('target_folder', '')}`."
+                status = f"Auto-detect disabled. {len(all_names)} LoRAs available in `{folder_display}`."
             else:
                 status = scan.get("message") or "No LoRAs found."
 
@@ -3125,15 +3159,9 @@ class Script(scripts.Script):
         if ui_remove_tags:
             bad_tags.update([t.strip() for t in ui_remove_tags.split(",") if t.strip()])
         if use_remove_file and remove_file:
-            try:
-                filepath = os.path.join(USER_REMOVE_DIR, remove_file)
-                print(f"[R] Reading remove tags: {filepath}")
-                with open(filepath, "r", encoding="utf-8") as f:
-                    read_tags = [t.strip() for t in f.read().split(",") if t.strip()]
-                    print(f"[R] Tags read: {read_tags}")
-                    bad_tags.update(read_tags)
-            except Exception as e:
-                print(f"[R] Warn: Read remove file failed {remove_file}: {e}")
+            read_tags = self._read_remove_file(remove_file)
+            if read_tags:
+                bad_tags.update(read_tags)
         initial_additions = []
         bg_remove = set()
         color_remove = set()
@@ -3162,23 +3190,18 @@ class Script(scripts.Script):
         initial_additions_str = ",".join(initial_additions)
         search_tags = ui_tags
         if use_search_file and search_file:
-            try:
-                filepath = os.path.join(USER_SEARCH_DIR, search_file)
-                print(f"[R] Reading search tags: {filepath}")
-                with open(filepath, "r", encoding="utf-8") as f:
-                    search_lines = [line.strip() for line in f.readlines() if line.strip()]
-                    if search_lines:
-                        selected_file_tags = random.choice(search_lines)
-                        search_tags = (
-                            f"{search_tags},{selected_file_tags}"
-                            if search_tags
-                            else selected_file_tags
-                        )
-                        print(f"[R] Added file tags: {selected_file_tags}")
-                    else:
-                        print(f"[R] Warn: Search file empty: '{search_file}'")
-            except Exception as e:
-                print(f"[R] Warn: Read search file failed {search_file}: {e}")
+            search_lines = self._read_search_file(search_file)
+            if search_lines:
+                selected_file_tags = random.choice(search_lines)
+                search_tags = (
+                    f"{search_tags},{selected_file_tags}"
+                    if search_tags
+                    else selected_file_tags
+                )
+                print(f"[R] Added file tags: {selected_file_tags}")
+            else:
+                clean_name = os.path.basename(str(search_file).strip())
+                print(f"[R] Warn: Search file empty: '{clean_name}'")
         return search_tags, bad_tags, initial_additions_str
 
     def _get_booru_api(
