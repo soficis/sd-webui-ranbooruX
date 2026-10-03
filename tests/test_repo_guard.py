@@ -13,3 +13,9 @@ def test_repo_guard_explicit_paths_still_checked_without_git_metadata(tmp_path):
     files = repo_guard.get_files_to_check(tmp_path, ["scripts/ranbooru.py"])
 
     assert files == ["scripts/ranbooru.py"]
+
+
+def test_repo_guard_gemini_unblocks_monolith_and_integrations():
+    assert repo_guard.check_files(["scripts/ranbooru.py"], repo_guard.FORBIDDEN_BY_MODE["gemini"]) == []
+    assert repo_guard.check_files(["ranboorux/integrations/adetailer.py"], repo_guard.FORBIDDEN_BY_MODE["gemini"]) == []
+    assert repo_guard.FORBIDDEN_BY_MODE["codex"] == ()

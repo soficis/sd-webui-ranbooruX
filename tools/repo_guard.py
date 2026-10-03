@@ -8,12 +8,8 @@ from pathlib import Path
 from typing import Iterable, List, Sequence
 
 FORBIDDEN_BY_MODE = {
-    "gemini": (
-        "scripts/ranbooru.py",
-        "ranboorux/integrations/",
-        "adetailer/",
-    ),
-    "codex": ("adetailer/",),
+    "gemini": (),
+    "codex": (),
 }
 
 
