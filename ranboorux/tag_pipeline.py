@@ -27,9 +27,12 @@ class PromptRules:
     remove_headwear_tags: bool = False
     preserve_hair_eye_colors: bool = False
     remove_series_tags: bool = False
+    remove_girl_suffix_tags: bool = False
 
     @classmethod
     def from_legacy_tuple(cls, t: tuple) -> PromptRules:
+        if len(t) == 15:
+            return cls(*t, False)
         return cls(*t)
 
 

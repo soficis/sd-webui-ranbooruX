@@ -370,3 +370,68 @@ def test_prompt_rules_and_filter_toggles_equivalence():
     assert rej_tup == rej_obj is True
     assert reason_tup == reason_obj
 
+
+def test_filter_rule_divergence_characterization():
+    """Characterize current divergence between _process_single_prompt and post_rejected_by_filter.
+
+    1. ' drawn by' tags: post_rejected_by_filter rejects them via remove_artist,
+       whereas _process_single_prompt currently retains them unless present in artist_norm.
+    2. girl-suffix tags: post_rejected_by_filter rejects them via remove_girl_suffix,
+       whereas _process_single_prompt has no girl-suffix rule and retains them.
+    """
+    import scripts.ranbooru as ranbooru
+    from ranboorux.tag_pipeline import FilterToggles, PromptRules, post_rejected_by_filter
+
+    script = ranbooru.Script()
+
+    # Case 1: " drawn by" artist tag without post metadata
+    post_drawn_by = {"tags": "art_drawn_by_alice"}
+    rej_drawn, reason_drawn = post_rejected_by_filter(
+        post_drawn_by,
+        filter_ctx=None,
+        toggles=FilterToggles(remove_artist=True),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache={},
+        favorites_guard=set(),
+    )
+    assert rej_drawn is True
+    assert reason_drawn["rule"] == "artist"
+
+    prompt_out_drawn, _ = script._process_single_prompt(
+        0,
+        "art_drawn_by_alice",
+        "",
+        "",
+        "",
+        PromptRules(remove_artist_tags=True),
+    )
+    # CURRENT DIVERGENCE: _process_single_prompt keeps "art_drawn_by_alice"
+    assert "art_drawn_by_alice" in prompt_out_drawn
+
+    # Case 2: girl-suffix tag like "cat_girl"
+    post_cat_girl = {"tags": "cat_girl"}
+    rej_girl, reason_girl = post_rejected_by_filter(
+        post_cat_girl,
+        filter_ctx=None,
+        toggles=FilterToggles(remove_girl_suffix=True),
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache={},
+        favorites_guard=set(),
+    )
+    assert rej_girl is True
+    assert reason_girl["rule"] == "girl-suffix"
+
+    prompt_out_girl, _ = script._process_single_prompt(
+        0,
+        "cat_girl",
+        "",
+        "",
+        "",
+        PromptRules(remove_girl_suffix_tags=True),
+    )
+    # CURRENT DIVERGENCE: _process_single_prompt does not have girl-suffix rule yet and keeps "cat_girl"
+    assert "cat_girl" in prompt_out_girl
+
+
