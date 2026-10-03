@@ -121,7 +121,6 @@ ADD_BG = ["outdoors", "indoors"]
 BW_BG = ["monochrome", "greyscale", "grayscale"]
 POST_AMOUNT = 100
 COUNT = 100
-DEBUG = False
 MAX_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_SOURCE_IMAGE_PIXELS = 50_000_000
 MAX_SOURCE_IMAGE_FRAMES = 1
@@ -5334,49 +5333,15 @@ class Script(scripts.Script):
             print(
                 f"[R Post] Updated processed object with {len(all_img2img_results)} img2img results"
             )
-            # DEBUG: Add comprehensive logging to trace what ADetailer will see
             # CRITICAL: Force UI to display our final results
             self._force_ui_update(p, processed, all_img2img_results)
 
             print(
                 "[R Post] RanbooruX processing complete - final results ready for UI and other extensions"
             )
-            print(
-                f"[R Post DEBUG] Final processed.images count: {len(processed.images) if hasattr(processed, 'images') else 'NO IMAGES ATTR'}"
-            )
-            if hasattr(processed, "images") and processed.images:
-                for i, img in enumerate(processed.images[:3]):  # Show first 3 images
-                    if img:
-                        print(
-                            f"[R Post DEBUG] Image {i}: {type(img)} size={getattr(img, 'size', 'unknown')}"
-                        )
-                    else:
-                        print(f"[R Post DEBUG] Image {i}: None")
-            else:
-                print("[R Post DEBUG] WARNING: No images in processed.images!")
-
-            # DEBUG: Check all image attributes
-            debug_attrs = [
-                "images",
-                "images_list",
-                "output_images",
-                "_cached_images",
-                "cached_images",
-            ]
-            for attr in debug_attrs:
-                if hasattr(processed, attr):
-                    val = getattr(processed, attr)
-                    if isinstance(val, list):
-                        print(f"[R Post DEBUG] {attr}: list with {len(val)} items")
-                    else:
-                        print(f"[R Post DEBUG] {attr}: {type(val)}")
-                else:
-                    print(f"[R Post DEBUG] {attr}: not present")
 
         except Exception as e:
             print(f"[R Post] Critical error during img2img processing: {e}")
-            import traceback
-
             traceback.print_exc()
             try:
                 # Attempt to preserve original images if img2img fails

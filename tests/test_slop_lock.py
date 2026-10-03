@@ -119,6 +119,71 @@ def test_lock_postprocess_shape():
     assert processed.images == ["txt2img_res"]
 
 
+def test_postprocess_no_debug_stdout(capsys, monkeypatch):
+    import scripts.ranbooru as ranbooru
+
+    script = _make_script()
+    script._post_enabled = True
+    script._post_use_img2img = True
+    script._post_use_last_img = False
+    script._post_crop_center = True
+    script._post_use_cache = False
+    script._post_adetailer_enabled = False
+    script._adetailer_support_enabled = False
+    script.run_img2img_pass = True
+    script.real_steps = 1
+    script.last_img = [Image.new("RGB", (64, 64))]
+    script._img2img_final_outpath_samples = "outputs"
+    script._img2img_final_batch_size = 1
+
+    p = _processing()
+    p.sampler_name = "Euler"
+
+    class DummyImg2Img:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(ranbooru, "StableDiffusionProcessingImg2Img", DummyImg2Img)
+    monkeypatch.setattr(
+        ranbooru,
+        "process_images",
+        lambda proc: types.SimpleNamespace(
+            images=[proc.init_images[0]],
+            infotexts=["info"],
+            seed=0,
+            subseed=0,
+        ),
+    )
+    monkeypatch.setattr(ranbooru.rb_image_ops, "resize_image", lambda img, *_args, **_kwargs: img)
+    monkeypatch.setattr(script, "_force_ui_update", lambda *_args, **_kwargs: None)
+
+    ranbooru.shared.sd_model = object()
+    ranbooru.shared.opts = types.SimpleNamespace(
+        outdir_samples="outputs",
+        outdir_img2img_samples="outputs",
+        outdir_grids="outputs",
+        outdir_img2img_grids="outputs",
+    )
+
+    processed = types.SimpleNamespace(
+        images=[Image.new("RGB", (64, 64))],
+        prompt="prompt",
+        negative_prompt="",
+        seed=10,
+        subseed=20,
+        infotexts=["info"],
+        all_prompts=[],
+        all_negative_prompts=[],
+        all_seeds=[],
+        all_subseeds=[],
+    )
+
+    script.postprocess(p, processed)
+
+    captured = capsys.readouterr()
+    assert "[R Post DEBUG]" not in captured.out
+
+
 # Lock Test (b): Tier 4a delegators equivalence on canned input
 def test_lock_delegators_tier4a_equivalence():
     import scripts.ranbooru as ranbooru
