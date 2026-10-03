@@ -61,6 +61,13 @@ USER_SEARCH_DIR = os.path.join(USER_DATA_DIR, "search")
 
 SERIES_CATEGORY = rb_tag_pipeline.SERIES_CATEGORY
 CHARACTER_CATEGORY = rb_tag_pipeline.CHARACTER_CATEGORY
+
+DEBUG: bool = os.getenv("RANBOORU_DEBUG", "0").lower() in ("1", "true", "yes")
+
+
+def _print_debug_traceback() -> None:
+    if DEBUG:
+        traceback.print_exc()
 USER_REMOVE_DIR = os.path.join(USER_DATA_DIR, "remove")
 LOG_DIR = os.path.join(USER_DATA_DIR, "logs")
 os.makedirs(USER_SEARCH_DIR, exist_ok=True)
@@ -1913,7 +1920,8 @@ class Script(scripts.Script):
             if not candidate:
                 return _gr_component_update(gr.Markdown, value="Validation failed: No catalog file provided")
             ok, message = self._validate_csv_format(candidate)
-            status = f"Validation passed: {message}" if ok else f"Validation failed: {message}"
+            sanitized_msg = rb_http_client.sanitize_exception_text(message)
+            status = f"Validation passed: {sanitized_msg}" if ok else f"Validation failed: {sanitized_msg}"
             return _gr_component_update(gr.Markdown, value=status)
 
         def _ui_import_custom_catalog(uploaded, path_value):
@@ -1933,7 +1941,9 @@ class Script(scripts.Script):
                         value=self._custom_catalog_path,
                         visible=bool(self._use_tag_catalog and self._catalog_source == "custom"),
                     ),
-                    _gr_component_update(gr.Markdown, value=message),
+                    _gr_component_update(
+                        gr.Markdown, value=rb_http_client.sanitize_exception_text(message)
+                    ),
                 )
             self._tag_catalog_status_text = self._format_catalog_status()
             self._update_tag_diag()
@@ -3229,11 +3239,13 @@ class Script(scripts.Script):
                 raise ValueError("No valid posts found matching criteria after fetching.")
             return all_posts, tags_query
         except BooruError as e:
-            print(f"[R] Error fetching from {api.booru_name}: {e}")
+            sanitized = rb_http_client.sanitize_exception_text(str(e))
+            print(f"[R] Error fetching from {api.booru_name}: {sanitized}")
             raise
         except Exception as e:
-            print(f"[R] Unexpected error during fetch: {e}")
-            raise BooruError(f"Unexpected fetch error: {e}") from e
+            sanitized = rb_http_client.sanitize_exception_text(str(e))
+            print(f"[R] Unexpected error during fetch: {sanitized}")
+            raise BooruError(f"Unexpected fetch error: {sanitized}") from e
 
     def _select_posts(self, all_posts, sorting_order, num_images_needed, post_id, same_prompt):
         if not all_posts:
@@ -4189,7 +4201,7 @@ class Script(scripts.Script):
             lora_blacklist_ui = options.lora_blacklist
         except Exception as e:
             print(f"[R Before] CRITICAL Error unpack args: {e}. Aborting.")
-            traceback.print_exc()
+            _print_debug_traceback()
             self._abort_before_process_run("script argument parsing failed", p)
             return
 
@@ -4753,7 +4765,7 @@ class Script(scripts.Script):
 
         except Exception as e:
             print(f"[Ranbooru BeforeProcess] UNEXPECTED ERROR: {e}")
-            traceback.print_exc()
+            _print_debug_traceback()
             self._abort_before_process_run("before_process failed", p)
             return
 
@@ -5228,7 +5240,7 @@ class Script(scripts.Script):
 
         except Exception as e:
             print(f"[R Post] Critical error during img2img processing: {e}")
-            traceback.print_exc()
+            _print_debug_traceback()
             try:
                 # Attempt to preserve original images if img2img fails
                 if hasattr(self, "last_img") and self.last_img:

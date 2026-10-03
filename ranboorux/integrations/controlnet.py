@@ -6,6 +6,7 @@ import os
 from types import ModuleType
 
 from ranboorux.http_client import sanitize_exception_text
+from ranboorux.safe_paths import safe_join
 
 logger = logging.getLogger("ranboorux")
 
@@ -36,8 +37,38 @@ def load_external_code(extension_root: str) -> ModuleType:
     try:
         env_root = os.environ.get("SD_FORGE_CONTROLNET_PATH") or os.environ.get("RANBOORUX_CN_PATH")
         if env_root:
-            env_path = os.path.join(env_root, "lib_controlnet", "external_code.py")
-            if os.path.isfile(env_path):
+            # SECURITY NOTE: This path leads directly to importlib.util.spec_from_file_location
+            # and spec.loader.exec_module(). To prevent path traversal and arbitrary code
+            # execution, the path must resolve (via safe_join) under an allowed candidate root
+            # with the fixed suffix ('lib_controlnet', 'external_code.py').
+            env_path = None
+            if os.path.isabs(env_root):
+                try:
+                    resolved_base = os.path.abspath(env_root)
+                    env_path = str(safe_join(resolved_base, "lib_controlnet", "external_code.py"))
+                except (ValueError, OSError):
+                    env_path = None
+            else:
+                candidate_roots = [extension_root]
+                try:
+                    from modules import paths as webui_paths
+
+                    w_root = getattr(webui_paths, "script_path", None)
+                    if w_root:
+                        candidate_roots.append(w_root)
+                except Exception:
+                    pass
+                for root in candidate_roots:
+                    try:
+                        resolved_cand = safe_join(root, env_root)
+                        env_path = str(
+                            safe_join(resolved_cand, "lib_controlnet", "external_code.py")
+                        )
+                        break
+                    except (ValueError, OSError):
+                        continue
+
+            if env_path and os.path.isfile(env_path):
                 return _load_module_from_path(
                     "sd_forge_controlnet.lib_controlnet.external_code",
                     env_path,

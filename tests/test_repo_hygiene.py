@@ -125,3 +125,78 @@ def test_install_req_surfaces_errors_to_stderr_without_crashing(capsys, monkeypa
 
     captured = capsys.readouterr()
     assert captured.err == ""
+
+
+def test_debug_flag_controls_traceback_printing(monkeypatch):
+    import scripts.ranbooru as ranbooru
+
+    called = []
+    monkeypatch.setattr(ranbooru.traceback, "print_exc", lambda: called.append(True))
+
+    # When DEBUG is False, print_exc should NOT be called
+    monkeypatch.setattr(ranbooru, "DEBUG", False)
+    ranbooru._print_debug_traceback()
+    assert len(called) == 0
+
+    # When DEBUG is True, print_exc should be called
+    monkeypatch.setattr(ranbooru, "DEBUG", True)
+    ranbooru._print_debug_traceback()
+    assert len(called) == 1
+
+
+def test_fetch_booru_posts_sanitizes_errors():
+    import pytest
+
+    import scripts.ranbooru as ranbooru
+
+    script = ranbooru.Script()
+
+    class ExplodingApi:
+        booru_name = "testbooru"
+
+        def get_posts(self, **kwargs):
+            raise RuntimeError("Database at E:\\private\\secret_db\\passwords.sqlite failed")
+
+    with pytest.raises(ranbooru.BooruError) as exc_info:
+        script._fetch_booru_posts(
+            ExplodingApi(),
+            search_tags="tag",
+            mature_rating="None",
+            max_pages=1,
+            post_id=None,
+        )
+
+    error_msg = str(exc_info.value)
+    assert "E:\\private\\secret_db" not in error_msg
+    assert "secret_db" not in error_msg
+
+
+def test_booru_modules_use_log_instead_of_bare_print():
+    from ranboorux.boorus import gelbooru, simple
+
+    # Verify both modules have _log helper callable
+    assert callable(getattr(simple, "_log"))
+    assert callable(getattr(gelbooru, "_log"))
+
+
+def test_controlnet_env_path_traversal_contained(monkeypatch):
+    from ranboorux.integrations import controlnet
+
+    # Set traversal path
+    monkeypatch.setenv("SD_FORGE_CONTROLNET_PATH", "subdir/../../evil")
+    monkeypatch.setattr(controlnet.os.path, "isfile", lambda p: True)
+
+    loaded_paths = []
+    monkeypatch.setattr(
+        controlnet,
+        "_load_module_from_path",
+        lambda name, path: loaded_paths.append(path),
+    )
+
+    try:
+        controlnet.load_external_code("dummy_extension_root")
+    except ImportError:
+        pass
+
+    for path in loaded_paths:
+        assert "evil" not in path

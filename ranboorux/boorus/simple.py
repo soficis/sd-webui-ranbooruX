@@ -3,6 +3,18 @@ import random
 from ranboorux.boorus import Booru
 
 
+def _log(message: object) -> None:
+    try:
+        from scripts.ranbooru import _log as rb_log
+
+        rb_log(message)
+    except (ImportError, AttributeError):
+        msg_str = str(message)
+        if not msg_str.startswith("[R]"):
+            msg_str = f"[R] {msg_str}"
+        print(msg_str)
+
+
 class Danbooru(Booru):
     def __init__(self):
         from scripts.ranbooru import POST_AMOUNT
@@ -20,7 +32,7 @@ class Danbooru(Booru):
             if isinstance(fetched_data, dict) and "id" in fetched_data:
                 all_fetched_posts = [fetched_data]
             _r.COUNT = len(all_fetched_posts)
-            print(f"[R] Found {_r.COUNT} post(s) for ID: {post_id}")
+            _log(f"[R] Found {_r.COUNT} post(s) for ID: {post_id}")
         else:
             page = random.randint(1, max_pages)
             query_url = f"{self.base_api_url}&page={page}{tags_query}"
@@ -28,7 +40,7 @@ class Danbooru(Booru):
             if isinstance(fetched_data, list):
                 all_fetched_posts = fetched_data
             _r.COUNT = len(all_fetched_posts)
-            print(f"[R] Fetched {_r.COUNT} posts from page {page}.")
+            _log(f"[R] Fetched {_r.COUNT} posts from page {page}.")
         return [self._standardize_post(post) for post in all_fetched_posts if post]
 
 
@@ -58,7 +70,7 @@ class XBooru(Booru):
             if isinstance(fetched_data, list):
                 all_fetched_posts = fetched_data
         _r.COUNT = len(all_fetched_posts)
-        print(f"[R] Fetched {_r.COUNT} posts from XBooru.")
+        _log(f"[R] Fetched {_r.COUNT} posts from XBooru.")
         standardized_posts = []
         for post_data in all_fetched_posts:
             post = self._standardize_post(post_data)
@@ -96,7 +108,7 @@ class Rule34(Booru):
             if isinstance(fetched_data, list):
                 all_fetched_posts = fetched_data
         _r.COUNT = len(all_fetched_posts)
-        print(f"[R] Fetched {_r.COUNT} posts from Rule34.")
+        _log(f"[R] Fetched {_r.COUNT} posts from Rule34.")
         return [self._standardize_post(post) for post in all_fetched_posts]
 
 
@@ -126,7 +138,7 @@ class Safebooru(Booru):
             if isinstance(fetched_data, list):
                 all_fetched_posts = fetched_data
         _r.COUNT = len(all_fetched_posts)
-        print(f"[R] Fetched {_r.COUNT} posts from Safebooru.")
+        _log(f"[R] Fetched {_r.COUNT} posts from Safebooru.")
         standardized_posts = []
         for post_data in all_fetched_posts:
             post = self._standardize_post(post_data)
@@ -150,7 +162,7 @@ class Konachan(Booru):
         _r.COUNT = 0
         all_fetched_posts = []
         if post_id:
-            print("[R] Warn: Konachan does not support post IDs.")
+            _log("[R] Warn: Konachan does not support post IDs.")
             return []
         page = random.randint(1, max_pages)
         query_url = f"{self.base_api_url}&page={page}{tags_query}"
@@ -158,7 +170,7 @@ class Konachan(Booru):
         if isinstance(fetched_data, list):
             all_fetched_posts = fetched_data
         _r.COUNT = len(all_fetched_posts)
-        print(f"[R] Fetched {_r.COUNT} posts from Konachan.")
+        _log(f"[R] Fetched {_r.COUNT} posts from Konachan.")
         return [self._standardize_post(post) for post in all_fetched_posts]
 
 
@@ -174,7 +186,7 @@ class Yandere(Booru):
         _r.COUNT = 0
         all_fetched_posts = []
         if post_id:
-            print("[R] Warn: Yandere does not support post IDs.")
+            _log("[R] Warn: Yandere does not support post IDs.")
             return []
         page = random.randint(1, max_pages)
         query_url = f"{self.base_api_url}&page={page}{tags_query}"
@@ -182,7 +194,7 @@ class Yandere(Booru):
         if isinstance(fetched_data, list):
             all_fetched_posts = fetched_data
         _r.COUNT = len(all_fetched_posts)
-        print(f"[R] Fetched {_r.COUNT} posts from Yandere.")
+        _log(f"[R] Fetched {_r.COUNT} posts from Yandere.")
         return [self._standardize_post(post) for post in all_fetched_posts]
 
 
@@ -198,7 +210,7 @@ class AIBooru(Booru):
         _r.COUNT = 0
         all_fetched_posts = []
         if post_id:
-            print("[R] Warn: AIBooru does not support post IDs.")
+            _log("[R] Warn: AIBooru does not support post IDs.")
             return []
         page = random.randint(1, max_pages)
         query_url = f"{self.base_api_url}&page={page}{tags_query}"
@@ -206,7 +218,7 @@ class AIBooru(Booru):
         if isinstance(fetched_data, list):
             all_fetched_posts = fetched_data
         _r.COUNT = len(all_fetched_posts)
-        print(f"[R] Fetched {_r.COUNT} posts from AIBooru.")
+        _log(f"[R] Fetched {_r.COUNT} posts from AIBooru.")
         standardized_posts = []
         for post_data in all_fetched_posts:
             post = self._standardize_post(post_data)
@@ -227,7 +239,7 @@ class e621(Booru):
         _r.COUNT = 0
         all_fetched_posts = []
         if post_id:
-            print("[R] Warn: e621 does not support post IDs.")
+            _log("[R] Warn: e621 does not support post IDs.")
             return []
         page = random.randint(1, max_pages)
         query_url = f"{self.base_api_url}&page={page}{tags_query}"
@@ -239,7 +251,7 @@ class e621(Booru):
         ):
             all_fetched_posts = fetched_data["posts"]
         _r.COUNT = len(all_fetched_posts)
-        print(f"[R] Fetched {_r.COUNT} posts from e621.")
+        _log(f"[R] Fetched {_r.COUNT} posts from e621.")
         standardized_posts = []
         for post_data in all_fetched_posts:
             post = self._standardize_post(post_data)
