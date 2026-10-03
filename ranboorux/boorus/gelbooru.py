@@ -259,16 +259,3 @@ class GelbooruCompatible(Booru):
             standardized.append(normalized)
         return standardized
 
-    def get_tags(self, name_pattern: Optional[str] = None, limit: int = 100) -> List[dict]:
-        query = f"{self._tag_endpoint}&limit={limit}"
-        if name_pattern:
-            query += f"&name_pattern={quote_plus(name_pattern)}"
-        tags, _ = self._request_dapi(query, "tag")
-        return tags
-
-    def get_tag_aliases(self, name_pattern: Optional[str] = None, limit: int = 100) -> List[dict]:
-        query = f"{self._alias_endpoint}&limit={limit}"
-        if name_pattern:
-            query += f"&name_pattern={quote_plus(name_pattern)}"
-        aliases, _ = self._request_dapi(query, "tag_alias")
-        return aliases
