@@ -697,12 +697,6 @@ class Script(scripts.Script):
     def _normalize_tag(tag: str) -> str:
         return rb_tag_pipeline.normalize_tag(tag)
 
-    def _ensure_user_file(self, path: str) -> None:
-        try:
-            rb_user_store.ensure_text_file(path)
-        except Exception as exc:
-            print(f"[R Files] Failed to ensure file {path}: {exc}")
-
     def _read_list_file(self, path: str) -> List[str]:
         try:
             return rb_user_store.read_list_file(path, normalize_fn=self._normalize_tag)
@@ -1098,9 +1092,6 @@ class Script(scripts.Script):
         cache[tag] = normalized
         return normalized
 
-    def _expand_with_synonyms(self, normalized_tag: str, target_set: Set[str]) -> None:
-        rb_tag_pipeline.expand_with_synonyms(normalized_tag, target_set, self._synonym_lookup)
-
     def _build_removal_context(
         self, removal_raw: Iterable[str], favorites_raw: Iterable[str]
     ) -> Dict[str, object]:
@@ -1462,16 +1453,6 @@ class Script(scripts.Script):
     def _extract_subject_tags(self, text: str) -> set:
         return rb_tag_pipeline.extract_subject_tags(text)
 
-    def _normalize_post_tags(
-        self, post: Optional[Dict[str, object]], cache: Dict[str, str]
-    ) -> Tuple[Set[str], Dict[str, List[str]]]:
-        catalog = self._active_catalog()
-        return rb_tag_pipeline.normalize_post_tags(
-            post,
-            cache,
-            catalog.resolve_alias if catalog else None,
-        )
-
     def _post_rejected_by_filter(
         self,
         post: Optional[Dict[str, object]],
@@ -1707,29 +1688,6 @@ class Script(scripts.Script):
             self._final_negative_prompts_snapshot = []
         except Exception as exc:
             print(f"[R Log] Failed to log prompt sources: {exc}")
-
-    def _ensure_pil_images_in_processed(self, processed_obj):
-        try:
-            if hasattr(processed_obj, "images") and isinstance(processed_obj.images, list):
-                for i, im in enumerate(list(processed_obj.images)):
-                    pil_im = self._ensure_pil_image(im)
-                    if pil_im is not None:
-                        processed_obj.images[i] = pil_im
-            # Ensure single image too
-            if hasattr(processed_obj, "image"):
-                processed_obj.image = self._ensure_pil_image(getattr(processed_obj, "image"))
-        except Exception:
-            pass
-
-    def _ensure_pil_in_processing(self, p):
-        try:
-            if hasattr(p, "init_images") and isinstance(p.init_images, list) and p.init_images:
-                for i, im in enumerate(list(p.init_images)):
-                    pil_im = self._ensure_pil_image(im)
-                    if pil_im is not None:
-                        p.init_images[i] = pil_im
-        except Exception:
-            pass
 
     def _load_cn_external_code(self):
         return rb_controlnet_integration.load_external_code(EXTENSION_ROOT)
@@ -2727,9 +2685,6 @@ class Script(scripts.Script):
             anima_tune_img2img,
         ]
         return rb_run_options.RunComponents.from_sequence(components).script_args()
-
-    def _normalize_lora_name(self, value: object) -> str:
-        return rb_loranado.normalize_lora_name(value)
 
     def _get_lora_base_dir(self) -> str:
         cmd_opts = getattr(shared, "cmd_opts", None)
@@ -5517,32 +5472,6 @@ class Script(scripts.Script):
             pass
         return False
 
-    def _images_visibly_different(self, original_image, processed_image):
-        """Return True only when pixel content or dimensions actually changed."""
-        try:
-            if original_image is None or processed_image is None:
-                return False
-
-            original_size = getattr(original_image, "size", None)
-            processed_size = getattr(processed_image, "size", None)
-            if original_size and processed_size and original_size != processed_size:
-                return True
-
-            original_compare = original_image
-            processed_compare = processed_image
-
-            if hasattr(original_compare, "mode") and original_compare.mode != "RGB":
-                original_compare = original_compare.convert("RGB")
-            if hasattr(processed_compare, "mode") and processed_compare.mode != "RGB":
-                processed_compare = processed_compare.convert("RGB")
-
-            if hasattr(original_compare, "tobytes") and hasattr(processed_compare, "tobytes"):
-                return original_compare.tobytes() != processed_compare.tobytes()
-        except Exception as compare_exc:
-            print(f"[R Post] WARN: Could not compare image pixels: {compare_exc}")
-
-        return False
-
     def _execute_manual_adetailer(self, p, processed, img2img_results):
         """Run manual ADetailer on img2img results via the deterministic runtime executor."""
         return self._adetailer_orch._execute_manual_adetailer(p, processed, img2img_results)
@@ -5631,16 +5560,6 @@ class Script(scripts.Script):
             )
         except Exception:
             return False
-
-    @staticmethod
-    def _clear_runner_callback_cache(runner):
-        """Invalidate ScriptRunner callback cache after script list mutations."""
-        try:
-            callback_map = getattr(runner, "callback_map", None)
-            if isinstance(callback_map, dict):
-                callback_map.clear()
-        except Exception:
-            pass
 
     @contextmanager
     def _manual_adetailer_script_isolation(
@@ -5949,9 +5868,6 @@ class Script(scripts.Script):
         else:
             random_indices = random.choices(range(max_index), k=size)
         return random_indices.tolist() if isinstance(random_indices, np.ndarray) else random_indices
-
-    def use_autotagger(self, model):
-        return None
 
     def _install_scriptrunner_guard(self, p):
         """Wrap p.scripts postprocess and postprocess_image to skip ADetailer when our block flag is active"""
