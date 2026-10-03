@@ -1,5 +1,3 @@
-"""Gelbooru and GelbooruCompatible booru classes."""
-
 import random
 import time
 import xml.etree.ElementTree as ET

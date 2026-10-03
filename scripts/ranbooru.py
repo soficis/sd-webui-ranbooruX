@@ -47,7 +47,6 @@ from ranboorux.integrations import adetailer_runtime as rb_adetailer_runtime
 from ranboorux.integrations import controlnet as rb_controlnet_integration
 from ranboorux.integrations import img2img_lifecycle as rb_img2img_lifecycle
 
-# --- Constants and Paths ---
 EXTENSION_ROOT = basedir()
 # Ensure extension root is on sys.path for local package imports (e.g., sd_forge_controlnet)
 if EXTENSION_ROOT not in sys.path:
@@ -77,7 +76,6 @@ REMOVAL_SYNONYM_GROUPS_RAW: Tuple[Set[str], ...] = (
     {"1girl", "1female", "1woman"},
 )
 
-# Ensure default files exist
 for filename in ["tags_search.txt", "tags_remove.txt"]:
     dir_path = USER_SEARCH_DIR if "search" in filename else USER_REMOVE_DIR
     filepath = os.path.join(dir_path, filename)
@@ -93,10 +91,8 @@ for ensured_path in (PERSONAL_REMOVE_FILE, FAVORITES_FILE, PROMPT_LOG_JSONL):
     try:
         os.makedirs(parent, exist_ok=True)
         if not os.path.isfile(ensured_path):
-            mode = "w"
-            with open(ensured_path, mode, encoding="utf-8") as f:
-                if ensured_path == PROMPT_LOG_JSONL:
-                    pass
+            with open(ensured_path, "w", encoding="utf-8") as f:
+                pass
     except Exception as exc:
         print(f"[Ranbooru] Error ensuring file {ensured_path}: {exc}")
 
@@ -1805,8 +1801,6 @@ class Script(scripts.Script):
         self._catalog_status_md = catalog_status
         self._tag_diag_md = None
 
-        # --- inner event handlers ---------------------------------------------------
-
         def _ui_toggle_catalog(enabled: bool):
             self._use_tag_catalog = bool(enabled)
             if not self._use_tag_catalog:
@@ -1955,8 +1949,6 @@ class Script(scripts.Script):
                 _gr_component_update(gr.Markdown, value=self._tag_catalog_status_text),
             )
 
-        # --- event wiring -----------------------------------------------------------
-
         use_tag_catalog.change(
             fn=_ui_toggle_catalog,
             inputs=[use_tag_catalog],
@@ -2005,8 +1997,6 @@ class Script(scripts.Script):
             outputs=[catalog_status],
             queue=False,
         )
-
-        # --- Platform Diagnostics ---------------------------------------------------
 
         diagnostics_visible_state = gr.State(False)
         diagnostics_toggle_btn = gr.Button("Show Platform Diagnostics")
@@ -2085,8 +2075,6 @@ class Script(scripts.Script):
                     info="Blacklisted LoRAs are excluded from random selection.",
                 )
                 lora_detect_status = gr.Markdown(initial_lora_status)
-
-        # --- LoRA event wiring ----------------------------------------------------
 
         lora_folder.change(
             fn=self._ui_refresh_loranado_controls,
@@ -2213,8 +2201,6 @@ class Script(scripts.Script):
                 value=False,
                 info="Maintain your subject count (e.g., solo/1girl) by removing mismatched tags.",
             )
-
-        # --- preset wiring ---------------------------------------------------------
 
         preset_strip_series.click(
             fn=lambda: (
@@ -4632,11 +4618,11 @@ class Script(scripts.Script):
             if mix_prompt and not post_id and not same_prompt:
                 print(f"[R] Mixing tags from {mix_amount} posts...")
                 mixed_prompts = []
-                original_indices_map = {i: post for i in range(len(all_posts))}
+                original_indices = list(range(len(all_posts)))
                 for _ in range(num_images_needed):
                     mix_indices = random.sample(
-                        list(original_indices_map.keys()),
-                        min(mix_amount, len(original_indices_map)),
+                        original_indices,
+                        min(mix_amount, len(original_indices)),
                     )
                     combined_tags = set()
                     for mix_idx in mix_indices:

@@ -13,7 +13,6 @@ def test_load_external_code_via_primary_import(monkeypatch):
 
     module = types.SimpleNamespace(name="external_code")
     target = "sd_forge_controlnet.lib_controlnet.external_code"
-    original_import = importlib.import_module
 
     def fake_import(name):
         if name == target:
@@ -22,7 +21,6 @@ def test_load_external_code_via_primary_import(monkeypatch):
 
     monkeypatch.setattr(importlib, "import_module", fake_import)
     assert script._load_cn_external_code() is module
-    monkeypatch.setattr(importlib, "import_module", original_import)
 
 
 def test_load_external_code_failure(monkeypatch):

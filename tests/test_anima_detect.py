@@ -2,8 +2,6 @@ from ranboorux.anima_detect import get_anima_model_info, is_anima_model
 
 
 class _Obj:
-    """Minimal attribute holder for test mocks."""
-
     pass
 
 
@@ -55,7 +53,7 @@ def test_is_anima_model_multiple_attr_paths():
     assert is_anima_model(obj2) is True
 
 
-def test_anima_tune_img2img_can_be_disabled(monkeypatch):
+def test_anima_tune_img2img_can_be_disabled():
     import types
 
     import scripts.ranbooru as ranbooru

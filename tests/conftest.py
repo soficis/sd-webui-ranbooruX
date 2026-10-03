@@ -25,9 +25,6 @@ def stub_modules(tmp_path, request):
     scripts_mod = types.ModuleType("modules.scripts")
 
     class DummyScript:
-        def __init__(self):
-            pass
-
         def elem_id(self, name):
             return name
 

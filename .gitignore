@@ -37,10 +37,8 @@ __pypackages__/
 # SQLite databases & temp test artifacts
 *.sqlite
 *.db
-temp_test_cache.sqlite
 
 # Local env/secrets
-.env
 .env.*
 *.env
 .python-version

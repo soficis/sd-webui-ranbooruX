@@ -31,12 +31,10 @@ def test_filter_candidates():
         "pony_lora.safetensors",
     ]
 
-    # 1. Enabled candidate filtering
     enabled = ["lora_a", "pony_lora"]
     filtered_enabled = filter_candidates(candidates, enabled_loras=enabled, blacklist_loras=[])
     assert filtered_enabled == ["lora_a.safetensors", "pony_lora.safetensors"]
 
-    # 2. Blacklist filtering
     blacklist = ["pony_lora"]
     filtered_blacklisted = filter_candidates(
         candidates, enabled_loras=[], blacklist_loras=blacklist
@@ -47,7 +45,6 @@ def test_filter_candidates():
         "lora_c.safetensors",
     ]
 
-    # 3. Both enabled and blacklist
     filtered_both = filter_candidates(candidates, enabled_loras=enabled, blacklist_loras=blacklist)
     assert filtered_both == ["lora_a.safetensors"]
 
@@ -55,7 +52,6 @@ def test_filter_candidates():
 def test_select_loras_deterministic():
     candidates = ["lora1.safetensors", "lora2.safetensors", "lora3.safetensors"]
 
-    # Seeded random source to ensure determinism
     rng1 = random.Random(42)
     selection1 = select_loras(candidates, amount=2, lora_min=0.5, lora_max=0.9, random_source=rng1)
 
@@ -64,11 +60,9 @@ def test_select_loras_deterministic():
 
     assert selection1 == selection2
     assert len(selection1) == 2
-    # Verify name stripping in selections
     assert selection1[0][0] in ("lora1", "lora2", "lora3")
     assert 0.5 <= selection1[0][1] <= 0.9
 
-    # Custom weights priority test
     rng3 = random.Random(100)
     selection_custom = select_loras(
         candidates,
@@ -79,7 +73,6 @@ def test_select_loras_deterministic():
         random_source=rng3,
     )
     assert len(selection_custom) == 3
-    # The first two should use custom weights, the third uses rng.uniform
     assert selection_custom[0][1] == 0.88
     assert selection_custom[1][1] == 0.99
     assert 0.1 <= selection_custom[2][1] <= 0.2

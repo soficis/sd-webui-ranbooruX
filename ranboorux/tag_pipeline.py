@@ -5,12 +5,10 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
 
-# --- Regex Patterns ---
 _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
 _WHITESPACE_RE = re.compile(r"\s+")
 _TAG_SPLIT_RE = re.compile(r"[,\s]+")
 
-# --- Constants and Keyword Sets ---
 FURRY_CORE_TAGS = {
     "anthro",
     "furry",
@@ -368,9 +366,6 @@ class CatalogResolver(Protocol):
     def category(self, tag: str) -> int: ...
 
 
-# --- Core Tag Pipeline Functions ---
-
-
 def split_prompt_tags(prompt: str) -> List[str]:
     if not isinstance(prompt, str):
         return []
@@ -612,9 +607,6 @@ def extract_subject_tags(text: str) -> Set[str]:
         return set()
     tags = [t.strip() for t in _TAG_SPLIT_RE.split(text) if t.strip()]
     return {normalize_tag(t) for t in tags if is_subject_tag(t)}
-
-
-# --- Filter Context and Matches ---
 
 
 def build_removal_context(

@@ -34,17 +34,14 @@ def get_anima_model_info(sd_model: Any) -> dict[str, Any]:
     if sd_model is None:
         return {"detected": False, "method": "none", "model_name": ""}
 
-    # PRIMARY: checkpoint filename contains "anima" (case-insensitive)
     checkpoint = _resolve_checkpoint_name(sd_model)
-    if checkpoint:
-        if "anima" in checkpoint.lower():
-            return {
-                "detected": True,
-                "method": "filename",
-                "model_name": checkpoint,
-            }
+    if checkpoint and "anima" in checkpoint.lower():
+        return {
+            "detected": True,
+            "method": "filename",
+            "model_name": checkpoint,
+        }
 
-    # SECONDARY: class name contains "Anima"
     class_name = type(sd_model).__name__
     if "Anima" in class_name:
         return {

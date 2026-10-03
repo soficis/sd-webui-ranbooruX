@@ -1,8 +1,3 @@
-"""Config-driven booru subclasses for 8 simple booru APIs.
-
-Each subclass has a unique base_url and slight variations in get_posts().
-"""
-
 import random
 
 from ranboorux.boorus import Booru
