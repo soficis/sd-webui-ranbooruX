@@ -40,6 +40,7 @@ from ranboorux import run_options as rb_run_options
 from ranboorux import tag_pipeline as rb_tag_pipeline
 from ranboorux import user_store as rb_user_store
 from ranboorux.anima_detect import get_anima_model_info
+from ranboorux.safe_paths import contained_path
 from ranboorux.boorus import Booru
 from ranboorux.integrations import adetailer as rb_adetailer_integration
 from ranboorux.integrations import adetailer_orchestration as rb_adetailer_orch
@@ -767,7 +768,16 @@ class Script(scripts.Script):
                 return bundled_override
             return BUNDLED_CATALOG_PATH
         if self._catalog_source == "custom":
-            return (self._custom_catalog_path or "").strip()
+            val = (self._custom_catalog_path or "").strip()
+            if not val:
+                return ""
+            try:
+                contained = contained_path(USER_CATALOGS_DIR, val)
+                return str(contained)
+            except ValueError:
+                basename = os.path.basename(val) or "custom_catalog.csv"
+                print(f"[Ranbooru] Warn: Refused custom catalog path outside allowed roots: {basename}")
+                return ""
         return ""
 
     def _set_catalog_source(self, source: str) -> str:
@@ -795,17 +805,45 @@ class Script(scripts.Script):
     def _validate_csv_format(self, path: str) -> Tuple[bool, str]:
         return rb_catalog.validate_catalog_csv(path)
 
+    def _resolve_catalog_source(self, uploaded: object, path_hint: str = "") -> Tuple[str, bool]:
+        hint = (path_hint or "").strip()
+        if hint:
+            allowed_roots = [USER_CATALOGS_DIR, BUNDLED_CATALOG_DIR]
+            for root in allowed_roots:
+                try:
+                    contained = contained_path(root, hint)
+                    return str(contained), True
+                except ValueError:
+                    continue
+            basename = os.path.basename(hint) or "unnamed"
+            print(f"[Ranbooru] Warn: Refused custom catalog path outside allowed roots: {basename}")
+            return "", True
+        return self._catalog_path_from_upload(uploaded), False
+
     def _import_custom_catalog(self, uploaded: object, path_hint: str = "") -> Tuple[bool, str]:
-        source_path = (path_hint or "").strip() or self._catalog_path_from_upload(uploaded)
+        source_path, from_hint = self._resolve_catalog_source(uploaded, path_hint)
+        if from_hint and not source_path:
+            basename = os.path.basename((path_hint or "").strip()) or "file"
+            return False, f"Refused custom catalog path outside allowed roots: {basename}"
+        if not source_path:
+            return False, "No catalog file provided"
+
         ok, validation_message = self._validate_csv_format(source_path)
         if not ok:
             return False, f"Invalid CSV: {validation_message}"
         try:
             os.makedirs(USER_CATALOGS_DIR, exist_ok=True)
-            source_name = os.path.basename(source_path) or "catalog.csv"
-            safe_name = re.sub(r"[^\w\-.]", "_", source_name)
-            destination = os.path.join(USER_CATALOGS_DIR, safe_name)
-            shutil.copy2(source_path, destination)
+            user_catalogs_real = os.path.realpath(USER_CATALOGS_DIR)
+            source_real = os.path.realpath(source_path)
+            if os.path.commonpath([user_catalogs_real, source_real]) == user_catalogs_real:
+                destination = str(source_real)
+            else:
+                source_name = os.path.basename(source_path) or "catalog.csv"
+                safe_name = re.sub(r"[^\w\-.]", "_", source_name)
+                computed_dest = os.path.join(USER_CATALOGS_DIR, safe_name)
+                destination = str(contained_path(USER_CATALOGS_DIR, computed_dest))
+                shutil.copy2(source_path, destination)
+
             self._catalog_source = "custom"
             self._custom_catalog_path = destination
             self._tag_catalog_path = destination
@@ -1787,9 +1825,10 @@ class Script(scripts.Script):
         ) as custom_catalog_group:
             catalog_upload = gr.File(label="Upload CSV", file_types=[".csv"], file_count="single")
             catalog_path = gr.Textbox(
-                label="Custom CSV Path",
+                label="Custom CSV Path (must be inside user/catalogs/ or data/catalogs/; other files must be uploaded)",
                 value=self._custom_catalog_path,
                 placeholder="/path/to/custom_catalog.csv",
+                info="Selects a CSV already inside user/catalogs/ or data/catalogs/. Other files must be uploaded.",
             )
             with gr.Row():
                 catalog_import_btn = gr.Button("Import Custom Catalog")
@@ -1916,7 +1955,13 @@ class Script(scripts.Script):
             )
 
         def _ui_validate_catalog(path_value, uploaded):
-            candidate = (path_value or "").strip() or self._catalog_path_from_upload(uploaded)
+            candidate, from_hint = self._resolve_catalog_source(uploaded, path_value)
+            if from_hint and not candidate:
+                basename = os.path.basename((path_value or "").strip()) or "file"
+                status = f"Validation failed: Refused path outside allowed roots: {basename}"
+                return _gr_component_update(gr.Markdown, value=status)
+            if not candidate:
+                return _gr_component_update(gr.Markdown, value="Validation failed: No catalog file provided")
             ok, message = self._validate_csv_format(candidate)
             status = f"Validation passed: {message}" if ok else f"Validation failed: {message}"
             return _gr_component_update(gr.Markdown, value=status)
