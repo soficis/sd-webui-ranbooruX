@@ -587,21 +587,6 @@ def is_subject_tag(tag: str) -> bool:
     return normalized in _SUBJECT_TAGS
 
 
-def extract_color_tags(text: str) -> Tuple[Set[str], Set[str]]:
-    if not text:
-        return set(), set()
-    hair_tags = set()
-    eye_tags = set()
-    segments = [seg.strip() for seg in _TAG_SPLIT_RE.split(text) if seg.strip()]
-    for seg in segments:
-        normalized = normalize_tag(seg)
-        if normalized in _HAIR_COLOR_TAGS_NORMALIZED:
-            hair_tags.add(normalized)
-        elif normalized in _EYE_COLOR_TAGS_NORMALIZED:
-            eye_tags.add(normalized)
-    return hair_tags, eye_tags
-
-
 def extract_subject_tags(text: str) -> Set[str]:
     if not text:
         return set()
