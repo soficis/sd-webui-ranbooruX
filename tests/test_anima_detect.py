@@ -136,3 +136,91 @@ def test_anima_tune_img2img_can_be_disabled():
     script._prepare_img2img_pass(p, use_img2img=True, use_ip=False)
 
     assert script.img2img_denoising == 0.6  # Default non-anima max cap, not Anima's 0.5 cap
+
+
+def test_anima_capabilities_snapshot():
+    import dataclasses
+
+    from ranboorux.anima_detect import get_capabilities
+
+    expected_negative = (
+        "worst quality, low quality, score_1, score_2, score_3, "
+        "artist name, blurry, jpeg artifacts, chromatic aberration"
+    )
+
+    expected_snapshots = {
+        "base": {
+            "family": "anima",
+            "variant": "base",
+            "prompt_style": "booru_tags",
+            "emits_score_tags": True,
+            "quality_prefix": "masterpiece, best quality, score_7, safe, ",
+            "negative_default": expected_negative,
+            "cfg_range": (4.0, 5.0),
+            "steps_range": (30, 50),
+            "detection_method": "none",
+        },
+        "aesthetic": {
+            "family": "anima",
+            "variant": "aesthetic",
+            "prompt_style": "booru_tags",
+            "emits_score_tags": False,
+            "quality_prefix": "masterpiece, best quality, safe, ",
+            "negative_default": expected_negative,
+            "cfg_range": (3.0, 5.0),
+            "steps_range": (30, 50),
+            "detection_method": "none",
+        },
+        "turbo": {
+            "family": "anima",
+            "variant": "turbo",
+            "prompt_style": "booru_tags",
+            "emits_score_tags": True,
+            "quality_prefix": "masterpiece, best quality, score_7, safe, ",
+            "negative_default": expected_negative,
+            "cfg_range": (1.0, 2.0),
+            "steps_range": (8, 12),
+            "detection_method": "none",
+        },
+        "2.9b": {
+            "family": "anima",
+            "variant": "2.9b",
+            "prompt_style": "booru_tags",
+            "emits_score_tags": True,
+            "quality_prefix": "masterpiece, best quality, score_7, safe, ",
+            "negative_default": expected_negative,
+            "cfg_range": (4.0, 5.0),
+            "steps_range": (30, 50),
+            "detection_method": "none",
+        },
+        "3.8b": {
+            "family": "anima",
+            "variant": "3.8b",
+            "prompt_style": "booru_tags",
+            "emits_score_tags": True,
+            "quality_prefix": "masterpiece, best quality, score_7, safe, ",
+            "negative_default": expected_negative,
+            "cfg_range": (4.0, 5.0),
+            "steps_range": (30, 50),
+            "detection_method": "none",
+        },
+        "unknown": {
+            "family": "unknown",
+            "variant": "",
+            "prompt_style": "booru_tags",
+            "emits_score_tags": False,
+            "quality_prefix": "",
+            "negative_default": "",
+            "cfg_range": (4.0, 8.0),
+            "steps_range": (20, 30),
+            "detection_method": "none",
+        },
+    }
+
+    for variant in ("base", "aesthetic", "turbo", "2.9b", "3.8b"):
+        caps = get_capabilities("anima", variant, "none")
+        assert dataclasses.asdict(caps) == expected_snapshots[variant]
+
+    unknown_caps = get_capabilities("unknown", "", "none")
+    assert dataclasses.asdict(unknown_caps) == expected_snapshots["unknown"]
+

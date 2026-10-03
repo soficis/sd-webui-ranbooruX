@@ -39,7 +39,11 @@ from ranboorux import mutation_scope as rb_mutation_scope
 from ranboorux import run_options as rb_run_options
 from ranboorux import tag_pipeline as rb_tag_pipeline
 from ranboorux import user_store as rb_user_store
-from ranboorux.anima_detect import get_anima_model_info
+from ranboorux.anima_detect import (
+    get_anima_model_info,
+    get_capabilities,
+    resolve_anima_variant,
+)
 from ranboorux.safe_paths import contained_path, safe_join
 from ranboorux.boorus import Booru
 from ranboorux.integrations import adetailer as rb_adetailer_integration
@@ -3727,6 +3731,8 @@ class Script(scripts.Script):
                 self.img2img_denoising = min(0.5, self.img2img_denoising)
                 initial_steps = max(8, min(15, p.steps // 3))
                 self._host_scope.set_attr(p, "steps", initial_steps)
+                # Note: cfg_range declared in ModelCapabilities is divergent from these
+                # runtime clamp values pinned by test_lock_prepare_img2img_cfg_clamps.
                 variant = getattr(self, "_anima_model_variant", "base")
                 if variant == "turbo":
                     tuned_cfg = max(1.0, min(self.original_cfg, 6.0))
@@ -4013,36 +4019,15 @@ class Script(scripts.Script):
             return re.sub(r"[_ ]*\([^)]+\)$", "", tag).strip()
         return tag
 
-    @staticmethod
-    def _resolve_anima_variant(model_name: str) -> str:
-        """Derive Anima variant from model/checkpoint name."""
-        if not model_name:
-            return "base"
-        name = model_name.lower()
-        if "aesthetic" in name:
-            return "aesthetic"
-        if "turbo" in name:
-            return "turbo"
-        if "2.9b" in name:
-            return "2.9b"
-        if "3.8b" in name:
-            return "3.8b"
-        return "base"
-
     def _anima_quality_prefix(self=None, variant: Optional[str] = None) -> str:
         """Return Anima's recommended positive quality prefix."""
-        if isinstance(self, str) and variant is None:
-            variant = self
-            self = None
         var = variant or getattr(self, "_anima_model_variant", "base")
-        if var == "aesthetic":
-            return "masterpiece, best quality, safe, "
-        return "masterpiece, best quality, score_7, safe, "
+        return get_capabilities("anima", var).quality_prefix
 
     @staticmethod
     def _anima_negative_default() -> str:
         """Return Anima's recommended negative prompt."""
-        return "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration"
+        return get_capabilities("anima", "base").negative_default
 
     @staticmethod
     def _has_quality_prefix(prompt: str) -> bool:
@@ -4259,7 +4244,7 @@ class Script(scripts.Script):
 
             self._is_anima_model = info["detected"]
             if self._is_anima_model:
-                self._anima_model_variant = info.get("variant") or self._resolve_anima_variant(
+                self._anima_model_variant = info.get("variant") or resolve_anima_variant(
                     info.get("model_name", "")
                 )
                 self._anima_capabilities = info.get("capabilities")
@@ -5760,7 +5745,7 @@ class Script(scripts.Script):
                         self._is_anima_model = True
                         self._anima_model_variant = late_info.get(
                             "variant"
-                        ) or self._resolve_anima_variant(late_info.get("model_name", ""))
+                        ) or resolve_anima_variant(late_info.get("model_name", ""))
                         self._anima_capabilities = late_info.get("capabilities")
                         print(
                             f"[R Process] Anima model detected on engine load ({late_info['model_name']}, variant={self._anima_model_variant}, method={late_info.get('method')})"

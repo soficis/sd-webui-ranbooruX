@@ -28,68 +28,62 @@ class ModelCapabilities:
     detection_method: str = "none"
 
 
+_NEGATIVE_DEFAULT = (
+    "worst quality, low quality, score_1, score_2, score_3, "
+    "artist name, blurry, jpeg artifacts, chromatic aberration"
+)
+
+# Variant delta table: variant -> (emits_score_tags, quality_prefix, cfg_range, steps_range)
+_ANIMA_VARIANT_DELTAS: dict[str, tuple[bool, str, tuple[float, float], tuple[int, int]]] = {
+    "aesthetic": (
+        False,
+        "masterpiece, best quality, safe, ",
+        (3.0, 5.0),
+        (30, 50),
+    ),
+    "turbo": (
+        True,
+        "masterpiece, best quality, score_7, safe, ",
+        (1.0, 2.0),
+        (8, 12),
+    ),
+    "2.9b": (
+        True,
+        "masterpiece, best quality, score_7, safe, ",
+        (4.0, 5.0),
+        (30, 50),
+    ),
+    "3.8b": (
+        True,
+        "masterpiece, best quality, score_7, safe, ",
+        (4.0, 5.0),
+        (30, 50),
+    ),
+    "base": (
+        True,
+        "masterpiece, best quality, score_7, safe, ",
+        (4.0, 5.0),
+        (30, 50),
+    ),
+}
+
+
 def get_capabilities(
     family: str, variant: str, detection_method: str = "none"
 ) -> ModelCapabilities:
     """Return immutable ModelCapabilities record for a given family/variant."""
     if family == "anima":
-        if variant == "aesthetic":
-            return ModelCapabilities(
-                family="anima",
-                variant="aesthetic",
-                prompt_style="booru_tags",
-                emits_score_tags=False,
-                quality_prefix="masterpiece, best quality, safe, ",
-                negative_default=(
-                    "worst quality, low quality, score_1, score_2, score_3, "
-                    "artist name, blurry, jpeg artifacts, chromatic aberration"
-                ),
-                cfg_range=(3.0, 5.0),
-                steps_range=(30, 50),
-                detection_method=detection_method,
-            )
-        if variant == "turbo":
-            return ModelCapabilities(
-                family="anima",
-                variant="turbo",
-                prompt_style="booru_tags",
-                emits_score_tags=True,
-                quality_prefix="masterpiece, best quality, score_7, safe, ",
-                negative_default=(
-                    "worst quality, low quality, score_1, score_2, score_3, "
-                    "artist name, blurry, jpeg artifacts, chromatic aberration"
-                ),
-                cfg_range=(1.0, 2.0),
-                steps_range=(8, 12),
-                detection_method=detection_method,
-            )
-        if variant in ("2.9b", "3.8b"):
-            return ModelCapabilities(
-                family="anima",
-                variant=variant,
-                prompt_style="booru_tags",
-                emits_score_tags=True,
-                quality_prefix="masterpiece, best quality, score_7, safe, ",
-                negative_default=(
-                    "worst quality, low quality, score_1, score_2, score_3, "
-                    "artist name, blurry, jpeg artifacts, chromatic aberration"
-                ),
-                cfg_range=(4.0, 5.0),
-                steps_range=(30, 50),
-                detection_method=detection_method,
-            )
+        delta = _ANIMA_VARIANT_DELTAS.get(variant, _ANIMA_VARIANT_DELTAS["base"])
+        emits_score_tags, quality_prefix, cfg_range, steps_range = delta
         return ModelCapabilities(
             family="anima",
-            variant="base",
+            variant=variant if variant in _ANIMA_VARIANT_DELTAS else "base",
             prompt_style="booru_tags",
-            emits_score_tags=True,
-            quality_prefix="masterpiece, best quality, score_7, safe, ",
-            negative_default=(
-                "worst quality, low quality, score_1, score_2, score_3, "
-                "artist name, blurry, jpeg artifacts, chromatic aberration"
-            ),
-            cfg_range=(4.0, 5.0),
-            steps_range=(30, 50),
+            emits_score_tags=emits_score_tags,
+            quality_prefix=quality_prefix,
+            negative_default=_NEGATIVE_DEFAULT,
+            cfg_range=cfg_range,
+            steps_range=steps_range,
             detection_method=detection_method,
         )
     return ModelCapabilities(
