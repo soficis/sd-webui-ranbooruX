@@ -216,3 +216,60 @@ def test_sequential_jobs_do_not_reuse_previous_prompt(monkeypatch, stub_modules)
     assert "first_tag" in first.prompt
     assert "second_tag" in second.prompt
     assert "first_tag" not in second.prompt
+
+
+def test_initialize_seeds_policies():
+    import scripts.ranbooru as ranbooru
+
+    # Policy 1: Internal img2img (overwrite=True, mirror_aliases=True)
+    p1 = types.SimpleNamespace(seed=-1, subseed=-1, n_iter=2, batch_size=2)
+    s1, ss1 = ranbooru.Script._initialize_seeds(p1, overwrite=True, mirror_aliases=True)
+    assert p1.seed == s1 and s1 != -1
+    assert p1.subseed == ss1 and ss1 != -1
+    assert len(p1.all_seeds) == 4
+    assert p1.all_seeds == [s1, s1 + 1, s1 + 2, s1 + 3]
+    assert p1.all_subseeds == [ss1, ss1 + 1, ss1 + 2, ss1 + 3]
+    assert p1.seeds == p1.all_seeds
+    assert p1.subseeds == p1.all_subseeds
+
+    # Policy 2: Duplicate guard (overwrite=False, mirror_aliases=False)
+    p2_existing = types.SimpleNamespace(
+        seed=10,
+        subseed=20,
+        n_iter=1,
+        batch_size=2,
+        all_seeds=[100, 101],
+        all_subseeds=[200, 201],
+    )
+    ranbooru.Script._initialize_seeds(p2_existing, overwrite=False, mirror_aliases=False)
+    assert p2_existing.all_seeds == [100, 101]
+    assert p2_existing.all_subseeds == [200, 201]
+    assert not hasattr(p2_existing, "seeds")
+    assert not hasattr(p2_existing, "subseeds")
+
+    p2_missing = types.SimpleNamespace(
+        seed=10,
+        subseed=20,
+        n_iter=1,
+        batch_size=2,
+        all_seeds=None,
+        all_subseeds=None,
+    )
+    ranbooru.Script._initialize_seeds(p2_missing, overwrite=False, mirror_aliases=False)
+    assert p2_missing.all_seeds == [10, 11]
+    assert p2_missing.all_subseeds == [20, 21]
+    assert not hasattr(p2_missing, "seeds")
+
+    # Policy 3: Main before_process run (overwrite=True, mirror_aliases="if_missing")
+    p3 = types.SimpleNamespace(
+        seed=50,
+        subseed=60,
+        n_iter=1,
+        batch_size=2,
+        seeds=[999],
+    )
+    s3, ss3 = ranbooru.Script._initialize_seeds(p3, overwrite=True, mirror_aliases="if_missing")
+    assert p3.all_seeds == [50, 51]
+    assert p3.all_subseeds == [60, 61]
+    assert p3.seeds == [999]  # Existing alias not overwritten
+    assert p3.subseeds == [60, 61]  # Missing alias mirrored

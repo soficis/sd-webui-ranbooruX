@@ -4033,28 +4033,52 @@ class Script(scripts.Script):
         tags = [t.strip().lower() for t in prompt.split(",") if t.strip()]
         return any(tag in quality_tokens for tag in tags)
 
+    @staticmethod
+    def _initialize_seeds(
+        p: Any,
+        *,
+        overwrite: bool = True,
+        mirror_aliases: Union[bool, str] = False,
+    ) -> Tuple[int, int]:
+        base_seed = getattr(p, "seed", -1)
+        if base_seed == -1 or not hasattr(p, "seed"):
+            base_seed = random.randint(0, 2**32 - 1)
+            p.seed = base_seed
+
+        batch_count = max(1, getattr(p, "n_iter", 1))
+        batch_size = max(1, getattr(p, "batch_size", 1))
+        total_images = batch_count * batch_size
+
+        if overwrite or not getattr(p, "all_seeds", None):
+            p.all_seeds = [base_seed + i for i in range(total_images)]
+
+        base_subseed = getattr(p, "subseed", -1)
+        if base_subseed == -1 or not hasattr(p, "subseed"):
+            base_subseed = random.randint(0, 2**32 - 1)
+            p.subseed = base_subseed
+
+        if overwrite or not getattr(p, "all_subseeds", None):
+            p.all_subseeds = [base_subseed + i for i in range(total_images)]
+
+        if mirror_aliases is True:
+            p.seeds = list(p.all_seeds)
+            p.subseeds = list(p.all_subseeds)
+        elif mirror_aliases == "if_missing":
+            if not hasattr(p, "seeds"):
+                p.seeds = list(p.all_seeds)
+            if not hasattr(p, "subseeds"):
+                p.subseeds = list(p.all_subseeds)
+
+        return base_seed, base_subseed
+
     def before_process(self, p: StableDiffusionProcessing, *args):
         try:
             # Fast-path for our own internal img2img calls: initialize seeds and exit
             if getattr(p, "_ranbooru_internal_img2img", False):
                 try:
-                    # Minimal seeds init to satisfy WebUI expectations
-                    base_seed = getattr(p, "seed", -1)
-                    if base_seed == -1:
-                        base_seed = random.randint(0, 2**32 - 1)
-                        p.seed = base_seed
-                    batch_count = max(1, getattr(p, "n_iter", 1))
-                    batch_size = max(1, getattr(p, "batch_size", 1))
-                    total_images = batch_count * batch_size
-                    p.all_seeds = [base_seed + i for i in range(total_images)]
-                    base_subseed = getattr(p, "subseed", -1)
-                    if base_subseed == -1:
-                        base_subseed = random.randint(0, 2**32 - 1)
-                        p.subseed = base_subseed
-                    p.all_subseeds = [base_subseed + i for i in range(total_images)]
-                    # Mirror common aliases expected by some codepaths
-                    p.seeds = list(p.all_seeds)
-                    p.subseeds = list(p.all_subseeds)
+                    base_seed, base_subseed = self._initialize_seeds(
+                        p, overwrite=True, mirror_aliases=True
+                    )
                     print(
                         f"[R Before] Internal img2img fast-path: seeds={len(p.all_seeds)} from {base_seed}, subseeds from {base_subseed}"
                     )
@@ -4077,21 +4101,7 @@ class Script(scripts.Script):
                 print("[R Before] RanbooruX already processing - BLOCKING duplicate run")
                 # Ensure seeds exist to prevent IndexError in core pipeline
                 try:
-                    base_seed = getattr(p, "seed", -1)
-                    if base_seed == -1:
-                        base_seed = random.randint(0, 2**32 - 1)
-                        p.seed = base_seed
-                    batch_count = max(1, getattr(p, "n_iter", 1))
-                    batch_size = max(1, getattr(p, "batch_size", 1))
-                    total_images = batch_count * batch_size
-                    if not getattr(p, "all_seeds", None):
-                        p.all_seeds = [base_seed + i for i in range(total_images)]
-                    base_subseed = getattr(p, "subseed", -1)
-                    if base_subseed == -1:
-                        base_subseed = random.randint(0, 2**32 - 1)
-                        p.subseed = base_subseed
-                    if not getattr(p, "all_subseeds", None):
-                        p.all_subseeds = [base_subseed + i for i in range(total_images)]
+                    self._initialize_seeds(p, overwrite=False, mirror_aliases=False)
                 except Exception as _e:
                     print(f"[R Before] WARN: Seed safety init failed on duplicate: {_e}")
                 return
@@ -4261,38 +4271,15 @@ class Script(scripts.Script):
             )
 
         # CRITICAL: Ensure seeds are properly initialized to prevent IndexError
-        # This must happen EVERY time, not just when they're empty
-        if hasattr(p, "seed"):
-            base_seed = p.seed if p.seed != -1 else random.randint(0, 2**32 - 1)
-        else:
-            base_seed = random.randint(0, 2**32 - 1)
-            p.seed = base_seed
-
-        # Calculate batch size - be more defensive about this
-        batch_count = max(1, getattr(p, "n_iter", 1))
-        batch_size = max(1, getattr(p, "batch_size", 1))
-        total_images = batch_count * batch_size
-
-        # ALWAYS reinitialize seeds to prevent index errors
-        p.all_seeds = [base_seed + i for i in range(total_images)]
+        base_seed, base_subseed = self._initialize_seeds(
+            p, overwrite=True, mirror_aliases="if_missing"
+        )
         print(
             f"[R Before] Initialized p.all_seeds with {len(p.all_seeds)} seeds starting from {base_seed}"
         )
-
-        # Also reinitialize all_subseeds
-        base_subseed = getattr(p, "subseed", -1)
-        if base_subseed == -1:
-            base_subseed = random.randint(0, 2**32 - 1)
-        p.all_subseeds = [base_subseed + i for i in range(total_images)]
         print(
             f"[R Before] Initialized p.all_subseeds with {len(p.all_subseeds)} subseeds starting from {base_subseed}"
         )
-
-        # ADDITIONAL: Ensure other seed-related attributes exist
-        if not hasattr(p, "seeds"):
-            p.seeds = p.all_seeds.copy()
-        if not hasattr(p, "subseeds"):
-            p.subseeds = p.all_subseeds.copy()
 
         self._reset_adetailer_state_for_run(p)
 
