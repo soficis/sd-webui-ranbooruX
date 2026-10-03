@@ -224,3 +224,101 @@ def test_anima_capabilities_snapshot():
     unknown_caps = get_capabilities("unknown", "", "none")
     assert dataclasses.asdict(unknown_caps) == expected_snapshots["unknown"]
 
+
+def test_anima_detection_ladder_characterization():
+    import types
+
+    import scripts.ranbooru as ranbooru
+
+    # Helper simulating Site 1 (before_process)
+    def run_site1(p, shared_obj, script_cls):
+        pending_ckpt = None
+        if hasattr(p, "override_settings") and isinstance(p.override_settings, dict):
+            pending_ckpt = p.override_settings.get("sd_model_checkpoint")
+        if not pending_ckpt and hasattr(shared_obj, "opts"):
+            pending_ckpt = getattr(shared_obj.opts, "sd_model_checkpoint", None)
+
+        info = None
+        if pending_ckpt:
+            info = get_anima_model_info(pending_ckpt)
+        if not info or not info.get("detected"):
+            info = get_anima_model_info(getattr(shared_obj, "sd_model", None))
+        if not info or not info.get("detected"):
+            info = getattr(script_cls, "_last_loaded_model_info", None)
+        if not info:
+            info = {"detected": False, "method": "none", "model_name": "", "variant": "base"}
+        return info
+
+    # Helper simulating Site 2 (process)
+    def run_site2(shared_obj):
+        return get_anima_model_info(getattr(shared_obj, "sd_model", None))
+
+    class DummyAnimaModel:
+        def __init__(self, filename="anima-base.safetensors"):
+            self.filename = filename
+
+    # Case 1: pending in override_settings
+    p1 = types.SimpleNamespace(override_settings={"sd_model_checkpoint": "anima-aesthetic.safetensors"})
+    s1_res = run_site1(p1, types.SimpleNamespace(opts=None, sd_model=None), ranbooru.Script)
+    assert s1_res["detected"] is True
+    assert s1_res["variant"] == "aesthetic"
+
+    # Case 2: pending in shared.opts
+    p2 = types.SimpleNamespace()
+    opts2 = types.SimpleNamespace(sd_model_checkpoint="anima-turbo.safetensors")
+    s2_res = run_site1(p2, types.SimpleNamespace(opts=opts2, sd_model=None), ranbooru.Script)
+    assert s2_res["detected"] is True
+    assert s2_res["variant"] == "turbo"
+
+    # Case 3: shared.sd_model loaded (Site 1 & Site 2 both detect)
+    anima_model = DummyAnimaModel("anima-2.9b.safetensors")
+    shared_case3 = types.SimpleNamespace(opts=None, sd_model=anima_model)
+    res_site1_case3 = run_site1(types.SimpleNamespace(), shared_case3, ranbooru.Script)
+    res_site2_case3 = run_site2(shared_case3)
+    assert res_site1_case3["detected"] is True
+    assert res_site2_case3["detected"] is True
+    assert res_site1_case3["variant"] == "2.9b"
+    assert res_site2_case3["variant"] == "2.9b"
+
+    # Case 4: _last_loaded_model_info fallback
+    cached_info = get_anima_model_info("anima-3.8b.safetensors")
+    ranbooru.Script._last_loaded_model_info = cached_info
+    s4_res = run_site1(types.SimpleNamespace(), types.SimpleNamespace(opts=None, sd_model=None), ranbooru.Script)
+    assert s4_res["detected"] is True
+    assert s4_res["variant"] == "3.8b"
+    ranbooru.Script._last_loaded_model_info = None
+
+    # Case 5: all non-anima
+    s5_res = run_site1(types.SimpleNamespace(), types.SimpleNamespace(opts=None, sd_model=None), ranbooru.Script)
+    assert s5_res["detected"] is False
+
+
+def test_script_detect_anima_unified_method():
+    import types
+
+    from modules import shared
+
+    import scripts.ranbooru as ranbooru
+
+    script = ranbooru.Script()
+
+    # When pending checkpoint is an anima model
+    p = types.SimpleNamespace(override_settings={"sd_model_checkpoint": "anima-aesthetic.safetensors"})
+    shared.opts = types.SimpleNamespace()
+    shared.sd_model = None
+
+    info = script._detect_anima(p=p)
+    assert info["detected"] is True
+    assert script._is_anima_model is True
+    assert script._anima_model_variant == "aesthetic"
+    assert script._anima_capabilities is not None
+
+    # When model is non-anima
+    p_non = types.SimpleNamespace(override_settings={"sd_model_checkpoint": "sdxl_base.safetensors"})
+    info_non = script._detect_anima(p=p_non)
+    assert info_non["detected"] is False
+    assert script._is_anima_model is False
+    assert script._anima_model_variant == "base"
+
+
+

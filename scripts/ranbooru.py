@@ -12,7 +12,7 @@ import unicodedata
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from io import BytesIO
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import gradio as gr
 import modules.scripts as scripts
@@ -4019,6 +4019,41 @@ class Script(scripts.Script):
             return re.sub(r"[_ ]*\([^)]+\)$", "", tag).strip()
         return tag
 
+    def _detect_anima(self, options=None, sd_model=None, p=None) -> dict[str, Any]:
+        """Run the single Anima detection ladder, updating self attributes and returning info dict.
+        Ladder:
+        1. pending_ckpt from p.override_settings or shared.opts
+        2. sd_model (explicit or shared.sd_model)
+        3. Script._last_loaded_model_info
+        """
+        pending_ckpt = None
+        if hasattr(p, "override_settings") and isinstance(p.override_settings, dict):
+            pending_ckpt = p.override_settings.get("sd_model_checkpoint")
+        if not pending_ckpt and hasattr(shared, "opts"):
+            pending_ckpt = getattr(shared.opts, "sd_model_checkpoint", None)
+
+        info = None
+        if pending_ckpt:
+            info = get_anima_model_info(pending_ckpt)
+        if not info or not info.get("detected"):
+            model = sd_model if sd_model is not None else getattr(shared, "sd_model", None)
+            info = get_anima_model_info(model)
+        if not info or not info.get("detected"):
+            info = getattr(Script, "_last_loaded_model_info", None)
+        if not info:
+            info = {"detected": False, "method": "none", "model_name": "", "variant": "base"}
+
+        self._is_anima_model = bool(info.get("detected", False))
+        if self._is_anima_model:
+            self._anima_model_variant = info.get("variant") or resolve_anima_variant(
+                info.get("model_name", "")
+            )
+            self._anima_capabilities = info.get("capabilities")
+        else:
+            self._anima_model_variant = "base"
+            self._anima_capabilities = None
+        return info
+
     def _anima_quality_prefix(self=None, variant: Optional[str] = None) -> str:
         """Return Anima's recommended positive quality prefix."""
         var = variant or getattr(self, "_anima_model_variant", "base")
@@ -4226,28 +4261,8 @@ class Script(scripts.Script):
 
         # Anima model detection
         try:
-            pending_ckpt = None
-            if hasattr(p, "override_settings") and isinstance(p.override_settings, dict):
-                pending_ckpt = p.override_settings.get("sd_model_checkpoint")
-            if not pending_ckpt and hasattr(shared, "opts"):
-                pending_ckpt = getattr(shared.opts, "sd_model_checkpoint", None)
-
-            info = None
-            if pending_ckpt:
-                info = get_anima_model_info(pending_ckpt)
-            if not info or not info.get("detected"):
-                info = get_anima_model_info(getattr(shared, "sd_model", None))
-            if not info or not info.get("detected"):
-                info = getattr(Script, "_last_loaded_model_info", None)
-            if not info:
-                info = {"detected": False, "method": "none", "model_name": "", "variant": "base"}
-
-            self._is_anima_model = info["detected"]
+            info = self._detect_anima(options=options, p=p)
             if self._is_anima_model:
-                self._anima_model_variant = info.get("variant") or resolve_anima_variant(
-                    info.get("model_name", "")
-                )
-                self._anima_capabilities = info.get("capabilities")
                 anima_auto_detect = getattr(options, "anima_auto_detect", True)
                 if anima_auto_detect:
                     change_dash = True
@@ -4258,6 +4273,7 @@ class Script(scripts.Script):
         except Exception:
             self._is_anima_model = False
             self._anima_model_variant = "base"
+            self._anima_capabilities = None
 
         self._current_booru_name = booru
         if booru == "gelbooru":
@@ -5740,13 +5756,8 @@ class Script(scripts.Script):
             # Catches first generation after cold-load / checkpoint switch
             if not getattr(self, "_is_anima_model", False):
                 try:
-                    late_info = get_anima_model_info(getattr(shared, "sd_model", None))
+                    late_info = self._detect_anima(p=p, sd_model=getattr(shared, "sd_model", None))
                     if late_info and late_info.get("detected"):
-                        self._is_anima_model = True
-                        self._anima_model_variant = late_info.get(
-                            "variant"
-                        ) or resolve_anima_variant(late_info.get("model_name", ""))
-                        self._anima_capabilities = late_info.get("capabilities")
                         print(
                             f"[R Process] Anima model detected on engine load ({late_info['model_name']}, variant={self._anima_model_variant}, method={late_info.get('method')})"
                         )
