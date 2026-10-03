@@ -371,13 +371,11 @@ def test_prompt_rules_and_filter_toggles_equivalence():
     assert reason_tup == reason_obj
 
 
-def test_filter_rule_divergence_characterization():
-    """Characterize current divergence between _process_single_prompt and post_rejected_by_filter.
+def test_filter_rule_convergence_unified():
+    """Verify convergence between _process_single_prompt and post_rejected_by_filter.
 
-    1. ' drawn by' tags: post_rejected_by_filter rejects them via remove_artist,
-       whereas _process_single_prompt currently retains them unless present in artist_norm.
-    2. girl-suffix tags: post_rejected_by_filter rejects them via remove_girl_suffix,
-       whereas _process_single_prompt has no girl-suffix rule and retains them.
+    1. ' drawn by' tags: both post_rejected_by_filter and _process_single_prompt reject them via remove_artist.
+    2. girl-suffix tags: both post_rejected_by_filter and _process_single_prompt reject them via remove_girl_suffix.
     """
     import scripts.ranbooru as ranbooru
     from ranboorux.tag_pipeline import FilterToggles, PromptRules, post_rejected_by_filter
@@ -406,8 +404,8 @@ def test_filter_rule_divergence_characterization():
         "",
         PromptRules(remove_artist_tags=True),
     )
-    # CURRENT DIVERGENCE: _process_single_prompt keeps "art_drawn_by_alice"
-    assert "art_drawn_by_alice" in prompt_out_drawn
+    # UNIFIED: _process_single_prompt now removes "art_drawn_by_alice"
+    assert "art_drawn_by_alice" not in prompt_out_drawn
 
     # Case 2: girl-suffix tag like "cat_girl"
     post_cat_girl = {"tags": "cat_girl"}
@@ -431,7 +429,8 @@ def test_filter_rule_divergence_characterization():
         "",
         PromptRules(remove_girl_suffix_tags=True),
     )
-    # CURRENT DIVERGENCE: _process_single_prompt does not have girl-suffix rule yet and keeps "cat_girl"
-    assert "cat_girl" in prompt_out_girl
+    # UNIFIED: _process_single_prompt now applies girl-suffix rule and removes "cat_girl"
+    assert "cat_girl" not in prompt_out_girl
+
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
 
 _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -29,10 +29,51 @@ class PromptRules:
     remove_series_tags: bool = False
     remove_girl_suffix_tags: bool = False
 
+    @property
+    def remove_artist(self) -> bool:
+        return self.remove_artist_tags
+
+    @property
+    def remove_character(self) -> bool:
+        return self.remove_character_tags
+
+    @property
+    def remove_clothing(self) -> bool:
+        return self.remove_clothing_tags
+
+    @property
+    def remove_text(self) -> bool:
+        return self.remove_text_tags
+
+    @property
+    def restrict_subject(self) -> bool:
+        return self.restrict_subject_tags
+
+    @property
+    def remove_furry(self) -> bool:
+        return self.remove_furry_tags
+
+    @property
+    def remove_headwear(self) -> bool:
+        return self.remove_headwear_tags
+
+    @property
+    def remove_girl_suffix(self) -> bool:
+        return self.remove_girl_suffix_tags
+
+    @property
+    def preserve_hair_eye(self) -> bool:
+        return self.preserve_hair_eye_colors
+
+    @property
+    def remove_series(self) -> bool:
+        return self.remove_series_tags
+
     @classmethod
     def from_legacy_tuple(cls, t: tuple) -> PromptRules:
         if len(t) == 15:
-            return cls(*t, False)
+            expanded = t + (False,)
+            return cls(*expanded)
         return cls(*t)
 
 
@@ -48,6 +89,46 @@ class FilterToggles:
     remove_girl_suffix: bool = False
     preserve_hair_eye: bool = False
     remove_series: bool = False
+
+    @property
+    def remove_artist_tags(self) -> bool:
+        return self.remove_artist
+
+    @property
+    def remove_character_tags(self) -> bool:
+        return self.remove_character
+
+    @property
+    def remove_clothing_tags(self) -> bool:
+        return self.remove_clothing
+
+    @property
+    def remove_text_tags(self) -> bool:
+        return self.remove_text
+
+    @property
+    def restrict_subject_tags(self) -> bool:
+        return self.restrict_subject
+
+    @property
+    def remove_furry_tags(self) -> bool:
+        return self.remove_furry
+
+    @property
+    def remove_headwear_tags(self) -> bool:
+        return self.remove_headwear
+
+    @property
+    def remove_girl_suffix_tags(self) -> bool:
+        return self.remove_girl_suffix
+
+    @property
+    def preserve_hair_eye_colors(self) -> bool:
+        return self.preserve_hair_eye
+
+    @property
+    def remove_series_tags(self) -> bool:
+        return self.remove_series
 
     @classmethod
     def from_legacy_tuple(cls, t: tuple) -> FilterToggles:
@@ -849,6 +930,117 @@ def normalize_post_tags(
     return normalized_tags, buckets
 
 
+def should_remove_tag(
+    raw_tag: str,
+    rules: Union[FilterToggles, PromptRules],
+    ctx: Optional[Dict[str, Any]] = None,
+    *,
+    filter_ctx: Optional[Dict[str, object]] = None,
+    favorites_guard: Optional[Set[str]] = None,
+    base_hair: Optional[Set[str]] = None,
+    base_eye: Optional[Set[str]] = None,
+    allowed_subjects: Optional[Set[str]] = None,
+    primary_subject: Optional[str] = None,
+    artist_norm: Optional[Set[str]] = None,
+    char_norm: Optional[Set[str]] = None,
+    bucket_name: Optional[str] = None,
+    normalized_tag: Optional[str] = None,
+    canonical_tag: Optional[str] = None,
+    catalog_resolve_alias_fn=None,
+    catalog_is_textual_fn=None,
+    catalog_is_hair_fn=None,
+    catalog_is_eye_fn=None,
+    catalog_category_fn=None,
+) -> Tuple[bool, Optional[str]]:
+    """Determine whether a tag should be rejected/removed according to filter rules.
+    Returns (should_remove: bool, rule_name: Optional[str]).
+    """
+    if ctx is None:
+        ctx = {}
+    f_dict = filter_ctx if filter_ctx is not None else (
+        ctx if ("synonyms" in ctx or "exact" in ctx or "contains" in ctx) else ctx.get("filter_ctx")
+    )
+    fav_guard = favorites_guard if favorites_guard is not None else ctx.get("favorites_guard", set())
+    b_hair = base_hair if base_hair is not None else ctx.get("base_hair", set())
+    b_eye = base_eye if base_eye is not None else ctx.get("base_eye", set())
+    all_subj = allowed_subjects if allowed_subjects is not None else ctx.get("allowed_subjects", set())
+    prim_subj = primary_subject if primary_subject is not None else ctx.get("primary_subject")
+    a_norm = artist_norm if artist_norm is not None else ctx.get("artist_norm", set())
+    c_norm = char_norm if char_norm is not None else ctx.get("char_norm", set())
+    b_name = bucket_name if bucket_name is not None else ctx.get("bucket_name")
+
+    norm_tag = normalized_tag if normalized_tag is not None else (normalize_tag(raw_tag) or "").strip().lower()
+    canon_tag = canonical_tag if canonical_tag is not None else (norm_tag or canonicalize_raw_tag(raw_tag) or "")
+
+    if norm_tag and norm_tag in fav_guard:
+        return False, None
+
+    if rules.remove_artist and (
+        b_name == "artist_tags"
+        or (a_norm and (norm_tag in a_norm or raw_tag.strip().lower() in a_norm))
+        or (norm_tag and (norm_tag.endswith(" artist") or " drawn by" in norm_tag))
+    ):
+        return True, "artist"
+
+    if rules.remove_character and (
+        b_name == "character_tags"
+        or (c_norm and (norm_tag in c_norm or raw_tag.strip().lower() in c_norm))
+        or ("(" in raw_tag and ")" in raw_tag and not raw_tag.strip().startswith("("))
+        or (
+            norm_tag
+            and (
+                norm_tag.endswith(" character")
+                or norm_tag.endswith(" characters")
+                or norm_tag.endswith(" series")
+                or norm_tag.endswith(" franchise")
+            )
+        )
+    ):
+        return True, "character"
+
+    if rules.remove_series and (
+        b_name == "copyright_tags" or is_series_tag(raw_tag, catalog_category_fn)
+    ):
+        return True, "series"
+
+    if rules.remove_clothing and is_clothing_tag(raw_tag):
+        return True, "clothing"
+
+    if rules.remove_text and is_textual_tag(raw_tag, catalog_is_textual_fn):
+        return True, "text"
+
+    if rules.remove_furry and is_furry_tag(raw_tag):
+        return True, "furry"
+
+    if rules.remove_headwear and is_headwear_tag(raw_tag):
+        return True, "headwear"
+
+    if rules.remove_girl_suffix and is_girl_suffix_tag(raw_tag):
+        return True, "girl-suffix"
+
+    if rules.preserve_hair_eye:
+        if is_hair_color_tag(raw_tag, catalog_is_hair_fn) and b_hair:
+            if norm_tag not in b_hair and canon_tag not in b_hair:
+                return True, "hair-color-conflict"
+        if is_eye_color_tag(raw_tag, catalog_is_eye_fn) and b_eye:
+            if norm_tag not in b_eye and canon_tag not in b_eye:
+                return True, "eye-color-conflict"
+
+    if rules.restrict_subject and is_subject_tag(raw_tag):
+        subject_norm = norm_tag or canon_tag
+        if all_subj:
+            if subject_norm not in all_subj:
+                return True, "subject-not-allowed"
+        else:
+            if prim_subj is not None and subject_norm != prim_subj:
+                return True, "multiple-subjects"
+
+    if f_dict and norm_tag and tag_matches_removal(canon_tag or norm_tag, f_dict):
+        return True, "removal-list"
+
+    return False, None
+
+
 def post_rejected_by_filter(
     post: Optional[Dict[str, object]],
     *,
@@ -866,16 +1058,6 @@ def post_rejected_by_filter(
 ) -> Tuple[bool, Optional[Dict[str, object]]]:
     if isinstance(toggles, tuple):
         toggles = FilterToggles.from_legacy_tuple(toggles)
-    remove_artist = toggles.remove_artist
-    remove_character = toggles.remove_character
-    remove_clothing = toggles.remove_clothing
-    remove_text = toggles.remove_text
-    restrict_subject = toggles.restrict_subject
-    remove_furry = toggles.remove_furry
-    remove_headwear = toggles.remove_headwear
-    remove_girl_suffix = toggles.remove_girl_suffix
-    preserve_hair_eye = toggles.preserve_hair_eye
-    remove_series = toggles.remove_series
     base_hair, base_eye = base_colors
     _, buckets = normalize_post_tags(post, cache, catalog_resolve_alias_fn)
     primary_subject: Optional[str] = None
@@ -886,8 +1068,6 @@ def post_rejected_by_filter(
     for bucket_name, tags in buckets.items():
         for raw_tag in tags:
             normalized_tag = get_normalized_cached(raw_tag)
-            if normalized_tag and normalized_tag in favorites_guard:
-                continue
             canonical_tag = normalized_tag or canonicalize_raw_tag(raw_tag)
             canonical_tag = canonical_tag or ""
             reason_base = {
@@ -896,70 +1076,33 @@ def post_rejected_by_filter(
                 "bucket": bucket_name,
             }
 
-            if remove_artist and (
-                bucket_name == "artist_tags"
-                or (
-                    normalized_tag
-                    and (normalized_tag.endswith(" artist") or " drawn by" in normalized_tag)
-                )
+            rejected, rule = should_remove_tag(
+                raw_tag,
+                toggles,
+                filter_ctx=filter_ctx,
+                favorites_guard=favorites_guard,
+                base_hair=base_hair,
+                base_eye=base_eye,
+                allowed_subjects=allowed_subjects,
+                primary_subject=primary_subject,
+                bucket_name=bucket_name,
+                normalized_tag=normalized_tag,
+                canonical_tag=canonical_tag,
+                catalog_resolve_alias_fn=catalog_resolve_alias_fn,
+                catalog_is_textual_fn=catalog_is_textual_fn,
+                catalog_is_hair_fn=catalog_is_hair_fn,
+                catalog_is_eye_fn=catalog_is_eye_fn,
+                catalog_category_fn=catalog_category_fn,
+            )
+            if rejected:
+                return True, {**reason_base, "rule": rule}
+
+            if (
+                toggles.restrict_subject
+                and not allowed_subjects
+                and is_subject_tag(raw_tag)
+                and primary_subject is None
             ):
-                return True, {**reason_base, "rule": "artist"}
-
-            if remove_character and (
-                bucket_name == "character_tags"
-                or ("(" in raw_tag and ")" in raw_tag and not raw_tag.strip().startswith("("))
-                or (
-                    normalized_tag
-                    and (
-                        normalized_tag.endswith(" character")
-                        or normalized_tag.endswith(" characters")
-                        or normalized_tag.endswith(" series")
-                        or normalized_tag.endswith(" franchise")
-                    )
-                )
-            ):
-                return True, {**reason_base, "rule": "character"}
-
-            if remove_series and (
-                bucket_name == "copyright_tags" or is_series_tag(raw_tag, catalog_category_fn)
-            ):
-                return True, {**reason_base, "rule": "series"}
-
-            if remove_clothing and is_clothing_tag(raw_tag):
-                return True, {**reason_base, "rule": "clothing"}
-
-            if remove_text and is_textual_tag(raw_tag, catalog_is_textual_fn):
-                return True, {**reason_base, "rule": "text"}
-
-            if remove_furry and is_furry_tag(raw_tag):
-                return True, {**reason_base, "rule": "furry"}
-
-            if remove_headwear and is_headwear_tag(raw_tag):
-                return True, {**reason_base, "rule": "headwear"}
-
-            if remove_girl_suffix and is_girl_suffix_tag(raw_tag):
-                return True, {**reason_base, "rule": "girl-suffix"}
-
-            if preserve_hair_eye:
-                if is_hair_color_tag(raw_tag, catalog_is_hair_fn) and base_hair:
-                    if normalized_tag not in base_hair:
-                        return True, {**reason_base, "rule": "hair-color-conflict"}
-                if is_eye_color_tag(raw_tag, catalog_is_eye_fn) and base_eye:
-                    if normalized_tag not in base_eye:
-                        return True, {**reason_base, "rule": "eye-color-conflict"}
-
-            if restrict_subject and is_subject_tag(raw_tag):
-                subject_norm = normalized_tag or canonical_tag
-                if allowed_subjects:
-                    if subject_norm not in allowed_subjects:
-                        return True, {**reason_base, "rule": "subject-not-allowed"}
-                else:
-                    if primary_subject is None:
-                        primary_subject = subject_norm
-                    elif subject_norm != primary_subject:
-                        return True, {**reason_base, "rule": "multiple-subjects"}
-
-            if tag_matches_removal(canonical_tag, filter_ctx):
-                return True, {**reason_base, "rule": "removal-list"}
+                primary_subject = normalized_tag or canonical_tag
 
     return False, None

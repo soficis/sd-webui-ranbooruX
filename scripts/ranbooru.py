@@ -44,13 +44,13 @@ from ranboorux.anima_detect import (
     get_capabilities,
     resolve_anima_variant,
 )
-from ranboorux.safe_paths import contained_path, safe_join
 from ranboorux.boorus import Booru
 from ranboorux.integrations import adetailer as rb_adetailer_integration
 from ranboorux.integrations import adetailer_orchestration as rb_adetailer_orch
 from ranboorux.integrations import adetailer_runtime as rb_adetailer_runtime
 from ranboorux.integrations import controlnet as rb_controlnet_integration
 from ranboorux.integrations import img2img_lifecycle as rb_img2img_lifecycle
+from ranboorux.safe_paths import contained_path, safe_join
 
 EXTENSION_ROOT = basedir()
 # Ensure extension root is on sys.path for local package imports (e.g., sd_forge_controlnet)
@@ -3384,13 +3384,7 @@ class Script(scripts.Script):
         change_dash = settings.change_dash
         remove_artist_tags = settings.remove_artist_tags
         remove_character_tags = settings.remove_character_tags
-        remove_clothing_tags = settings.remove_clothing_tags
-        remove_text_tags = settings.remove_text_tags
         restrict_subject_tags = settings.restrict_subject_tags
-        remove_furry_tags = settings.remove_furry_tags
-        remove_headwear_tags = settings.remove_headwear_tags
-        preserve_hair_eye_colors = settings.preserve_hair_eye_colors
-        remove_series_tags = settings.remove_series_tags
         current_prompt = f"{initial_additions},{raw_prompt}" if initial_additions else raw_prompt
         prompt_tags = [
             tag.strip().lower() for tag in re.split(r"[\,\t\s]+", current_prompt) if tag.strip()
@@ -3477,87 +3471,36 @@ class Script(scripts.Script):
             for t in prompt_tags:
                 t_norm = self._normalize_cached(t, norm_cache)
                 canonical_tag = t_norm or rb_tag_pipeline.canonicalize_raw_tag(t)
-                t_orig = (t or "").strip().lower()
                 is_favorite = bool(t_norm and t_norm in favorites_guard)
                 if is_favorite:
                     filtered_prompt_tags.append(self._strip_disambiguator(t))
                     continue
-                should_remove = False
-                if remove_artist_tags and (
-                    t_norm in artist_norm
-                    or t_orig in artist_norm
-                    or (t_norm and t_norm.endswith(" artist"))
-                ):
-                    should_remove = True
-                elif remove_character_tags and (
-                    t_norm in char_norm
-                    or t_orig in char_norm
-                    or ("(" in t and ")" in t and not t.strip().startswith("("))
-                    or (t_norm and (t_norm.endswith(" series") or t_norm.endswith(" franchise")))
-                ):
-                    should_remove = True
-                if (
-                    not should_remove
-                    and remove_clothing_tags
-                    and rb_tag_pipeline.is_clothing_tag(t)
-                ):
-                    should_remove = True
-                if (
-                    not should_remove
-                    and remove_text_tags
-                    and rb_tag_pipeline.is_textual_tag(t, catalog.is_textual if catalog else None)
-                ):
-                    should_remove = True
-                if not should_remove and remove_furry_tags and rb_tag_pipeline.is_furry_tag(t):
-                    should_remove = True
-                if (
-                    not should_remove
-                    and remove_headwear_tags
-                    and rb_tag_pipeline.is_headwear_tag(t)
-                ):
-                    should_remove = True
-                if (
-                    not should_remove
-                    and remove_series_tags
-                    and rb_tag_pipeline.is_series_tag(t, catalog.category if catalog else None)
-                ):
-                    should_remove = True
-                if not should_remove and preserve_hair_eye_colors:
-                    if base_hair_colors and canonical_tag in base_hair_colors:
-                        pass
-                    elif base_eye_colors and canonical_tag in base_eye_colors:
-                        pass
-                    elif (
-                        base_hair_colors
-                        and rb_tag_pipeline.is_hair_color_tag(
-                            t, catalog.is_hair if catalog else None
-                        )
-                        and canonical_tag not in base_hair_colors
-                    ):
-                        should_remove = True
-                    elif (
-                        base_eye_colors
-                        and rb_tag_pipeline.is_eye_color_tag(t, catalog.is_eye if catalog else None)
-                        and canonical_tag not in base_eye_colors
-                    ):
-                        should_remove = True
-                if (
-                    not should_remove
-                    and restrict_subject_tags
-                    and rb_tag_pipeline.is_subject_tag(t)
-                ):
-                    subject_norm = t_norm
-                    if allowed_subjects:
-                        if subject_norm not in allowed_subjects:
-                            should_remove = True
-                    else:
-                        if primary_subject is None:
-                            primary_subject = subject_norm
-                        elif subject_norm != primary_subject:
-                            should_remove = True
-                if not should_remove and filter_ctx and t_norm:
-                    should_remove = self._tag_matches_removal(t_norm, filter_ctx)
+                should_remove, _ = rb_tag_pipeline.should_remove_tag(
+                    t,
+                    settings,
+                    filter_ctx=filter_ctx,
+                    favorites_guard=favorites_guard,
+                    base_hair=base_hair_colors,
+                    base_eye=base_eye_colors,
+                    allowed_subjects=allowed_subjects,
+                    primary_subject=primary_subject,
+                    artist_norm=artist_norm,
+                    char_norm=char_norm,
+                    normalized_tag=t_norm,
+                    canonical_tag=canonical_tag,
+                    catalog_is_textual_fn=catalog.is_textual if catalog else None,
+                    catalog_is_hair_fn=catalog.is_hair if catalog else None,
+                    catalog_is_eye_fn=catalog.is_eye if catalog else None,
+                    catalog_category_fn=catalog.category if catalog else None,
+                )
                 if not should_remove:
+                    if (
+                        settings.restrict_subject
+                        and not allowed_subjects
+                        and rb_tag_pipeline.is_subject_tag(t)
+                        and primary_subject is None
+                    ):
+                        primary_subject = t_norm or canonical_tag
                     filtered_prompt_tags.append(self._strip_disambiguator(t))
             prompt_tags = filtered_prompt_tags
         except Exception:
@@ -4651,6 +4594,7 @@ class Script(scripts.Script):
             self._restrict_subject_tags = bool(restrict_subject_tags_ui)
             self._remove_furry_tags = bool(remove_furry_tags_ui)
             self._remove_headwear_tags = bool(remove_headwear_tags_ui)
+            self._remove_girl_suffix_tags = bool(remove_girl_suffix_tags_ui)
             self._preserve_hair_eye_colors = bool(preserve_hair_eye_colors_ui)
             self._remove_series_tags = bool(remove_series_tags_ui)
 
@@ -4673,6 +4617,7 @@ class Script(scripts.Script):
                 restrict_subject_tags=self._restrict_subject_tags,
                 remove_furry_tags=self._remove_furry_tags,
                 remove_headwear_tags=self._remove_headwear_tags,
+                remove_girl_suffix_tags=self._remove_girl_suffix_tags,
                 preserve_hair_eye_colors=self._preserve_hair_eye_colors,
                 remove_series_tags=self._remove_series_tags,
             )
