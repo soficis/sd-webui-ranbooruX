@@ -629,7 +629,7 @@ class Script(scripts.Script):
         self._synonym_groups: Tuple[Set[str], ...] = tuple()
         self._synonym_lookup: Dict[str, Set[str]] = {}
         try:
-            norm = self._normalize_tag
+            norm = rb_tag_pipeline.normalize_tag
             groups: List[Set[str]] = []
             for group in REMOVAL_SYNONYM_GROUPS_RAW:
                 normalized_group = {norm(tag) for tag in group if norm(tag)}
@@ -689,24 +689,16 @@ class Script(scripts.Script):
         "favorites": FAVORITES_FILE,
     }
 
-    @staticmethod
-    def _canonicalize_raw_tag(tag: str) -> str:
-        return rb_tag_pipeline.canonicalize_raw_tag(tag)
-
-    @staticmethod
-    def _normalize_tag(tag: str) -> str:
-        return rb_tag_pipeline.normalize_tag(tag)
-
     def _read_list_file(self, path: str) -> List[str]:
         try:
-            return rb_user_store.read_list_file(path, normalize_fn=self._normalize_tag)
+            return rb_user_store.read_list_file(path, normalize_fn=rb_tag_pipeline.normalize_tag)
         except Exception as exc:
             print(f"[R Files] Failed to read list file {path}: {exc}")
             return []
 
     def _write_list_file(self, path: str, tags: Iterable[str]) -> None:
         try:
-            rb_user_store.write_list_file(path, tags, normalize_fn=self._normalize_tag)
+            rb_user_store.write_list_file(path, tags, normalize_fn=rb_tag_pipeline.normalize_tag)
         except Exception as exc:
             print(f"[R Files] Failed to write list file {path}: {exc}")
 
@@ -1081,7 +1073,7 @@ class Script(scripts.Script):
     def _normalize_cached(self, tag: str, cache: Dict[str, str]) -> str:
         if tag in cache:
             return cache[tag]
-        normalized = self._normalize_tag(tag)
+        normalized = rb_tag_pipeline.normalize_tag(tag)
         if normalized:
             catalog = self._active_catalog()
             if catalog:
@@ -1115,7 +1107,7 @@ class Script(scripts.Script):
         seen: Set[str] = set()
         ordered: List[str] = []
         for seg in segments:
-            norm = self._normalize_tag(seg) or seg.casefold()
+            norm = rb_tag_pipeline.normalize_tag(seg) or seg.casefold()
             if norm in seen:
                 continue
             seen.add(norm)
@@ -1138,7 +1130,7 @@ class Script(scripts.Script):
             cleaned = (tag or "").strip()
             if not cleaned:
                 continue
-            key = self._normalize_tag(cleaned) or cleaned.casefold()
+            key = rb_tag_pipeline.normalize_tag(cleaned) or cleaned.casefold()
             if key in seen:
                 continue
             seen.add(key)
@@ -1166,7 +1158,7 @@ class Script(scripts.Script):
             working = self._merge_tag_lists(working, combined_additions)
         if removals:
             removal_keys = {
-                self._normalize_tag(tag) or tag.casefold()
+                rb_tag_pipeline.normalize_tag(tag) or tag.casefold()
                 for tag in removals
                 if isinstance(tag, str)
             }
@@ -1174,7 +1166,7 @@ class Script(scripts.Script):
                 working = [
                     tag
                     for tag in working
-                    if (self._normalize_tag(tag) or tag.casefold()) not in removal_keys
+                    if (rb_tag_pipeline.normalize_tag(tag) or tag.casefold()) not in removal_keys
                 ]
         if dedupe:
             working = self._merge_tag_lists([], working)
@@ -1431,9 +1423,9 @@ class Script(scripts.Script):
         catalog = self._active_catalog()
         tokens = [token.strip() for token in re.split(r"[\s,]+", text) if token.strip()]
         for token in tokens:
-            normalized = (self._normalize_tag(token) or "").strip().lower()
+            normalized = (rb_tag_pipeline.normalize_tag(token) or "").strip().lower()
             if not normalized:
-                normalized = self._canonicalize_raw_tag(token)
+                normalized = rb_tag_pipeline.canonicalize_raw_tag(token)
             if not normalized:
                 continue
             if catalog:
@@ -1449,9 +1441,6 @@ class Script(scripts.Script):
             if normalized in rb_tag_pipeline._EYE_COLOR_TAGS_NORMALIZED:
                 eye_tags.add(normalized)
         return hair_tags, eye_tags
-
-    def _extract_subject_tags(self, text: str) -> set:
-        return rb_tag_pipeline.extract_subject_tags(text)
 
     def _post_rejected_by_filter(
         self,
@@ -3411,7 +3400,7 @@ class Script(scripts.Script):
             character_tags_meta = (
                 post_meta.get("character_tags", []) if isinstance(post_meta, dict) else []
             )
-            norm = self._normalize_tag
+            norm = rb_tag_pipeline.normalize_tag
             artist_norm = {norm(t) for t in artist_tags_meta if isinstance(t, str)}
             char_norm = {norm(t) for t in character_tags_meta if isinstance(t, str)}
             if isinstance(post_meta, dict):
@@ -3459,10 +3448,10 @@ class Script(scripts.Script):
                         artist_norm.add(tag.strip().lower())
             allowed_subjects = set()
             if restrict_subject_tags:
-                allowed_subjects.update(self._extract_subject_tags(base_positive))
-                allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                allowed_subjects.update(rb_tag_pipeline.extract_subject_tags(base_positive))
+                allowed_subjects.update(rb_tag_pipeline.extract_subject_tags(initial_additions))
                 allowed_subjects.update(
-                    self._extract_subject_tags(getattr(self, "original_prompt", ""))
+                    rb_tag_pipeline.extract_subject_tags(getattr(self, "original_prompt", ""))
                 )
             filter_ctx = getattr(self, "_removal_context", None)
             favorites_guard: Set[str] = set()
@@ -3477,7 +3466,7 @@ class Script(scripts.Script):
             primary_subject = None
             for t in prompt_tags:
                 t_norm = self._normalize_cached(t, norm_cache)
-                canonical_tag = t_norm or self._canonicalize_raw_tag(t)
+                canonical_tag = t_norm or rb_tag_pipeline.canonicalize_raw_tag(t)
                 t_orig = (t or "").strip().lower()
                 is_favorite = bool(t_norm and t_norm in favorites_guard)
                 if is_favorite:
@@ -3770,7 +3759,7 @@ class Script(scripts.Script):
             self._host_scope.set_attr(p, "batch_size", 1)
 
             # LIGHTER APPROACH: Just mark that we're in initial pass - don't completely disable ADetailer
-            self._mark_initial_pass(p)
+            self._adetailer_orch._mark_initial_pass(p)
 
             # Hide intermediary previews from pass 1 / img2img so UI only reflects final results.
             try:
@@ -4365,7 +4354,7 @@ class Script(scripts.Script):
             return
 
         self._reset_script_runner_guards()
-        if self._is_adetailer_enabled():
+        if self._adetailer_orch.is_adetailer_enabled():
             print("[R Before] Resetting ADetailer blocking flags for new generation")
         else:
             print(
@@ -4466,7 +4455,7 @@ class Script(scripts.Script):
         self._strict_img2img_relaxed = False
         self._strict_img2img_rejections = []
         self._strict_initial_additions = ""
-        self._strict_allowed_subjects = set(self._extract_subject_tags(self.original_prompt))
+        self._strict_allowed_subjects = set(rb_tag_pipeline.extract_subject_tags(self.original_prompt))
         base_subjects = set(self._strict_allowed_subjects)
 
         if not should_fetch_new:
@@ -4501,7 +4490,7 @@ class Script(scripts.Script):
                 allowed_subjects = set()
                 if bool(restrict_subject_tags_ui):
                     allowed_subjects = set(base_subjects)
-                    allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                    allowed_subjects.update(rb_tag_pipeline.extract_subject_tags(initial_additions))
                     self._strict_allowed_subjects = set(allowed_subjects)
                 else:
                     self._strict_allowed_subjects = set()
@@ -4625,7 +4614,7 @@ class Script(scripts.Script):
 
                 if bool(restrict_subject_tags_ui):
                     allowed_subjects = set(base_subjects)
-                    allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                    allowed_subjects.update(rb_tag_pipeline.extract_subject_tags(initial_additions))
                     self._strict_allowed_subjects = set(allowed_subjects)
                 else:
                     self._strict_allowed_subjects = set()
@@ -5022,7 +5011,8 @@ class Script(scripts.Script):
             crop_center = getattr(self, "_post_crop_center", False)
             use_cache = getattr(self, "_post_use_cache", True)
             use_adetailer = (
-                getattr(self, "_post_adetailer_enabled", False) and self._is_adetailer_enabled()
+                getattr(self, "_post_adetailer_enabled", False)
+                and self._adetailer_orch.is_adetailer_enabled()
             )
 
             # Validate essential objects
@@ -5317,9 +5307,6 @@ class Script(scripts.Script):
             self._cleanup_after_run(use_cache)
             self._clear_processing_guards(p)
 
-    def _is_adetailer_enabled(self):
-        return self._adetailer_orch.is_adetailer_enabled()
-
     def _set_adetailer_block(self, should_block: bool):
         """Toggle the global guard on patched ADetailer classes"""
         self._adetailer_state.block_all = bool(should_block)
@@ -5610,10 +5597,6 @@ class Script(scripts.Script):
                 )
             yield
 
-    def _mark_initial_pass(self, p):
-        """Mark that we're in initial pass so ADetailer can be intercepted later"""
-        self._adetailer_orch._mark_initial_pass(p)
-
     def _reenable_adetailer_from_previous_generation(self):
         """Re-enable ALL ADetailer scripts that were disabled in the previous generation"""
         self._adetailer_orch._reenable_adetailer_from_previous_generation()
@@ -5807,7 +5790,7 @@ class Script(scripts.Script):
                 # Mark that we need to intercept results
                 setattr(self, "_intercept_results", True)
 
-                if self._is_adetailer_enabled():
+                if self._adetailer_orch.is_adetailer_enabled():
                     # EARLY PROTECTION: Disable ADetailer during initial pass
                     self._early_adetailer_protection(p)
 
@@ -5875,7 +5858,7 @@ class Script(scripts.Script):
 
     def _prepare_processing_for_manual_adetailer(self, p, processed, img2img_results):
         """Ensure p has correct images, sizes, prompts, and save paths before running ADetailer manually"""
-        if not self._is_adetailer_enabled():
+        if not self._adetailer_orch.is_adetailer_enabled():
             return
         try:
             if not img2img_results:

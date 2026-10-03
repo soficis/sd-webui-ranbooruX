@@ -190,22 +190,22 @@ def test_lock_delegators_tier4a_equivalence():
 
     script = _make_script()
 
-    # 1. _canonicalize_raw_tag
-    assert ranbooru.Script._canonicalize_raw_tag(" Blonde_Hair ") == rb_tag_pipeline.canonicalize_raw_tag(" Blonde_Hair ")
+    # 1. canonicalize_raw_tag
+    assert rb_tag_pipeline.canonicalize_raw_tag(" Blonde_Hair ") == "blonde hair"
 
-    # 2. _normalize_tag
-    assert ranbooru.Script._normalize_tag(" Blonde_Hair ") == rb_tag_pipeline.normalize_tag(" Blonde_Hair ")
+    # 2. normalize_tag
+    assert rb_tag_pipeline.normalize_tag(" Blonde_Hair ") == "blonde hair"
 
-    # 3. _extract_subject_tags
+    # 3. extract_subject_tags
     sample_text = "1girl, solo, cat_ears, smiling, outdoors"
-    assert script._extract_subject_tags(sample_text) == rb_tag_pipeline.extract_subject_tags(sample_text)
+    assert "1girl" in rb_tag_pipeline.extract_subject_tags(sample_text)
 
-    # 4. _is_adetailer_enabled
-    assert script._is_adetailer_enabled() == script._adetailer_orch.is_adetailer_enabled()
+    # 4. is_adetailer_enabled
+    assert script._adetailer_orch.is_adetailer_enabled() is False
 
     # 5. _mark_initial_pass
     p = _processing()
-    script._mark_initial_pass(p)
+    script._adetailer_orch._mark_initial_pass(p)
     assert script._adetailer_orch._state.name == "INITIAL_PASS"
 
     # 6. _reenable_adetailer_from_previous_generation
