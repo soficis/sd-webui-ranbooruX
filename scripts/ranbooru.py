@@ -1323,7 +1323,7 @@ class Script(scripts.Script):
         return None
 
     def _gelbooru_saved_message(self) -> str:
-        return f"? Using saved Gelbooru credentials from `{GELBOORU_CREDENTIALS_FILE}`."
+        return "? Using saved Gelbooru credentials."
 
     def _ui_save_gelbooru_credentials(self, api_key: Optional[str], user_id: Optional[str]):
         api_key = _sanitize_gelbooru_credential(api_key)

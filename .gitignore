@@ -42,6 +42,11 @@ __pypackages__/
 .env.*
 *.env
 .python-version
+*.key
+*.pem
+*.p12
+id_rsa*
+secrets.json
 
 # Virtual environments
 .venv/

@@ -49,3 +49,9 @@ jobs:
 
       - name: Mypy
         run: python -m mypy ranboorux --warn-return-any --warn-unused-ignores
+
+      - name: Gitleaks secret scanner (advisory)
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
