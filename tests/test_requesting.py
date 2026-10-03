@@ -764,4 +764,3 @@ def test_requesting_shim_reexports():
     assert hasattr(req, "validate_outbound_url")
     assert hasattr(req, "UnsafeUrlError")
     assert req.BooruSession is http_client.BooruSession
-
