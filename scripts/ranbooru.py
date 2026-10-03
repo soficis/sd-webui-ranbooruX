@@ -58,6 +58,9 @@ if EXTENSION_ROOT not in sys.path:
     sys.path.append(EXTENSION_ROOT)
 USER_DATA_DIR = os.path.join(EXTENSION_ROOT, "user")
 USER_SEARCH_DIR = os.path.join(USER_DATA_DIR, "search")
+
+SERIES_CATEGORY = rb_tag_pipeline.SERIES_CATEGORY
+CHARACTER_CATEGORY = rb_tag_pipeline.CHARACTER_CATEGORY
 USER_REMOVE_DIR = os.path.join(USER_DATA_DIR, "remove")
 LOG_DIR = os.path.join(USER_DATA_DIR, "logs")
 os.makedirs(USER_SEARCH_DIR, exist_ok=True)
@@ -1030,9 +1033,9 @@ class Script(scripts.Script):
                 original_subjects.append(canonical)
 
             reason: Optional[str] = None
-            if drop_series and category == 3:
+            if drop_series and category == SERIES_CATEGORY:
                 reason = "series"
-            elif drop_characters and category == 4:
+            elif drop_characters and category == CHARACTER_CATEGORY:
                 reason = "character"
             elif drop_textual and catalog.is_textual(canonical):
                 reason = "textual"
@@ -1724,14 +1727,11 @@ class Script(scripts.Script):
         )
 
     def get_files(self, path):
-        files = []
         try:
-            for file in os.listdir(path):
-                if file.endswith(".txt"):
-                    files.append(file)
+            return [f for f in os.listdir(path) if f.endswith(".txt")]
         except FileNotFoundError:
             print(f"[R] Warn: Dir not found: {path}")
-        return files
+            return []
 
     def title(self):
         return "RanbooruX"
@@ -3180,20 +3180,20 @@ class Script(scripts.Script):
             api.http = self._http_client
             return api
 
-        booru_apis = {
-            "gelbooru": Gelbooru(fringe_benefits, gelbooru_credentials),
-            "danbooru": Danbooru(),
-            "xbooru": XBooru(),
-            "rule34": Rule34(),
-            "safebooru": Safebooru(),
-            "konachan": Konachan(),
-            "yande.re": Yandere(),
-            "aibooru": AIBooru(),
-            "e621": e621(),
+        booru_factories = {
+            "gelbooru": lambda: Gelbooru(fringe_benefits, gelbooru_credentials),
+            "danbooru": Danbooru,
+            "xbooru": XBooru,
+            "rule34": Rule34,
+            "safebooru": Safebooru,
+            "konachan": Konachan,
+            "yande.re": Yandere,
+            "aibooru": AIBooru,
+            "e621": e621,
         }
-        if booru_name not in booru_apis:
+        if booru_name not in booru_factories:
             raise ValueError(f"Booru '{booru_name}' not implemented.")
-        api = booru_apis.get(booru_name)
+        api = booru_factories[booru_name]()
         if api is not None:
             api.http = self._http_client
         return api

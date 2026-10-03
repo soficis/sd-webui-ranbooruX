@@ -321,3 +321,32 @@ class TestCatalogPathHintContainment:
         ok, msg = script._import_custom_catalog(uploaded={"name": str(catalog_path)}, path_hint="")
         assert ok, msg
         assert script._catalog_source == "custom"
+
+
+def test_category_consts_and_lazy_registry(tmp_path):
+    import scripts.ranbooru as ranbooru
+    from ranboorux.boorus.simple import Danbooru, Safebooru
+    from ranboorux.tag_pipeline import (
+        CHARACTER_CATEGORY,
+        SERIES_CATEGORY,
+        is_character_tag,
+        is_series_tag,
+    )
+
+    assert SERIES_CATEGORY == 3
+    assert CHARACTER_CATEGORY == 4
+    assert getattr(ranbooru, "SERIES_CATEGORY") == 3
+    assert getattr(ranbooru, "CHARACTER_CATEGORY") == 4
+
+    catalog = ranbooru.CsvCatalog(_write_catalog(tmp_path))
+    assert is_series_tag("copyright_tag", catalog.category) is True
+    assert is_character_tag("naruto", catalog.category) is True
+    assert is_series_tag("1girl", catalog.category) is False
+    assert is_character_tag("1girl", catalog.category) is False
+
+    script = _make_script(tmp_path)
+    danbooru_api = script._get_booru_api("danbooru", fringe_benefits=False)
+    assert isinstance(danbooru_api, Danbooru)
+    safebooru_api = script._get_booru_api("safebooru", fringe_benefits=False)
+    assert isinstance(safebooru_api, Safebooru)
+

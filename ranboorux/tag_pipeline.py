@@ -9,6 +9,9 @@ _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
 _WHITESPACE_RE = re.compile(r"\s+")
 _TAG_SPLIT_RE = re.compile(r"[,\s]+")
 
+SERIES_CATEGORY: int = 3
+CHARACTER_CATEGORY: int = 4
+
 
 @dataclass(frozen=True)
 class PromptRules:
@@ -653,11 +656,29 @@ def is_series_tag(tag: str, catalog_category_fn=None) -> bool:
         normalized = canonicalize_raw_tag(tag)
     if not normalized:
         return False
-    if catalog_category_fn and catalog_category_fn(normalized.replace(" ", "_")) == 3:
+    if catalog_category_fn and catalog_category_fn(normalized.replace(" ", "_")) == SERIES_CATEGORY:
         return True
     if normalized in _SERIES_KEYWORDS_NORMALIZED:
         return True
     if any(normalized.endswith(suffix) for suffix in _SERIES_SUFFIXES_NORMALIZED):
+        return True
+    return False
+
+
+def is_character_tag(tag: str, catalog_category_fn=None) -> bool:
+    normalized = (normalize_tag(tag) or "").strip().lower()
+    if not normalized:
+        normalized = canonicalize_raw_tag(tag)
+    if not normalized:
+        return False
+    if catalog_category_fn and catalog_category_fn(normalized.replace(" ", "_")) == CHARACTER_CATEGORY:
+        return True
+    if "(" in tag and ")" in tag and not tag.strip().startswith("("):
+        return True
+    if any(
+        normalized.endswith(suffix)
+        for suffix in (" character", " characters", " series", " franchise")
+    ):
         return True
     return False
 
@@ -985,16 +1006,7 @@ def should_remove_tag(
     if rules.remove_character and (
         b_name == "character_tags"
         or (c_norm and (norm_tag in c_norm or raw_tag.strip().lower() in c_norm))
-        or ("(" in raw_tag and ")" in raw_tag and not raw_tag.strip().startswith("("))
-        or (
-            norm_tag
-            and (
-                norm_tag.endswith(" character")
-                or norm_tag.endswith(" characters")
-                or norm_tag.endswith(" series")
-                or norm_tag.endswith(" franchise")
-            )
-        )
+        or is_character_tag(raw_tag, catalog_category_fn)
     ):
         return True, "character"
 
