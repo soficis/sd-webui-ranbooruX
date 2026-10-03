@@ -17,11 +17,11 @@ It fetches booru tags and source images, builds prompts, and supports a two-stag
 RanbooruX delivers massive architectural and feature upgrades over original Ranbooru:
 
 - **Forge Neo & ADetailer Neo Native Support**: Built exclusively for Forge Neo, with full support for ADetailer Neo and standard ADetailer in two-pass Img2Img workflows.
-- **Anima (2B DiT) Support**: Native auto-detection of Anima models with automatic flow-matching scheduler tuning, prompt quality prefixes, and working basic Img2Img & ControlNet LLLite support.
+- **Anima (2B DiT) Support**: Native auto-detection of Anima models with automatic flow-matching scheduler tuning, prompt quality prefixes, and generic ControlNet Unit 0 image handoff.
 - **Danbooru Tag Catalog System**: Bundled tag catalog (`data/catalogs/danbooru_tags.csv`) providing alias normalization, category-aware filtering, custom CSV import, and hair/eye color preservation.
 - **Safer Two-Pass Img2Img & Guarded Postprocessing**: Preview guard suppresses initial-pass flashes until final img2img outputs are rendered; guarded script runner prevents script collisions.
 - **Rich Booru & Tag Removal Filters**: Multi-booru search (`aibooru`, `danbooru`, `e621`, `gelbooru`, `konachan`, `rule34`, `safebooru`, `xbooru`, `yande.re`) with fine-grained removal toggles (artist, character, series, clothing, commentary, furry, headwear, `*_girl` suffix cleanup).
-- **LoRAnado Random LoRA Injection**: Automatic detection and control surfaces for PonyXL & Anima-compatible LoRAs with blacklist support.
+- **LoRAnado Random LoRA Injection**: Automatic detection and control surfaces for PonyXL-compatible LoRAs with blacklist support (Anima LoRA pattern detection is not currently implemented).
 - **Modular Codebase & Quality Tooling**: Refactored from a monolithic script into a clean `ranboorux/` module with unit tests (`pytest`), strict type checking (`mypy`), linting (`ruff`), and formatting (`black`).
 - **User Conveniences**: Favorites management, file-driven tag sources, prompt/source logging, and sensible caching.
 
@@ -134,23 +134,33 @@ For Img2Img workflows, RanbooruX executes a coordinated multi-stage process:
 3. **ControlNet Handoff**: When `Use Image for ControlNet (Unit 0)` is enabled, the fetched booru reference image is automatically assigned to Unit 0 in Forge Neo's ControlNet runner.
 4. **ADetailer / ADetailer Neo Pass**: Runs a guarded postprocessing pass on the final images, auto-detecting both standard ADetailer and ADetailer Neo scripts.
 
+## Supported Model Families
+
+Forge Neo ships 15 diffusion engines (`backend/loader.py:46`). RanbooruX's support across these families is as follows:
+
+| Model Family | Engine / Class | RanbooruX Handling | Notes |
+|---|---|---|---|
+| **Anima** (2B / 2.9B / 3.8B) | `Anima` | Checkpoint detection, quality prefix, score tag preservation, flow-matching img2img tuning | Hybrid tag/prose architecture via Qwen3 + learned T5-token adapter. |
+| **PonyXL** | `StableDiffusionXL` | LoRA-file level pattern detection only | Checkpoint is not detected; LoRAnado filters Pony-compatible LoRAs. |
+| **SD 1.5 / SDXL / Illustrious / NoobAI / CKXL** | `StableDiffusion`, `StableDiffusionXL` | Standard booru tag processing | Tag-native CLIP models; standard UNet-era parameters applied. |
+| **Flux / Flux2 / Chroma / Lumina2 / Wan / QwenImage / ZImage / Krea2 / ErnieImage / PiD / Mugen** | Various DiT engines | Not detected | Caption/prose-oriented DiT models; default prompt pipeline applied. |
+
 ## Anima Model Support
 
 RanbooruX natively supports **Anima** (a 2B parameter DiT model by CircleStone Labs + Comfy Org built on NVIDIA Cosmos-Predict2) in Forge Neo with basic Img2Img support fully working.
 
 ### Anima ControlNet Support
 
-RanbooruX supports **basic ControlNet Img2Img & conditioning handoff** for Anima models.
+RanbooruX supports **generic ControlNet Unit 0 image handoff** for workflows in Forge Neo, including Anima.
 
-Anima uses a 2B Diffusion Transformer (DiT) architecture, which requires specialized **ControlNet-LLLite** models rather than standard SD/SDXL ControlNets:
+Anima uses a 2B Diffusion Transformer (DiT) architecture, which in Forge Neo utilizes specialized **ControlNet-LLLite** models rather than standard SD/SDXL ControlNets:
 
-- **Available LLLite Models**: `anima-lllite-lineart-1` (line art / pose guidance), `anima-lllite-depth-1` (depth estimation guidance), `anima-lllite-inpainting-v2` (targeted inpainting).
 - **How to Use**:
   1. Open Forge Neo's **ControlNet** panel (Unit 0 tab).
-  2. Select an Anima LLLite model (`anima-lllite-lineart-1` or `anima-lllite-depth-1`) and matching preprocessor (`anime_lineart` or `depth`).
+  2. Select an Anima LLLite model and matching preprocessor (e.g. line art, depth, inpainting) manually in Forge Neo's interface.
   3. In RanbooruX, check **`Use Image for ControlNet (Unit 0)`**.
-  4. Click **Generate** — RanbooruX automatically passes the fetched booru image to Unit 0.
-- **Scope & Limitations**: RanbooruX handles standard ControlNet LLLite image handoff into Unit 0. Anima Edit (Cosmos-Reference) is not supported.
+  4. Click **Generate** — RanbooruX passes the fetched booru image to Unit 0.
+- **Scope & Limitations**: RanbooruX handles standard ControlNet image handoff into Unit 0. Model selection and preprocessing are managed directly within Forge Neo.
 
 ### How "ControlNet Unit 0" Works in Forge Neo
 
@@ -161,8 +171,8 @@ In Forge Neo, ControlNet units are 0-indexed under the hood:
 ### Understanding & Customizing Anima Settings
 
 When an Anima model is loaded and **`Auto-detect Anima model`** is enabled:
-- **Tag Formatting**: Automatically converts underscores (`_`) to spaces (e.g. `blue_hair` → `blue hair`) for Anima's Qwen3 text encoder.
-- **Default Quality Prefix**: Auto-prepends `masterpiece, best quality, score_7, safe, ` if no quality tags are present.
+- **Tag Formatting**: Automatically converts underscores (`_`) to spaces (e.g. `blue_hair` → `blue hair`) while preserving `score_*` tags for Anima's hybrid Qwen3 text encoder (which accepts tags via a learned T5-token adapter).
+- **Default Quality Prefix**: Auto-prepends `masterpiece, best quality, score_7, safe, ` if no quality tags are present (for variants emitting score tags).
 - **Default Negative Prompt**: Auto-fills default negative prompt (`worst quality, low quality, score_1, score_2...`) if negative prompt is empty.
 - **Customization**: Uncheck **`Auto-detect Anima model`** to bypass default quality prefixes and negative prompts for 100% custom prompt construction.
 
@@ -189,7 +199,7 @@ Original Ranbooru was a monolithic single-script extension (~1.1k lines). Ranboo
 | --- | --- | --- |
 | **Target Platform** | Legacy SD WebUI / A1111 | Exclusively **Forge Neo** & **ADetailer Neo** |
 | **Architecture** | Single file (`scripts/ranbooru.py`) | Modular package (`ranboorux/`) + script wrappers |
-| **Anima Model Support** | None | Full auto-detection, quality defaults, working Img2Img & ControlNet (LLLite) |
+| **Anima Model Support** | None | Auto-detection, quality defaults, img2img tuning, generic ControlNet Unit 0 handoff |
 | **ADetailer Integration** | None / basic script calling | Guarded two-pass runner supporting ADetailer & ADetailer Neo |
 | **Tag Processing** | Ad-hoc string replacements | Bundled Danbooru Tag Catalog (`data/catalogs/danbooru_tags.csv`) |
 | **Testing & Quality** | No tests | Complete `pytest` test suite, `mypy`, `ruff`, `black` & CI |
@@ -244,21 +254,19 @@ PYTHONPATH=. python3 -m black --check scripts/ranbooru.py ranboorux tests tools 
 PYTHONPATH=. python3 -m mypy ranboorux --warn-return-any --warn-unused-ignores
 ```
 
-## LoRAnado (PonyXL & Anima detection)
+## LoRAnado (PonyXL LoRA Detection)
 
 > [!NOTE]
 > LoRAnado is a legacy feature inherited from original Ranbooru.
 
-LoRAnado includes detection and control surfaces to reduce incompatible LoRA picks in PonyXL and Anima workflows.
+LoRAnado includes detection and control surfaces to filter PonyXL-compatible LoRAs based on filename tokens and model metadata keys (`_LORANADO_PONY_PATTERNS`). If no compatible LoRAs are detected, RanbooruX falls back to all LoRAs in the target directory. Note: Anima LoRA pattern detection is not currently implemented.
 
 Controls:
-- `Auto-detect PonyXL/Anima-compatible LoRAs`
+- `Auto-detect PonyXL-compatible LoRAs`
 - `Scan LoRAs`
 - `Select All Compatible`
 - `Detected LoRAs (toggle enabled)`
 - `LoRAnado blacklist`
-
-Detection matches PonyXL and Anima model signatures based on filename tokens and model metadata keys. If no compatible LoRAs are detected, RanbooruX falls back to all LoRAs in the target directory.
 
 ## Credits
 
