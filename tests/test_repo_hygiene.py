@@ -73,3 +73,55 @@ def test_secret_scanner_configured_in_precommit_and_ci():
     ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "gitleaks" in ci
     assert "continue-on-error: true" in ci
+
+
+def test_pip_audit_configured_in_ci():
+    ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "pip-audit" in ci
+    assert "pip-audit -r requirements.txt" in ci
+
+
+def test_install_req_surfaces_errors_to_stderr_without_crashing(capsys, monkeypatch, tmp_path):
+    import sys
+    import types
+
+    launch_stub = types.ModuleType("launch")
+    launch_stub.run_pip = lambda cmd, desc: None
+    monkeypatch.setitem(sys.modules, "launch", launch_stub)
+
+    import install
+
+    req_file = tmp_path / "reqs.txt"
+    req_file.write_text("foo>=1.0.0\n", encoding="utf-8")
+
+    # Case 1: Exception raised by launch.run_pip
+    def mock_fail_raise(cmd, desc):
+        raise RuntimeError("simulated pip explosion")
+
+    monkeypatch.setattr(install.launch, "run_pip", mock_fail_raise)
+    install._install_req(str(req_file), "test package")
+
+    captured = capsys.readouterr()
+    assert (
+        "[RanbooruX] ERROR: Failed to install test package: simulated pip explosion" in captured.err
+    )
+
+    # Case 2: Non-zero exit code returned by launch.run_pip
+    def mock_fail_code(cmd, desc):
+        return 1
+
+    monkeypatch.setattr(install.launch, "run_pip", mock_fail_code)
+    install._install_req(str(req_file), "test package")
+
+    captured = capsys.readouterr()
+    assert (
+        "[RanbooruX] ERROR: Pip installation of test package failed with exit code 1"
+        in captured.err
+    )
+
+    # Case 3: Success (returns 0 or None)
+    monkeypatch.setattr(install.launch, "run_pip", lambda cmd, desc: 0)
+    install._install_req(str(req_file), "test package")
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
