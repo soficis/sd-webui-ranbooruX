@@ -21,6 +21,8 @@ def make_default_settings(
     change_dash=True,
     **overrides,
 ):
+    from ranboorux.tag_pipeline import PromptRules
+
     defaults = {
         "shuffle_tags": shuffle_tags,
         "chaos_mode": "None",
@@ -39,23 +41,8 @@ def make_default_settings(
         "remove_series_tags": False,
     }
     defaults.update(overrides)
-    return (
-        defaults["shuffle_tags"],
-        defaults["chaos_mode"],
-        defaults["chaos_amount"],
-        defaults["limit_tags_pct"],
-        defaults["max_tags_count"],
-        defaults["change_dash"],
-        defaults["remove_artist_tags"],
-        defaults["remove_character_tags"],
-        defaults["remove_clothing_tags"],
-        defaults["remove_text_tags"],
-        defaults["restrict_subject_tags"],
-        defaults["remove_furry_tags"],
-        defaults["remove_headwear_tags"],
-        defaults["preserve_hair_eye_colors"],
-        defaults["remove_series_tags"],
-    )
+    return PromptRules(**defaults)
+
 
 
 def test_negative_score_tags_survive_dash_transform(script):

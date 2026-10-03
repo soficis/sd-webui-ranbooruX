@@ -9,6 +9,48 @@ _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
 _WHITESPACE_RE = re.compile(r"\s+")
 _TAG_SPLIT_RE = re.compile(r"[,\s]+")
 
+
+@dataclass(frozen=True)
+class PromptRules:
+    shuffle_tags: bool = False
+    chaos_mode: str = "None"
+    chaos_amount: float = 0.0
+    limit_tags_pct: float = 1.0
+    max_tags_count: int = 0
+    change_dash: bool = False
+    remove_artist_tags: bool = False
+    remove_character_tags: bool = False
+    remove_clothing_tags: bool = False
+    remove_text_tags: bool = False
+    restrict_subject_tags: bool = False
+    remove_furry_tags: bool = False
+    remove_headwear_tags: bool = False
+    preserve_hair_eye_colors: bool = False
+    remove_series_tags: bool = False
+
+    @classmethod
+    def from_legacy_tuple(cls, t: tuple) -> PromptRules:
+        return cls(*t)
+
+
+@dataclass(frozen=True)
+class FilterToggles:
+    remove_artist: bool = False
+    remove_character: bool = False
+    remove_clothing: bool = False
+    remove_text: bool = False
+    restrict_subject: bool = False
+    remove_furry: bool = False
+    remove_headwear: bool = False
+    remove_girl_suffix: bool = False
+    preserve_hair_eye: bool = False
+    remove_series: bool = False
+
+    @classmethod
+    def from_legacy_tuple(cls, t: tuple) -> FilterToggles:
+        return cls(*t)
+
+
 FURRY_CORE_TAGS = {
     "anthro",
     "furry",
@@ -808,7 +850,7 @@ def post_rejected_by_filter(
     post: Optional[Dict[str, object]],
     *,
     filter_ctx: Optional[Dict[str, object]],
-    toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool],
+    toggles: Union[FilterToggles, Tuple[bool, ...]],
     base_colors: Tuple[Set[str], Set[str]],
     allowed_subjects: Set[str],
     cache: Dict[str, str],
@@ -819,18 +861,18 @@ def post_rejected_by_filter(
     catalog_is_eye_fn=None,
     catalog_category_fn=None,
 ) -> Tuple[bool, Optional[Dict[str, object]]]:
-    (
-        remove_artist,
-        remove_character,
-        remove_clothing,
-        remove_text,
-        restrict_subject,
-        remove_furry,
-        remove_headwear,
-        remove_girl_suffix,
-        preserve_hair_eye,
-        remove_series,
-    ) = toggles
+    if isinstance(toggles, tuple):
+        toggles = FilterToggles.from_legacy_tuple(toggles)
+    remove_artist = toggles.remove_artist
+    remove_character = toggles.remove_character
+    remove_clothing = toggles.remove_clothing
+    remove_text = toggles.remove_text
+    restrict_subject = toggles.restrict_subject
+    remove_furry = toggles.remove_furry
+    remove_headwear = toggles.remove_headwear
+    remove_girl_suffix = toggles.remove_girl_suffix
+    preserve_hair_eye = toggles.preserve_hair_eye
+    remove_series = toggles.remove_series
     base_hair, base_eye = base_colors
     _, buckets = normalize_post_tags(post, cache, catalog_resolve_alias_fn)
     primary_subject: Optional[str] = None

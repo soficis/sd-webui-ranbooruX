@@ -12,7 +12,7 @@ import unicodedata
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from io import BytesIO
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import gradio as gr
 import modules.scripts as scripts
@@ -1451,7 +1451,7 @@ class Script(scripts.Script):
         post: Optional[Dict[str, object]],
         *,
         filter_ctx: Optional[Dict[str, object]],
-        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool],
+        toggles: Union[rb_tag_pipeline.FilterToggles, Tuple[bool, ...]],
         base_colors: Tuple[Set[str], Set[str]],
         allowed_subjects: Set[str],
         cache: Dict[str, str],
@@ -1483,7 +1483,7 @@ class Script(scripts.Script):
         num_images_needed: int,
         max_pages: int,
         filter_ctx: Optional[Dict[str, object]],
-        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool],
+        toggles: Union[rb_tag_pipeline.FilterToggles, Tuple[bool, ...]],
         base_colors: Tuple[Set[str], Set[str]],
         allowed_subjects: Set[str],
     ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], bool, bool]:
@@ -3366,25 +3366,31 @@ class Script(scripts.Script):
         return base
 
     def _process_single_prompt(
-        self, index, raw_prompt, base_positive, base_negative, initial_additions, settings
+        self,
+        index: int,
+        raw_prompt: str,
+        base_positive: str,
+        base_negative: str,
+        initial_additions: str,
+        settings: Union[rb_tag_pipeline.PromptRules, tuple],
     ):
-        (
-            shuffle_tags,
-            chaos_mode,
-            chaos_amount,
-            limit_tags_pct,
-            max_tags_count,
-            change_dash,
-            remove_artist_tags,
-            remove_character_tags,
-            remove_clothing_tags,
-            remove_text_tags,
-            restrict_subject_tags,
-            remove_furry_tags,
-            remove_headwear_tags,
-            preserve_hair_eye_colors,
-            remove_series_tags,
-        ) = settings
+        if isinstance(settings, tuple):
+            settings = rb_tag_pipeline.PromptRules.from_legacy_tuple(settings)
+        shuffle_tags = settings.shuffle_tags
+        chaos_mode = settings.chaos_mode
+        chaos_amount = settings.chaos_amount
+        limit_tags_pct = settings.limit_tags_pct
+        max_tags_count = settings.max_tags_count
+        change_dash = settings.change_dash
+        remove_artist_tags = settings.remove_artist_tags
+        remove_character_tags = settings.remove_character_tags
+        remove_clothing_tags = settings.remove_clothing_tags
+        remove_text_tags = settings.remove_text_tags
+        restrict_subject_tags = settings.restrict_subject_tags
+        remove_furry_tags = settings.remove_furry_tags
+        remove_headwear_tags = settings.remove_headwear_tags
+        preserve_hair_eye_colors = settings.preserve_hair_eye_colors
+        remove_series_tags = settings.remove_series_tags
         current_prompt = f"{initial_additions},{raw_prompt}" if initial_additions else raw_prompt
         prompt_tags = [
             tag.strip().lower() for tag in re.split(r"[\,\t\s]+", current_prompt) if tag.strip()
@@ -4499,17 +4505,17 @@ class Script(scripts.Script):
                 filter_ctx = self._build_removal_context(bad_tags, favorites_tags)
                 self._removal_context = filter_ctx
 
-                toggles_tuple = (
-                    bool(remove_artist_tags_ui),
-                    bool(remove_character_tags_ui),
-                    bool(remove_clothing_tags_ui),
-                    bool(remove_text_tags_ui),
-                    bool(restrict_subject_tags_ui),
-                    bool(remove_furry_tags_ui),
-                    bool(remove_headwear_tags_ui),
-                    bool(remove_girl_suffix_tags_ui),
-                    bool(preserve_hair_eye_colors_ui),
-                    bool(remove_series_tags_ui),
+                toggles = rb_tag_pipeline.FilterToggles(
+                    remove_artist=bool(remove_artist_tags_ui),
+                    remove_character=bool(remove_character_tags_ui),
+                    remove_clothing=bool(remove_clothing_tags_ui),
+                    remove_text=bool(remove_text_tags_ui),
+                    restrict_subject=bool(restrict_subject_tags_ui),
+                    remove_furry=bool(remove_furry_tags_ui),
+                    remove_headwear=bool(remove_headwear_tags_ui),
+                    remove_girl_suffix=bool(remove_girl_suffix_tags_ui),
+                    preserve_hair_eye=bool(preserve_hair_eye_colors_ui),
+                    remove_series=bool(remove_series_tags_ui),
                 )
                 self._remove_series_tags = bool(remove_series_tags_ui)
                 self._remove_character_tags = bool(remove_character_tags_ui)
@@ -4541,7 +4547,7 @@ class Script(scripts.Script):
                             num_images_needed=num_images_needed,
                             max_pages=max_pages,
                             filter_ctx=filter_ctx,
-                            toggles=toggles_tuple,
+                            toggles=toggles,
                             base_colors=base_colors_tuple,
                             allowed_subjects=allowed_subjects,
                         )
@@ -4653,22 +4659,22 @@ class Script(scripts.Script):
             base_negative = getattr(p, "negative_prompt", "") or ""
             final_prompts = []
             final_negative_prompts = [base_negative] * num_images_needed
-            prompt_processing_settings = (
-                shuffle_tags,
-                chaos_mode,
-                chaos_amount,
-                limit_tags_pct,
-                max_tags_count,
-                change_dash,
-                self._remove_artist_tags,
-                self._remove_character_tags,
-                self._remove_clothing_tags,
-                self._remove_text_tags,
-                self._restrict_subject_tags,
-                self._remove_furry_tags,
-                self._remove_headwear_tags,
-                self._preserve_hair_eye_colors,
-                self._remove_series_tags,
+            prompt_processing_settings = rb_tag_pipeline.PromptRules(
+                shuffle_tags=shuffle_tags,
+                chaos_mode=chaos_mode,
+                chaos_amount=chaos_amount,
+                limit_tags_pct=limit_tags_pct,
+                max_tags_count=max_tags_count,
+                change_dash=change_dash,
+                remove_artist_tags=self._remove_artist_tags,
+                remove_character_tags=self._remove_character_tags,
+                remove_clothing_tags=self._remove_clothing_tags,
+                remove_text_tags=self._remove_text_tags,
+                restrict_subject_tags=self._restrict_subject_tags,
+                remove_furry_tags=self._remove_furry_tags,
+                remove_headwear_tags=self._remove_headwear_tags,
+                preserve_hair_eye_colors=self._preserve_hair_eye_colors,
+                remove_series_tags=self._remove_series_tags,
             )
 
             # Ensure we only use the number of posts that match the current generation request

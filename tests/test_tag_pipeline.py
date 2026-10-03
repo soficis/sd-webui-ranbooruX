@@ -293,3 +293,80 @@ def test_post_rejected_by_filter_favorites_guard():
         favorites_guard={"bad tag"},
     )
     assert rejected is False
+
+
+def test_prompt_rules_and_filter_toggles_equivalence():
+    from ranboorux.tag_pipeline import FilterToggles, PromptRules
+
+    # 1. FilterToggles from legacy tuple
+    t_tup = (True, False, True, False, False, True, False, True, False, True)
+    t_obj = FilterToggles.from_legacy_tuple(t_tup)
+    assert t_obj.remove_artist is True
+    assert t_obj.remove_character is False
+    assert t_obj.remove_clothing is True
+    assert t_obj.remove_text is False
+    assert t_obj.restrict_subject is False
+    assert t_obj.remove_furry is True
+    assert t_obj.remove_headwear is False
+    assert t_obj.remove_girl_suffix is True
+    assert t_obj.preserve_hair_eye is False
+    assert t_obj.remove_series is True
+
+    # 2. PromptRules from legacy tuple
+    p_tup = (
+        True,
+        "Random",
+        0.5,
+        0.8,
+        30,
+        True,
+        True,
+        False,
+        True,
+        False,
+        True,
+        False,
+        True,
+        False,
+        True,
+    )
+    p_obj = PromptRules.from_legacy_tuple(p_tup)
+    assert p_obj.shuffle_tags is True
+    assert p_obj.chaos_mode == "Random"
+    assert p_obj.chaos_amount == 0.5
+    assert p_obj.limit_tags_pct == 0.8
+    assert p_obj.max_tags_count == 30
+    assert p_obj.change_dash is True
+    assert p_obj.remove_artist_tags is True
+    assert p_obj.remove_character_tags is False
+    assert p_obj.remove_clothing_tags is True
+    assert p_obj.remove_text_tags is False
+    assert p_obj.restrict_subject_tags is True
+    assert p_obj.remove_furry_tags is False
+    assert p_obj.remove_headwear_tags is True
+    assert p_obj.preserve_hair_eye_colors is False
+    assert p_obj.remove_series_tags is True
+
+    # 3. post_rejected_by_filter equivalence between tuple and FilterToggles
+    post = {"id": "1", "artist_tags": ["some_artist"], "tags": "1girl"}
+    rej_tup, reason_tup = post_rejected_by_filter(
+        post,
+        filter_ctx=None,
+        toggles=t_tup,
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache={},
+        favorites_guard=set(),
+    )
+    rej_obj, reason_obj = post_rejected_by_filter(
+        post,
+        filter_ctx=None,
+        toggles=t_obj,
+        base_colors=(set(), set()),
+        allowed_subjects=set(),
+        cache={},
+        favorites_guard=set(),
+    )
+    assert rej_tup == rej_obj is True
+    assert reason_tup == reason_obj
+
