@@ -3,7 +3,6 @@ from __future__ import annotations
 import types
 from typing import List
 
-import pytest
 from PIL import Image, ImageOps
 
 from ranboorux import image_ops as rb_image_ops
@@ -186,8 +185,6 @@ def test_postprocess_no_debug_stdout(capsys, monkeypatch):
 
 # Lock Test (b): Tier 4a delegators equivalence on canned input
 def test_lock_delegators_tier4a_equivalence():
-    import scripts.ranbooru as ranbooru
-
     script = _make_script()
 
     # 1. canonicalize_raw_tag
@@ -222,7 +219,10 @@ def test_lock_delegators_tier4a_equivalence():
 def test_lock_tag_pipeline_normalization_closure():
     post = {"tags": "1girl, blonde_hair, azure_hair, 1girl, unknown_tag"}
     alias_dict = {"azure_hair": "blue_hair"}
-    resolve_alias_fn = lambda t: alias_dict.get(t, t)
+
+    def resolve_alias_fn(t):
+        return alias_dict.get(t, t)
+
     cache = {}
 
     normalized_tags, buckets = rb_tag_pipeline.normalize_post_tags(post, cache, resolve_alias_fn)
