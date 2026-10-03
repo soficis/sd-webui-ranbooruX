@@ -3824,7 +3824,7 @@ class Script(scripts.Script):
         # Clean up early protection state
         if hasattr(self, "_temp_disabled_adetailer"):
             # Force restore if cleanup is called early
-            self._restore_early_adetailer_protection(getattr(self, "_initial_pass_p", None))
+            self._adetailer_orch._restore_early_adetailer_protection(getattr(self, "_initial_pass_p", None))
 
         # Ensure any manual patches are removed once we're finished.
         self._unpatch_manual_adetailer_overrides()
@@ -3901,7 +3901,7 @@ class Script(scripts.Script):
 
         # Ensure ADetailer hooks are restored so future generations run normally
         try:
-            self._restore_early_adetailer_protection(processing_obj)
+            self._adetailer_orch._restore_early_adetailer_protection(processing_obj)
         except Exception as exc:
             print(f"[R Guard] Failed restoring ADetailer protection: {exc}")
             released = False
@@ -4858,25 +4858,14 @@ class Script(scripts.Script):
         )
         if restore_needed:
             try:
-                self._restore_early_adetailer_protection(p)
+                self._adetailer_orch._restore_early_adetailer_protection(p)
             except Exception as exc:
                 print(f"[R Before] Warn: Failed to restore ADetailer pipeline state: {exc}")
         if not getattr(self, "_adetailer_support_enabled", False):
             try:
-                self._restore_native_adetailer_scripts(p)
+                self._adetailer_orch._restore_native_adetailer_scripts(p)
             except Exception as exc:
                 print(f"[R Before] Warn: Failed to restore native ADetailer state: {exc}")
-
-    def _restore_native_adetailer_scripts(self, p):
-        """Ensure native ADetailer scripts resume running when manual support is disabled."""
-        self._adetailer_orch._restore_native_adetailer_scripts(p)
-
-    def _force_enable_adetailer_scripts(self, processing_obj=None):
-        """Return the count of ADetailer scripts restored to their original behaviour."""
-        return self._adetailer_orch._force_enable_adetailer_scripts(processing_obj)
-
-    def _ensure_native_adetailer_enable_flags(self, processing_obj):
-        self._adetailer_orch._ensure_native_adetailer_enable_flags(processing_obj)
 
     def _force_native_adetailer_execution(self, p, processed):
         if getattr(self, "_adetailer_support_enabled", False):
@@ -4985,7 +4974,7 @@ class Script(scripts.Script):
     def _handle_adetailer_toggle_change(self, previous_enabled, current_enabled, p):
         if previous_enabled and not current_enabled:
             try:
-                self._restore_native_adetailer_scripts(p)
+                self._adetailer_orch._restore_native_adetailer_scripts(p)
             except Exception as exc:
                 print(f"[R Before] Warn: Failed handling ADetailer toggle change: {exc}")
 
@@ -5062,7 +5051,7 @@ class Script(scripts.Script):
 
             if use_adetailer:
                 # EARLY PROTECTION: Restore ADetailer scripts that were temporarily disabled during initial pass
-                self._restore_early_adetailer_protection(p)
+                self._adetailer_orch._restore_early_adetailer_protection(p)
                 # CRITICAL: Prepare ADetailer for img2img so it can process the final results
                 self._prepare_adetailer_for_img2img(p)
             else:
@@ -5597,10 +5586,6 @@ class Script(scripts.Script):
                 )
             yield
 
-    def _reenable_adetailer_from_previous_generation(self):
-        """Re-enable ALL ADetailer scripts that were disabled in the previous generation"""
-        self._adetailer_orch._reenable_adetailer_from_previous_generation()
-
     def _prevent_all_image_saving(self, p, temp_dir):
         """Prevent all possible image saving during initial pass"""
         try:
@@ -5805,14 +5790,6 @@ class Script(scripts.Script):
     def _early_adetailer_protection(self, p):
         """Complete ADetailer blocking during initial pass - remove scripts entirely"""
         self._adetailer_orch._early_adetailer_protection(p)
-
-    def _remove_adetailer_from_runner(self, p):
-        """Temporarily remove ADetailer scripts from the script runner during initial pass"""
-        self._adetailer_orch._remove_adetailer_from_runner(p)
-
-    def _restore_early_adetailer_protection(self, processing_obj=None):
-        """Restore ADetailer scripts and flags after an interrupted or completed run."""
-        self._adetailer_orch._restore_early_adetailer_protection(processing_obj)
 
     def process_batch_pre(self, p, *args, **kwargs):
         """Pre-batch processing to set up result interception"""

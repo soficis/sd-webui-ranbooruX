@@ -209,13 +209,13 @@ def test_lock_delegators_tier4a_equivalence():
     assert script._adetailer_orch._state.name == "INITIAL_PASS"
 
     # 6. _reenable_adetailer_from_previous_generation
-    script._reenable_adetailer_from_previous_generation()
+    script._adetailer_orch._reenable_adetailer_from_previous_generation()
 
     # 7. _remove_adetailer_from_runner
-    script._remove_adetailer_from_runner(p)
+    script._adetailer_orch._remove_adetailer_from_runner(p)
 
     # 8. _restore_early_adetailer_protection
-    script._restore_early_adetailer_protection(p)
+    script._adetailer_orch._restore_early_adetailer_protection(p)
 
 
 # Lock Test (c): tag_pipeline closure and normalization output equivalence
