@@ -146,3 +146,17 @@ def test_trailing_dot_or_space_windows(tmp_path):
         assert os.path.commonpath([str(root.resolve()), str(res)]) == str(root.resolve())
     except ValueError:
         pass  # Also valid if rejected
+
+
+def test_safe_join_lexical_mode_still_rejects_walkout(tmp_path):
+    import pytest
+
+    from ranboorux.safe_paths import safe_join
+
+    root = tmp_path / "root"
+    root.mkdir()
+    assert safe_join(root, "a", "b", follow_symlinks=False) == Path(
+        os.path.abspath(root / "a" / "b")
+    )
+    with pytest.raises(ValueError):
+        safe_join(root, "..", "escape", follow_symlinks=False)

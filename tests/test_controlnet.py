@@ -1,3 +1,4 @@
+import os
 import types
 
 
@@ -108,3 +109,61 @@ def test_load_external_code_redacts_all_path_types_and_secrets(monkeypatch):
     assert file_path not in diagnostics
     assert "secret123" not in diagnostics
     assert "amzsecret" not in diagnostics
+
+
+def _make_cn_install(base):
+    lib = base / "lib_controlnet"
+    lib.mkdir(parents=True)
+    (lib / "external_code.py").write_text("X = 1\n", encoding="utf-8")
+    return lib / "external_code.py"
+
+
+def test_env_controlnet_relative_path_resolves_against_cwd(tmp_path, monkeypatch):
+    from ranboorux.integrations.controlnet import _resolve_env_controlnet_file
+
+    webui = tmp_path / "webui"
+    target = _make_cn_install(webui / "extensions-builtin" / "sd_forge_controlnet")
+    extension_root = webui / "extensions" / "ranboorux"
+    extension_root.mkdir(parents=True)
+    monkeypatch.chdir(webui)
+
+    found = _resolve_env_controlnet_file(
+        "extensions-builtin/sd_forge_controlnet", str(extension_root)
+    )
+    assert found is not None
+    assert os.path.samefile(found, target)
+
+
+def test_env_controlnet_skips_candidate_roots_without_the_file(tmp_path, monkeypatch):
+    from ranboorux.integrations.controlnet import _resolve_env_controlnet_file
+
+    extension_root = tmp_path / "ext"
+    target = _make_cn_install(extension_root / "cn")
+    empty_cwd = tmp_path / "elsewhere"
+    empty_cwd.mkdir()
+    monkeypatch.chdir(empty_cwd)
+
+    # "cn" is contained under the CWD too, but nothing exists there; the loop must
+    # keep going and find the extension-root copy.
+    found = _resolve_env_controlnet_file("cn", str(extension_root))
+    assert found is not None
+    assert os.path.samefile(found, target)
+
+
+def test_env_controlnet_relative_walkout_refused(tmp_path, monkeypatch):
+    from ranboorux.integrations.controlnet import _resolve_env_controlnet_file
+
+    _make_cn_install(tmp_path / "outside")
+    cwd = tmp_path / "webui"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    assert _resolve_env_controlnet_file("../outside", str(cwd)) is None
+
+
+def test_env_controlnet_absolute_path(tmp_path):
+    from ranboorux.integrations.controlnet import _resolve_env_controlnet_file
+
+    target = _make_cn_install(tmp_path / "cn_abs")
+    found = _resolve_env_controlnet_file(str(tmp_path / "cn_abs"), str(tmp_path))
+    assert found is not None
+    assert os.path.samefile(found, target)

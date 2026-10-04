@@ -7,8 +7,14 @@ from typing import Union
 PathLike = Union[str, os.PathLike]
 
 
-def contained_path(root: PathLike, candidate: PathLike) -> Path:
-    """Return realpath(candidate) iff it is strictly inside realpath(root); else ValueError.
+def contained_path(root: PathLike, candidate: PathLike, *, follow_symlinks: bool = True) -> Path:
+    """Return the resolved candidate iff it is strictly inside root; else ValueError.
+
+    With ``follow_symlinks=True`` (default) both paths go through ``realpath``, so a
+    symlink inside ``root`` that points elsewhere is rejected. With
+    ``follow_symlinks=False`` containment is lexical (``abspath``/``normpath``):
+    ``..`` walkouts and absolute escapes are still rejected, but user-made symlinks
+    and junctions inside ``root`` (e.g. LoRA folders on another drive) are allowed.
 
     TOCTOU Note: Check-then-open is not atomic. In a multi-user or symlink-racing
     environment this could have a race condition, but it is an accepted residual
@@ -27,8 +33,9 @@ def contained_path(root: PathLike, candidate: PathLike) -> Path:
         raise ValueError("Paths must not contain NUL bytes")
 
     try:
-        root_real = os.path.realpath(root_str)
-        target_real = os.path.realpath(candidate_str)
+        resolve = os.path.realpath if follow_symlinks else os.path.abspath
+        root_real = resolve(root_str)
+        target_real = resolve(candidate_str)
 
         # On Windows, drive letters and paths are case-insensitive
         if os.name == "nt":
@@ -52,7 +59,7 @@ def contained_path(root: PathLike, candidate: PathLike) -> Path:
     return Path(target_real)
 
 
-def safe_join(root: PathLike, *parts: str) -> Path:
+def safe_join(root: PathLike, *parts: str, follow_symlinks: bool = True) -> Path:
     """contained_path(root, os.path.join(root, *parts)); rejects absolute parts and '..' escape."""
     if not root:
         raise ValueError("Root path must not be empty")
@@ -66,4 +73,4 @@ def safe_join(root: PathLike, *parts: str) -> Path:
             raise ValueError("Parts in safe_join must not contain NUL bytes")
 
     joined = os.path.join(root, *parts)
-    return contained_path(root, joined)
+    return contained_path(root, joined, follow_symlinks=follow_symlinks)
