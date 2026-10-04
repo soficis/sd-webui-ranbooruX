@@ -84,7 +84,13 @@ def stub_modules(tmp_path, request):
 
     class DummyComponent:
         def __init__(self, *args, **kwargs):
-            pass
+            self.args = args
+            self.kwargs = kwargs
+            self.value = kwargs.get("value")
+            self.label = kwargs.get("label")
+            self.choices = kwargs.get("choices")
+            self.interactive = kwargs.get("interactive")
+            self.visible = kwargs.get("visible", True)
 
         def change(self, *args, **kwargs):
             return None
@@ -96,6 +102,12 @@ def stub_modules(tmp_path, request):
             return None
 
         def select(self, *args, **kwargs):
+            return None
+
+        def blur(self, *args, **kwargs):
+            return None
+
+        def submit(self, *args, **kwargs):
             return None
 
     if gradio_version == "3":

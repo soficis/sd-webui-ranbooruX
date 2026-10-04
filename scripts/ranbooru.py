@@ -38,6 +38,7 @@ from ranboorux import loranado as rb_loranado
 from ranboorux import mutation_scope as rb_mutation_scope
 from ranboorux import run_options as rb_run_options
 from ranboorux import tag_pipeline as rb_tag_pipeline
+from ranboorux import ui_helpers as rb_ui_helpers
 from ranboorux import user_store as rb_user_store
 from ranboorux.anima_detect import (
     get_anima_model_info,
@@ -90,6 +91,43 @@ def _report_exception(prefix: str, exc: BaseException) -> None:
         traceback.print_exc()
     else:
         logging.getLogger("ranboorux").debug("%s", prefix, exc_info=True)
+
+
+def _note_run_failure(p: Any, reason: str) -> None:
+    if not p or not reason:
+        return
+    sanitized = rb_http_client.sanitize_exception_text(str(reason))
+    msg = f"RanbooruX: {sanitized}"
+    try:
+        if hasattr(p, "comment") and callable(p.comment):
+            p.comment(msg)
+        elif hasattr(p, "comments"):
+            if isinstance(p.comments, dict):
+                p.comments[msg] = 1
+            elif isinstance(p.comments, list):
+                p.comments.append(msg)
+    except Exception:
+        pass
+
+
+def _note_postprocess_failure(processed: Any, reason: str) -> None:
+    if not processed or not reason:
+        return
+    sanitized = rb_http_client.sanitize_exception_text(str(reason))
+    msg = f"RanbooruX: {sanitized}"
+    try:
+        comments = getattr(processed, "comments", None)
+        if isinstance(comments, str):
+            if comments and not comments.endswith("\n"):
+                processed.comments = f"{comments}\n{msg}\n"
+            else:
+                processed.comments = f"{comments or ''}{msg}\n"
+        elif isinstance(comments, list):
+            comments.append(msg)
+        elif hasattr(processed, "comments"):
+            setattr(processed, "comments", f"{msg}\n")
+    except Exception:
+        pass
 
 
 GELBOORU_CREDENTIALS_DIR = os.path.join(USER_DATA_DIR, "gelbooru")
@@ -223,9 +261,10 @@ def _gr_update(**kwargs):
     return kwargs
 
 
-def get_available_ratings(booru):
+def get_available_ratings(booru, current=None):
     choices = list(RATINGS.get(booru, RATING_TYPES["none"]).keys())
-    return _gr_component_update(gr.Radio, choices=choices, value="All", visible=True)
+    value = rb_ui_helpers.next_rating(current, choices)
+    return _gr_component_update(gr.Radio, choices=choices, value=value, visible=True)
 
 
 def show_fringe_benefits(booru):
@@ -813,14 +852,7 @@ class Script(scripts.Script):
         return self._catalog_source
 
     def _catalog_path_from_upload(self, uploaded: object) -> str:
-        if isinstance(uploaded, str):
-            return uploaded
-        if isinstance(uploaded, dict):
-            for key in ("name", "path", "orig_name"):
-                value = uploaded.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-        return ""
+        return rb_ui_helpers.upload_to_path(uploaded)
 
     def _validate_csv_format(self, path: str) -> Tuple[bool, str]:
         return rb_catalog.validate_catalog_csv(path)
@@ -1186,7 +1218,7 @@ class Script(scripts.Script):
         imported: Optional[List[str]] = None,
         dedupe: bool = False,
     ) -> List[str]:
-        path = self._USER_LIST_PATHS[list_key]
+        path = PERSONAL_REMOVE_FILE if list_key == "personal" else FAVORITES_FILE
         existing = self._read_list_file(path)
         working = list(existing)
         combined_additions: List[str] = []
@@ -1216,92 +1248,178 @@ class Script(scripts.Script):
 
     def _ui_add_personal_tags(self, tags_text: str, current_selection: Optional[object]):
         additions = self._parse_user_tags(tags_text)
-        new_list = self._apply_list_operation("personal", additions=additions)
-        selection = additions or self._coerce_selection(current_selection)
-        selection = [tag for tag in selection if tag in new_list]
+        new_list = (
+            self._apply_list_operation("personal", additions=additions)
+            if additions
+            else self._read_list_file(PERSONAL_REMOVE_FILE)
+        )
         return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=selection),
+            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
             _gr_component_update(gr.Textbox, value=""),
+            _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
+            _gr_component_update(
+                gr.Textbox,
+                label=f"Personal removal list ({len(new_list)})",
+                value=", ".join(new_list),
+            ),
         )
 
     def _ui_remove_personal_tags(self, selected: Optional[object]):
         removals = self._coerce_selection(selected)
-        new_list = (
-            self._apply_list_operation("personal", removals=removals)
-            if removals
-            else self._read_list_file(PERSONAL_REMOVE_FILE)
+        if not removals:
+            current = self._read_list_file(PERSONAL_REMOVE_FILE)
+            return (
+                _gr_component_update(gr.Dropdown, choices=current, value=[]),
+                _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
+                _gr_component_update(
+                    gr.Textbox,
+                    label=f"Personal removal list ({len(current)})",
+                    value=", ".join(current),
+                ),
+            )
+        new_list = self._apply_list_operation("personal", removals=removals)
+        return (
+            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
+            _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
+            _gr_component_update(
+                gr.Textbox,
+                label=f"Personal removal list ({len(new_list)})",
+                value=", ".join(new_list),
+            ),
         )
-        return _gr_component_update(gr.Dropdown, choices=new_list, value=[])
 
     def _ui_dedupe_personal_list(self):
         new_list = self._apply_list_operation("personal", dedupe=True)
-        return _gr_component_update(gr.Dropdown, choices=new_list, value=new_list)
+        return (
+            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
+            _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
+            _gr_component_update(
+                gr.Textbox,
+                label=f"Personal removal list ({len(new_list)})",
+                value=", ".join(new_list),
+            ),
+        )
 
-    def _ui_import_personal_list(self, uploaded_file: Optional[dict]):
-        if not uploaded_file:
+    def _ui_import_personal_list(self, uploaded_file: Optional[object]):
+        path = rb_ui_helpers.upload_to_path(uploaded_file)
+        text, err = rb_ui_helpers.read_uploaded_text(path)
+        if err or not text:
             current = self._read_list_file(PERSONAL_REMOVE_FILE)
-            return _gr_component_update(
-                gr.Dropdown, choices=current, value=current
-            ), _gr_component_update(gr.File, value=None)
-        data = uploaded_file.get("data") if isinstance(uploaded_file, dict) else None
-        text = ""
-        if isinstance(data, bytes):
-            try:
-                text = data.decode("utf-8", errors="ignore")
-            except Exception as exc:
-                print(f"[R Lists] Failed to decode personal import: {exc}")
+            return (
+                _gr_component_update(gr.Dropdown, choices=current, value=[]),
+                _gr_component_update(gr.File, value=None),
+                _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
+                _gr_component_update(
+                    gr.Textbox,
+                    label=f"Personal removal list ({len(current)})",
+                    value=", ".join(current),
+                ),
+            )
         additions = self._parse_user_tags(text)
-        new_list = self._apply_list_operation("personal", additions=additions)
-        selection = [tag for tag in additions if tag in new_list]
-        return _gr_component_update(
-            gr.Dropdown, choices=new_list, value=selection
-        ), _gr_component_update(gr.File, value=None)
+        new_list = (
+            self._apply_list_operation("personal", additions=additions)
+            if additions
+            else self._read_list_file(PERSONAL_REMOVE_FILE)
+        )
+        return (
+            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
+            _gr_component_update(gr.File, value=None),
+            _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
+            _gr_component_update(
+                gr.Textbox,
+                label=f"Personal removal list ({len(new_list)})",
+                value=", ".join(new_list),
+            ),
+        )
 
     def _ui_export_personal_list(self):
         return PERSONAL_REMOVE_FILE
 
     def _ui_add_favorite_tags(self, tags_text: str, current_selection: Optional[object]):
         additions = self._parse_user_tags(tags_text)
-        new_list = self._apply_list_operation("favorites", additions=additions)
-        selection = additions or self._coerce_selection(current_selection)
-        selection = [tag for tag in selection if tag in new_list]
+        new_list = (
+            self._apply_list_operation("favorites", additions=additions)
+            if additions
+            else self._read_list_file(FAVORITES_FILE)
+        )
         return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=selection),
+            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
             _gr_component_update(gr.Textbox, value=""),
+            _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
+            _gr_component_update(
+                gr.Textbox,
+                label=f"Favorites list ({len(new_list)})",
+                value=", ".join(new_list),
+            ),
         )
 
     def _ui_remove_favorite_tags(self, selected: Optional[object]):
         removals = self._coerce_selection(selected)
-        new_list = (
-            self._apply_list_operation("favorites", removals=removals)
-            if removals
-            else self._read_list_file(FAVORITES_FILE)
+        if not removals:
+            current = self._read_list_file(FAVORITES_FILE)
+            return (
+                _gr_component_update(gr.Dropdown, choices=current, value=[]),
+                _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
+                _gr_component_update(
+                    gr.Textbox,
+                    label=f"Favorites list ({len(current)})",
+                    value=", ".join(current),
+                ),
+            )
+        new_list = self._apply_list_operation("favorites", removals=removals)
+        return (
+            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
+            _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
+            _gr_component_update(
+                gr.Textbox,
+                label=f"Favorites list ({len(new_list)})",
+                value=", ".join(new_list),
+            ),
         )
-        return _gr_component_update(gr.Dropdown, choices=new_list, value=[])
 
     def _ui_dedupe_favorite_list(self):
         new_list = self._apply_list_operation("favorites", dedupe=True)
-        return _gr_component_update(gr.Dropdown, choices=new_list, value=new_list)
+        return (
+            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
+            _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
+            _gr_component_update(
+                gr.Textbox,
+                label=f"Favorites list ({len(new_list)})",
+                value=", ".join(new_list),
+            ),
+        )
 
-    def _ui_import_favorite_list(self, uploaded_file: Optional[dict]):
-        if not uploaded_file:
+    def _ui_import_favorite_list(self, uploaded_file: Optional[object]):
+        path = rb_ui_helpers.upload_to_path(uploaded_file)
+        text, err = rb_ui_helpers.read_uploaded_text(path)
+        if err or not text:
             current = self._read_list_file(FAVORITES_FILE)
-            return _gr_component_update(
-                gr.Dropdown, choices=current, value=current
-            ), _gr_component_update(gr.File, value=None)
-        data = uploaded_file.get("data") if isinstance(uploaded_file, dict) else None
-        text = ""
-        if isinstance(data, bytes):
-            try:
-                text = data.decode("utf-8", errors="ignore")
-            except Exception as exc:
-                print(f"[R Lists] Failed to decode favorites import: {exc}")
+            return (
+                _gr_component_update(gr.Dropdown, choices=current, value=[]),
+                _gr_component_update(gr.File, value=None),
+                _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
+                _gr_component_update(
+                    gr.Textbox,
+                    label=f"Favorites list ({len(current)})",
+                    value=", ".join(current),
+                ),
+            )
         additions = self._parse_user_tags(text)
-        new_list = self._apply_list_operation("favorites", additions=additions)
-        selection = [tag for tag in additions if tag in new_list]
-        return _gr_component_update(
-            gr.Dropdown, choices=new_list, value=selection
-        ), _gr_component_update(gr.File, value=None)
+        new_list = (
+            self._apply_list_operation("favorites", additions=additions)
+            if additions
+            else self._read_list_file(FAVORITES_FILE)
+        )
+        return (
+            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
+            _gr_component_update(gr.File, value=None),
+            _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
+            _gr_component_update(
+                gr.Textbox,
+                label=f"Favorites list ({len(new_list)})",
+                value=", ".join(new_list),
+            ),
+        )
 
     def _ui_export_favorite_list(self):
         return FAVORITES_FILE
@@ -2397,6 +2515,10 @@ class Script(scripts.Script):
                     preserve_hair_eye_colors,
                     restrict_subject_tags,
                 ) = self._build_filter_ui_section()
+            if not os.path.exists(PERSONAL_REMOVE_FILE):
+                self._write_list_file(PERSONAL_REMOVE_FILE, [])
+            if not os.path.exists(FAVORITES_FILE):
+                self._write_list_file(FAVORITES_FILE, [])
             personal_choices = self._read_list_file(PERSONAL_REMOVE_FILE)
             favorite_choices = self._read_list_file(FAVORITES_FILE)
             with gr.Accordion("Personal Lists", open=False):
@@ -2405,10 +2527,16 @@ class Script(scripts.Script):
                         gr.Markdown("**Personal Removal List**")
                         personal_remove_dropdown = gr.Dropdown(
                             choices=personal_choices,
-                            value=personal_choices,
+                            value=[],
                             multiselect=True,
-                            label="Removal Tags",
+                            label="Select tags to remove",
                             allow_custom_value=False,
+                        )
+                        personal_remove_display = gr.Textbox(
+                            label=f"Personal removal list ({len(personal_choices)})",
+                            value=", ".join(personal_choices),
+                            interactive=False,
+                            lines=3,
                         )
                         personal_remove_input = gr.Textbox(
                             label="Add tags", placeholder="comma or newline separated"
@@ -2421,15 +2549,23 @@ class Script(scripts.Script):
                             personal_import_file = gr.File(
                                 label="Import CSV/TXT", file_types=[".txt", ".csv"], visible=True
                             )
-                            personal_export_btn = gr.DownloadButton("Export")
+                            personal_export_btn = gr.DownloadButton(
+                                "Export", value=PERSONAL_REMOVE_FILE
+                            )
                     with gr.Column():
                         gr.Markdown("**Favorites List**")
                         favorites_dropdown = gr.Dropdown(
                             choices=favorite_choices,
-                            value=favorite_choices,
+                            value=[],
                             multiselect=True,
-                            label="Favorite Tags",
+                            label="Select favorites to remove",
                             allow_custom_value=False,
+                        )
+                        favorites_display = gr.Textbox(
+                            label=f"Favorites list ({len(favorite_choices)})",
+                            value=", ".join(favorite_choices),
+                            interactive=False,
+                            lines=3,
                         )
                         favorites_input = gr.Textbox(
                             label="Add favorites", placeholder="comma or newline separated"
@@ -2442,7 +2578,9 @@ class Script(scripts.Script):
                             favorites_import_file = gr.File(
                                 label="Import CSV/TXT", file_types=[".txt", ".csv"], visible=True
                             )
-                            favorites_export_btn = gr.DownloadButton("Export")
+                            favorites_export_btn = gr.DownloadButton("Export", value=FAVORITES_FILE)
+            self._ui_personal_dropdown = personal_remove_dropdown
+            self._ui_favorites_dropdown = favorites_dropdown
             shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
             change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
             anima_auto_detect = gr.Checkbox(
@@ -2480,7 +2618,7 @@ class Script(scripts.Script):
                 label="Sort Order (tag search)",
                 value="Random",
             )
-            booru.change(get_available_ratings, booru, mature_rating)
+            booru.change(get_available_ratings, [booru, mature_rating], mature_rating)
             booru.change(show_fringe_benefits, booru, fringe_benefits)
             booru.change(
                 self._update_gelbooru_ui_visibility,
@@ -2603,54 +2741,71 @@ class Script(scripts.Script):
         personal_add_btn.click(
             fn=self._ui_add_personal_tags,
             inputs=[personal_remove_input, personal_remove_dropdown],
-            outputs=[personal_remove_dropdown, personal_remove_input],
+            outputs=[
+                personal_remove_dropdown,
+                personal_remove_input,
+                personal_export_btn,
+                personal_remove_display,
+            ],
             queue=False,
         )
         personal_remove_btn.click(
             fn=self._ui_remove_personal_tags,
             inputs=[personal_remove_dropdown],
-            outputs=[personal_remove_dropdown],
+            outputs=[personal_remove_dropdown, personal_export_btn, personal_remove_display],
             queue=False,
         )
         personal_dedupe_btn.click(
             fn=self._ui_dedupe_personal_list,
             inputs=[],
-            outputs=[personal_remove_dropdown],
+            outputs=[personal_remove_dropdown, personal_export_btn, personal_remove_display],
             queue=False,
         )
         personal_import_file.upload(
             fn=self._ui_import_personal_list,
             inputs=[personal_import_file],
-            outputs=[personal_remove_dropdown, personal_import_file],
+            outputs=[
+                personal_remove_dropdown,
+                personal_import_file,
+                personal_export_btn,
+                personal_remove_display,
+            ],
             queue=False,
-        )
-        personal_export_btn.click(
-            fn=self._ui_export_personal_list, inputs=[], outputs=None, queue=False
         )
 
         favorites_add_btn.click(
             fn=self._ui_add_favorite_tags,
             inputs=[favorites_input, favorites_dropdown],
-            outputs=[favorites_dropdown, favorites_input],
+            outputs=[
+                favorites_dropdown,
+                favorites_input,
+                favorites_export_btn,
+                favorites_display,
+            ],
             queue=False,
         )
         favorites_remove_btn.click(
             fn=self._ui_remove_favorite_tags,
             inputs=[favorites_dropdown],
-            outputs=[favorites_dropdown],
+            outputs=[favorites_dropdown, favorites_export_btn, favorites_display],
             queue=False,
         )
         favorites_dedupe_btn.click(
-            fn=self._ui_dedupe_favorite_list, inputs=[], outputs=[favorites_dropdown], queue=False
+            fn=self._ui_dedupe_favorite_list,
+            inputs=[],
+            outputs=[favorites_dropdown, favorites_export_btn, favorites_display],
+            queue=False,
         )
         favorites_import_file.upload(
             fn=self._ui_import_favorite_list,
             inputs=[favorites_import_file],
-            outputs=[favorites_dropdown, favorites_import_file],
+            outputs=[
+                favorites_dropdown,
+                favorites_import_file,
+                favorites_export_btn,
+                favorites_display,
+            ],
             queue=False,
-        )
-        favorites_export_btn.click(
-            fn=self._ui_export_favorite_list, inputs=[], outputs=None, queue=False
         )
 
         components = [
@@ -4805,6 +4960,10 @@ class Script(scripts.Script):
 
         except Exception as e:
             _report_exception("[Ranbooru BeforeProcess] UNEXPECTED ERROR", e)
+            _note_run_failure(
+                p,
+                f"{rb_http_client.sanitize_exception_text(str(e))}. Generated with your prompt unchanged.",
+            )
             self._abort_before_process_run("before_process failed", p)
             return
 
@@ -4968,9 +5127,11 @@ class Script(scripts.Script):
             except Exception as exc:
                 print(f"[R Before] Warn: Failed handling ADetailer toggle change: {exc}")
 
-    def _bail(self, p: Any, use_cache: bool, reason: str = "") -> None:
+    def _bail(self, p: Any, use_cache: bool, reason: str = "", processed: Any = None) -> None:
         if reason:
             print(f"[R Post] {reason}")
+            if processed is not None:
+                _note_postprocess_failure(processed, reason)
         self._cleanup_after_run(use_cache)
         self._clear_processing_guards(p)
 
@@ -5040,7 +5201,7 @@ class Script(scripts.Script):
         print("[R Post] Starting separate Img2Img run...")
         valid_images = [img for img in self.last_img if img is not None]
         if not valid_images:
-            self._bail(p, use_cache, "No valid images for Img2Img.")
+            self._bail(p, use_cache, "No valid images for Img2Img.", processed=processed)
             return None
         if len(valid_images) < len(self.last_img):
             print(
@@ -5051,7 +5212,7 @@ class Script(scripts.Script):
                     (img if img is not None else valid_images[0]) for img in self.last_img
                 ]
             else:
-                self._bail(p, use_cache, "No valid images left.")
+                self._bail(p, use_cache, "No valid images left.", processed=processed)
                 return None
         target_w, target_h = (
             (p.width, p.height) if crop_center else self.check_orientation(self.last_img[0])
@@ -5065,7 +5226,7 @@ class Script(scripts.Script):
             if img is not None
         ]
         if not prepared_images:
-            self._bail(p, use_cache, "No images left after resize.")
+            self._bail(p, use_cache, "No images left after resize.", processed=processed)
             return None
 
         # Use the original RanbooruX-generated prompts, not the simplified initial prompts
