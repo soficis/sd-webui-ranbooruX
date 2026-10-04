@@ -9,17 +9,9 @@ ext_root = os.path.dirname(__file__)
 def _install_req(path, desc):
     if os.path.exists(path):
         try:
-            result = launch.run_pip(f'install -r "{path}"', desc)
-            if isinstance(result, int) and result != 0:
-                print(
-                    f"[RanbooruX] ERROR: Pip installation of {desc} failed with exit code {result}",
-                    file=sys.stderr,
-                )
-            elif isinstance(result, tuple) and len(result) > 0 and result[0] != 0:
-                print(
-                    f"[RanbooruX] ERROR: Pip installation of {desc} failed with exit code {result[0]}",
-                    file=sys.stderr,
-                )
+            # A1111/Forge run_pip raises RuntimeError on a non-zero pip exit; it does
+            # not return an exit code, so the except branch is the failure path.
+            launch.run_pip(f'install -r "{path}"', desc)
         except Exception as e:
             print(f"[RanbooruX] ERROR: Failed to install {desc}: {e}", file=sys.stderr)
 

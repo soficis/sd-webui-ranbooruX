@@ -162,6 +162,7 @@ def stub_modules(tmp_path, request):
 
     try:
         import requests.exceptions as _real_exceptions
+
         requests_exceptions_mod = _real_exceptions
     except ImportError:
         requests_exceptions_mod = types.ModuleType("requests.exceptions")

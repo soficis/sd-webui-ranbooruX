@@ -258,7 +258,9 @@ def test_anima_detection_ladder_characterization():
             self.filename = filename
 
     # Case 1: pending in override_settings
-    p1 = types.SimpleNamespace(override_settings={"sd_model_checkpoint": "anima-aesthetic.safetensors"})
+    p1 = types.SimpleNamespace(
+        override_settings={"sd_model_checkpoint": "anima-aesthetic.safetensors"}
+    )
     s1_res = run_site1(p1, types.SimpleNamespace(opts=None, sd_model=None), ranbooru.Script)
     assert s1_res["detected"] is True
     assert s1_res["variant"] == "aesthetic"
@@ -283,13 +285,17 @@ def test_anima_detection_ladder_characterization():
     # Case 4: _last_loaded_model_info fallback
     cached_info = get_anima_model_info("anima-3.8b.safetensors")
     ranbooru.Script._last_loaded_model_info = cached_info
-    s4_res = run_site1(types.SimpleNamespace(), types.SimpleNamespace(opts=None, sd_model=None), ranbooru.Script)
+    s4_res = run_site1(
+        types.SimpleNamespace(), types.SimpleNamespace(opts=None, sd_model=None), ranbooru.Script
+    )
     assert s4_res["detected"] is True
     assert s4_res["variant"] == "3.8b"
     ranbooru.Script._last_loaded_model_info = None
 
     # Case 5: all non-anima
-    s5_res = run_site1(types.SimpleNamespace(), types.SimpleNamespace(opts=None, sd_model=None), ranbooru.Script)
+    s5_res = run_site1(
+        types.SimpleNamespace(), types.SimpleNamespace(opts=None, sd_model=None), ranbooru.Script
+    )
     assert s5_res["detected"] is False
 
 
@@ -303,7 +309,9 @@ def test_script_detect_anima_unified_method():
     script = ranbooru.Script()
 
     # When pending checkpoint is an anima model
-    p = types.SimpleNamespace(override_settings={"sd_model_checkpoint": "anima-aesthetic.safetensors"})
+    p = types.SimpleNamespace(
+        override_settings={"sd_model_checkpoint": "anima-aesthetic.safetensors"}
+    )
     shared.opts = types.SimpleNamespace()
     shared.sd_model = None
 
@@ -314,11 +322,10 @@ def test_script_detect_anima_unified_method():
     assert script._anima_capabilities is not None
 
     # When model is non-anima
-    p_non = types.SimpleNamespace(override_settings={"sd_model_checkpoint": "sdxl_base.safetensors"})
+    p_non = types.SimpleNamespace(
+        override_settings={"sd_model_checkpoint": "sdxl_base.safetensors"}
+    )
     info_non = script._detect_anima(p=p_non)
     assert info_non["detected"] is False
     assert script._is_anima_model is False
     assert script._anima_model_variant == "base"
-
-
-

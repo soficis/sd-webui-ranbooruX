@@ -283,7 +283,9 @@ class TestCatalogPathHintContainment:
         script = _make_script(tmp_path)
         ok, msg = script._import_custom_catalog(uploaded=None, path_hint=str(bundled_csv))
         assert ok, msg
-        assert script._custom_catalog_path.startswith(str(Path(ranbooru.USER_CATALOGS_DIR).resolve()))
+        assert script._custom_catalog_path.startswith(
+            str(Path(ranbooru.USER_CATALOGS_DIR).resolve())
+        )
 
     def test_symlink_out_hint_refused(self, tmp_path):
         import pytest
@@ -349,4 +351,3 @@ def test_category_consts_and_lazy_registry(tmp_path):
     assert isinstance(danbooru_api, Danbooru)
     safebooru_api = script._get_booru_api("safebooru", fringe_benefits=False)
     assert isinstance(safebooru_api, Safebooru)
-

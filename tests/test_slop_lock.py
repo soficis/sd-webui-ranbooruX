@@ -8,6 +8,7 @@ from PIL import Image, ImageOps
 from ranboorux import image_ops as rb_image_ops
 from ranboorux import tag_pipeline as rb_tag_pipeline
 from ranboorux.run_options import UI_ARGUMENT_FIELDS
+from ranboorux.tag_pipeline import FilterToggles
 
 
 def _make_script():
@@ -233,7 +234,7 @@ def test_lock_tag_pipeline_normalization_closure():
     rejected, reason = rb_tag_pipeline.post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, False, False, False, False, False, False, False, False, False),
+        toggles=FilterToggles(),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -344,4 +345,3 @@ def test_dead_symbols_absent():
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert "_extract_color_tags" in ranbooru_defs, "Script._extract_color_tags must NOT be deleted!"
-

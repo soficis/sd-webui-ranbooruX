@@ -159,3 +159,78 @@ def test_lora_ui_status_strings_echo_basename_only(tmp_path, monkeypatch):
     script = _make_script()
     scan = script._scan_loranado_candidates("secret_subfolder")
     assert str(lora_root) not in scan["message"]
+
+
+def _symlink_or_skip(link, target):
+    import pytest
+
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        import _winapi
+
+        try:
+            _winapi.CreateJunction(str(target), str(link))
+            return
+        except OSError:
+            pass
+    pytest.skip("symlink/junction creation not permitted on this host")
+
+
+def test_lora_folder_symlink_inside_root_allowed(tmp_path, monkeypatch):
+    from modules import shared
+
+    lora_root = tmp_path / "models" / "lora"
+    lora_root.mkdir(parents=True)
+    other_drive = tmp_path / "big_disk" / "loras"
+    other_drive.mkdir(parents=True)
+    _symlink_or_skip(lora_root / "linked", other_drive)
+
+    class DummyCmdOpts:
+        lora_dir = str(lora_root)
+
+    monkeypatch.setattr(shared, "cmd_opts", DummyCmdOpts(), raising=False)
+    script = _make_script()
+    assert script._resolve_lora_target_folder("linked") == str(lora_root / "linked")
+    assert script._resolve_lora_target_folder("../../big_disk/loras") == ""
+
+
+def test_catalog_relative_hint_resolves_under_catalog_root(tmp_path, monkeypatch):
+    import scripts.ranbooru as ranbooru
+
+    catalogs = tmp_path / "user" / "catalogs"
+    catalogs.mkdir(parents=True)
+    (catalogs / "mine.csv").write_text("tag,category\n", encoding="utf-8")
+    monkeypatch.setattr(ranbooru, "USER_CATALOGS_DIR", str(catalogs))
+    monkeypatch.setattr(ranbooru, "BUNDLED_CATALOG_DIR", str(tmp_path / "data" / "catalogs"))
+    monkeypatch.chdir(tmp_path)
+
+    script = _make_script()
+    resolved, from_hint = script._resolve_catalog_source(None, "mine.csv")
+    assert from_hint is True
+    assert Path(resolved).resolve() == (catalogs / "mine.csv").resolve()
+
+    refused, _ = script._resolve_catalog_source(None, "../../outside.csv")
+    assert refused == ""
+
+
+def test_refused_saved_custom_catalog_is_reported_in_status(tmp_path, monkeypatch):
+    import scripts.ranbooru as ranbooru
+
+    catalogs = tmp_path / "user" / "catalogs"
+    catalogs.mkdir(parents=True)
+    monkeypatch.setattr(ranbooru, "USER_CATALOGS_DIR", str(catalogs))
+
+    script = _make_script()
+    script._use_tag_catalog = True
+    script._catalog = None
+    script._catalog_source = "custom"
+    script._custom_catalog_path = str(tmp_path / "legacy" / "old_catalog.csv")
+
+    status = script._format_catalog_status()
+    assert "old_catalog.csv" in status
+    assert "outside user/catalogs" in status
+    assert str(tmp_path) not in status

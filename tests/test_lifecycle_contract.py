@@ -297,4 +297,3 @@ def test_bail_releases_guards():
     assert not getattr(ranbooru.Script, "_ranbooru_global_processing", False)
     assert not getattr(p, "_ranbooru_already_processing", False)
     assert not hasattr(script, "_current_processing_object")
-

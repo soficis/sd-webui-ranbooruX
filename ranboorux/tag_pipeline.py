@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
 
 _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -14,74 +14,9 @@ CHARACTER_CATEGORY: int = 4
 
 
 @dataclass(frozen=True)
-class PromptRules:
-    shuffle_tags: bool = False
-    chaos_mode: str = "None"
-    chaos_amount: float = 0.0
-    limit_tags_pct: float = 1.0
-    max_tags_count: int = 0
-    change_dash: bool = False
-    remove_artist_tags: bool = False
-    remove_character_tags: bool = False
-    remove_clothing_tags: bool = False
-    remove_text_tags: bool = False
-    restrict_subject_tags: bool = False
-    remove_furry_tags: bool = False
-    remove_headwear_tags: bool = False
-    preserve_hair_eye_colors: bool = False
-    remove_series_tags: bool = False
-    remove_girl_suffix_tags: bool = False
-
-    @property
-    def remove_artist(self) -> bool:
-        return self.remove_artist_tags
-
-    @property
-    def remove_character(self) -> bool:
-        return self.remove_character_tags
-
-    @property
-    def remove_clothing(self) -> bool:
-        return self.remove_clothing_tags
-
-    @property
-    def remove_text(self) -> bool:
-        return self.remove_text_tags
-
-    @property
-    def restrict_subject(self) -> bool:
-        return self.restrict_subject_tags
-
-    @property
-    def remove_furry(self) -> bool:
-        return self.remove_furry_tags
-
-    @property
-    def remove_headwear(self) -> bool:
-        return self.remove_headwear_tags
-
-    @property
-    def remove_girl_suffix(self) -> bool:
-        return self.remove_girl_suffix_tags
-
-    @property
-    def preserve_hair_eye(self) -> bool:
-        return self.preserve_hair_eye_colors
-
-    @property
-    def remove_series(self) -> bool:
-        return self.remove_series_tags
-
-    @classmethod
-    def from_legacy_tuple(cls, t: tuple) -> PromptRules:
-        if len(t) == 15:
-            expanded = t + (False,)
-            return cls(*expanded)
-        return cls(*t)
-
-
-@dataclass(frozen=True)
 class FilterToggles:
+    """Tag-removal switches shared by the prompt path and the post prefilter."""
+
     remove_artist: bool = False
     remove_character: bool = False
     remove_clothing: bool = False
@@ -93,49 +28,18 @@ class FilterToggles:
     preserve_hair_eye: bool = False
     remove_series: bool = False
 
-    @property
-    def remove_artist_tags(self) -> bool:
-        return self.remove_artist
 
-    @property
-    def remove_character_tags(self) -> bool:
-        return self.remove_character
+@dataclass(frozen=True)
+class PromptRules:
+    """Prompt-shaping settings; tag removal is delegated to ``filters``."""
 
-    @property
-    def remove_clothing_tags(self) -> bool:
-        return self.remove_clothing
-
-    @property
-    def remove_text_tags(self) -> bool:
-        return self.remove_text
-
-    @property
-    def restrict_subject_tags(self) -> bool:
-        return self.restrict_subject
-
-    @property
-    def remove_furry_tags(self) -> bool:
-        return self.remove_furry
-
-    @property
-    def remove_headwear_tags(self) -> bool:
-        return self.remove_headwear
-
-    @property
-    def remove_girl_suffix_tags(self) -> bool:
-        return self.remove_girl_suffix
-
-    @property
-    def preserve_hair_eye_colors(self) -> bool:
-        return self.preserve_hair_eye
-
-    @property
-    def remove_series_tags(self) -> bool:
-        return self.remove_series
-
-    @classmethod
-    def from_legacy_tuple(cls, t: tuple) -> FilterToggles:
-        return cls(*t)
+    shuffle_tags: bool = False
+    chaos_mode: str = "None"
+    chaos_amount: float = 0.0
+    limit_tags_pct: float = 1.0
+    max_tags_count: int = 0
+    change_dash: bool = False
+    filters: FilterToggles = field(default_factory=FilterToggles)
 
 
 FURRY_CORE_TAGS = {
@@ -671,7 +575,10 @@ def is_character_tag(tag: str, catalog_category_fn=None) -> bool:
         normalized = canonicalize_raw_tag(tag)
     if not normalized:
         return False
-    if catalog_category_fn and catalog_category_fn(normalized.replace(" ", "_")) == CHARACTER_CATEGORY:
+    if (
+        catalog_category_fn
+        and catalog_category_fn(normalized.replace(" ", "_")) == CHARACTER_CATEGORY
+    ):
         return True
     if "(" in tag and ")" in tag and not tag.strip().startswith("("):
         return True
@@ -930,9 +837,7 @@ def normalize_post_tags(
         else:
             buckets[key] = []
 
-    get_normalized_cached = _make_normalized_getter(
-        cache, normalize_tag, catalog_resolve_alias_fn
-    )
+    get_normalized_cached = _make_normalized_getter(cache, normalize_tag, catalog_resolve_alias_fn)
 
     for key, values in buckets.items():
         cleaned: List[str] = []
@@ -953,8 +858,7 @@ def normalize_post_tags(
 
 def should_remove_tag(
     raw_tag: str,
-    rules: Union[FilterToggles, PromptRules],
-    ctx: Optional[Dict[str, Any]] = None,
+    rules: FilterToggles,
     *,
     filter_ctx: Optional[Dict[str, object]] = None,
     favorites_guard: Optional[Set[str]] = None,
@@ -967,31 +871,36 @@ def should_remove_tag(
     bucket_name: Optional[str] = None,
     normalized_tag: Optional[str] = None,
     canonical_tag: Optional[str] = None,
-    catalog_resolve_alias_fn=None,
     catalog_is_textual_fn=None,
     catalog_is_hair_fn=None,
     catalog_is_eye_fn=None,
     catalog_category_fn=None,
 ) -> Tuple[bool, Optional[str]]:
-    """Determine whether a tag should be rejected/removed according to filter rules.
-    Returns (should_remove: bool, rule_name: Optional[str]).
-    """
-    if ctx is None:
-        ctx = {}
-    f_dict = filter_ctx if filter_ctx is not None else (
-        ctx if ("synonyms" in ctx or "exact" in ctx or "contains" in ctx) else ctx.get("filter_ctx")
-    )
-    fav_guard = favorites_guard if favorites_guard is not None else ctx.get("favorites_guard", set())
-    b_hair = base_hair if base_hair is not None else ctx.get("base_hair", set())
-    b_eye = base_eye if base_eye is not None else ctx.get("base_eye", set())
-    all_subj = allowed_subjects if allowed_subjects is not None else ctx.get("allowed_subjects", set())
-    prim_subj = primary_subject if primary_subject is not None else ctx.get("primary_subject")
-    a_norm = artist_norm if artist_norm is not None else ctx.get("artist_norm", set())
-    c_norm = char_norm if char_norm is not None else ctx.get("char_norm", set())
-    b_name = bucket_name if bucket_name is not None else ctx.get("bucket_name")
+    """Single filter predicate for the prompt path and the post prefilter.
 
-    norm_tag = normalized_tag if normalized_tag is not None else (normalize_tag(raw_tag) or "").strip().lower()
-    canon_tag = canonical_tag if canonical_tag is not None else (norm_tag or canonicalize_raw_tag(raw_tag) or "")
+    Returns ``(should_remove, rule_name)``. Pure: callers own any state such as
+    tracking ``primary_subject`` across tags.
+    """
+    f_dict = filter_ctx
+    fav_guard = favorites_guard or set()
+    b_hair = base_hair or set()
+    b_eye = base_eye or set()
+    all_subj = allowed_subjects or set()
+    prim_subj = primary_subject
+    a_norm = artist_norm or set()
+    c_norm = char_norm or set()
+    b_name = bucket_name
+
+    norm_tag = (
+        normalized_tag
+        if normalized_tag is not None
+        else (normalize_tag(raw_tag) or "").strip().lower()
+    )
+    canon_tag = (
+        canonical_tag
+        if canonical_tag is not None
+        else (norm_tag or canonicalize_raw_tag(raw_tag) or "")
+    )
 
     if norm_tag and norm_tag in fav_guard:
         return False, None
@@ -1057,7 +966,7 @@ def post_rejected_by_filter(
     post: Optional[Dict[str, object]],
     *,
     filter_ctx: Optional[Dict[str, object]],
-    toggles: Union[FilterToggles, Tuple[bool, ...]],
+    toggles: FilterToggles,
     base_colors: Tuple[Set[str], Set[str]],
     allowed_subjects: Set[str],
     cache: Dict[str, str],
@@ -1068,14 +977,10 @@ def post_rejected_by_filter(
     catalog_is_eye_fn=None,
     catalog_category_fn=None,
 ) -> Tuple[bool, Optional[Dict[str, object]]]:
-    if isinstance(toggles, tuple):
-        toggles = FilterToggles.from_legacy_tuple(toggles)
     base_hair, base_eye = base_colors
     _, buckets = normalize_post_tags(post, cache, catalog_resolve_alias_fn)
     primary_subject: Optional[str] = None
-    get_normalized_cached = _make_normalized_getter(
-        cache, normalize_tag, catalog_resolve_alias_fn
-    )
+    get_normalized_cached = _make_normalized_getter(cache, normalize_tag, catalog_resolve_alias_fn)
 
     for bucket_name, tags in buckets.items():
         for raw_tag in tags:
@@ -1100,7 +1005,6 @@ def post_rejected_by_filter(
                 bucket_name=bucket_name,
                 normalized_tag=normalized_tag,
                 canonical_tag=canonical_tag,
-                catalog_resolve_alias_fn=catalog_resolve_alias_fn,
                 catalog_is_textual_fn=catalog_is_textual_fn,
                 catalog_is_hair_fn=catalog_is_hair_fn,
                 catalog_is_eye_fn=catalog_is_eye_fn,

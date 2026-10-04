@@ -30,19 +30,9 @@ def make_default_settings(
         "limit_tags_pct": 1.0,
         "max_tags_count": 0,
         "change_dash": change_dash,
-        "remove_artist_tags": False,
-        "remove_character_tags": False,
-        "remove_clothing_tags": False,
-        "remove_text_tags": False,
-        "restrict_subject_tags": False,
-        "remove_furry_tags": False,
-        "remove_headwear_tags": False,
-        "preserve_hair_eye_colors": False,
-        "remove_series_tags": False,
     }
     defaults.update(overrides)
     return PromptRules(**defaults)
-
 
 
 def test_negative_score_tags_survive_dash_transform(script):

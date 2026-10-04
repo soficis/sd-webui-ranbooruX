@@ -1,4 +1,5 @@
 from ranboorux.tag_pipeline import (
+    FilterToggles,
     build_removal_context,
     build_synonym_lookup,
     canonicalize_raw_tag,
@@ -150,7 +151,7 @@ def test_post_rejected_by_filter():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(True, False, False, False, False, False, False, False, False, False),
+        toggles=FilterToggles(remove_artist=True),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -162,7 +163,7 @@ def test_post_rejected_by_filter():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, False, False, True, False, False, False, False, False, False),
+        toggles=FilterToggles(remove_text=True),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -175,7 +176,7 @@ def test_post_rejected_by_filter():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, False, False, False, False, False, False, False, True, False),
+        toggles=FilterToggles(preserve_hair_eye=True),
         base_colors=({"brown hair"}, {"blue eyes"}),
         allowed_subjects=set(),
         cache=cache,
@@ -187,7 +188,7 @@ def test_post_rejected_by_filter():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, False, False, False, False, False, False, False, False, False),
+        toggles=FilterToggles(),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -202,7 +203,7 @@ def test_post_rejected_by_filter_remove_furry():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, False, False, False, False, True, False, False, False, False),
+        toggles=FilterToggles(remove_furry=True),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -218,7 +219,7 @@ def test_post_rejected_by_filter_remove_clothing():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, False, True, False, False, False, False, False, False, False),
+        toggles=FilterToggles(remove_clothing=True),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -234,7 +235,7 @@ def test_post_rejected_by_filter_remove_headwear():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, False, False, False, False, False, True, False, False, False),
+        toggles=FilterToggles(remove_headwear=True),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -250,7 +251,7 @@ def test_post_rejected_by_filter_remove_girl_suffix():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, False, False, False, False, False, False, True, False, False),
+        toggles=FilterToggles(remove_girl_suffix=True),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -267,7 +268,7 @@ def test_post_rejected_by_filter_remove_character():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(False, True, False, False, False, False, False, False, False, False),
+        toggles=FilterToggles(remove_character=True),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -286,7 +287,7 @@ def test_post_rejected_by_filter_favorites_guard():
     rejected, reason = post_rejected_by_filter(
         post,
         filter_ctx=ctx,
-        toggles=(False, False, False, False, False, False, False, False, False, False),
+        toggles=FilterToggles(),
         base_colors=(set(), set()),
         allowed_subjects=set(),
         cache=cache,
@@ -295,80 +296,15 @@ def test_post_rejected_by_filter_favorites_guard():
     assert rejected is False
 
 
-def test_prompt_rules_and_filter_toggles_equivalence():
+def test_prompt_rules_nest_filter_toggles():
     from ranboorux.tag_pipeline import FilterToggles, PromptRules
 
-    # 1. FilterToggles from legacy tuple
-    t_tup = (True, False, True, False, False, True, False, True, False, True)
-    t_obj = FilterToggles.from_legacy_tuple(t_tup)
-    assert t_obj.remove_artist is True
-    assert t_obj.remove_character is False
-    assert t_obj.remove_clothing is True
-    assert t_obj.remove_text is False
-    assert t_obj.restrict_subject is False
-    assert t_obj.remove_furry is True
-    assert t_obj.remove_headwear is False
-    assert t_obj.remove_girl_suffix is True
-    assert t_obj.preserve_hair_eye is False
-    assert t_obj.remove_series is True
-
-    # 2. PromptRules from legacy tuple
-    p_tup = (
-        True,
-        "Random",
-        0.5,
-        0.8,
-        30,
-        True,
-        True,
-        False,
-        True,
-        False,
-        True,
-        False,
-        True,
-        False,
-        True,
-    )
-    p_obj = PromptRules.from_legacy_tuple(p_tup)
-    assert p_obj.shuffle_tags is True
-    assert p_obj.chaos_mode == "Random"
-    assert p_obj.chaos_amount == 0.5
-    assert p_obj.limit_tags_pct == 0.8
-    assert p_obj.max_tags_count == 30
-    assert p_obj.change_dash is True
-    assert p_obj.remove_artist_tags is True
-    assert p_obj.remove_character_tags is False
-    assert p_obj.remove_clothing_tags is True
-    assert p_obj.remove_text_tags is False
-    assert p_obj.restrict_subject_tags is True
-    assert p_obj.remove_furry_tags is False
-    assert p_obj.remove_headwear_tags is True
-    assert p_obj.preserve_hair_eye_colors is False
-    assert p_obj.remove_series_tags is True
-
-    # 3. post_rejected_by_filter equivalence between tuple and FilterToggles
-    post = {"id": "1", "artist_tags": ["some_artist"], "tags": "1girl"}
-    rej_tup, reason_tup = post_rejected_by_filter(
-        post,
-        filter_ctx=None,
-        toggles=t_tup,
-        base_colors=(set(), set()),
-        allowed_subjects=set(),
-        cache={},
-        favorites_guard=set(),
-    )
-    rej_obj, reason_obj = post_rejected_by_filter(
-        post,
-        filter_ctx=None,
-        toggles=t_obj,
-        base_colors=(set(), set()),
-        allowed_subjects=set(),
-        cache={},
-        favorites_guard=set(),
-    )
-    assert rej_tup == rej_obj is True
-    assert reason_tup == reason_obj
+    rules = PromptRules()
+    assert rules.filters == FilterToggles()
+    custom = PromptRules(filters=FilterToggles(remove_artist=True))
+    assert custom.filters.remove_artist is True
+    assert not hasattr(PromptRules, "from_legacy_tuple")
+    assert not hasattr(FilterToggles, "from_legacy_tuple")
 
 
 def test_filter_rule_convergence_unified():
@@ -402,7 +338,7 @@ def test_filter_rule_convergence_unified():
         "",
         "",
         "",
-        PromptRules(remove_artist_tags=True),
+        PromptRules(filters=FilterToggles(remove_artist=True)),
     )
     # UNIFIED: _process_single_prompt now removes "art_drawn_by_alice"
     assert "art_drawn_by_alice" not in prompt_out_drawn
@@ -427,10 +363,39 @@ def test_filter_rule_convergence_unified():
         "",
         "",
         "",
-        PromptRules(remove_girl_suffix_tags=True),
+        PromptRules(filters=FilterToggles(remove_girl_suffix=True)),
     )
     # UNIFIED: _process_single_prompt now applies girl-suffix rule and removes "cat_girl"
     assert "cat_girl" not in prompt_out_girl
 
 
+def test_prompt_path_character_rule_matches_post_filter():
+    """BEHAVIOR CHANGE (C4): the prompt path adopted the post-filter character rule.
 
+    Before the unification the prompt path only removed parenthesised tags and
+    `` series``/`` franchise`` suffixes. It now also removes `` character(s)``
+    suffixes and any tag the active catalog files under CHARACTER_CATEGORY.
+    """
+    import types
+
+    import scripts.ranbooru as ranbooru
+    from ranboorux.tag_pipeline import CHARACTER_CATEGORY, PromptRules
+
+    script = ranbooru.Script()
+    rules = PromptRules(filters=FilterToggles(remove_character=True))
+
+    out, _ = script._process_single_prompt(0, "original_character, solo", "", "", "", rules)
+    assert "original_character" not in out
+    assert "solo" in out
+
+    catalog = types.SimpleNamespace(
+        category=lambda tag: CHARACTER_CATEGORY if tag == "hatsune_miku" else 0,
+        resolve_alias=lambda tag: tag,
+        is_textual=lambda tag: False,
+        is_hair=lambda tag: False,
+        is_eye=lambda tag: False,
+    )
+    script._active_catalog = lambda: catalog
+    out, _ = script._process_single_prompt(0, "hatsune_miku, solo", "", "", "", rules)
+    assert "hatsune_miku" not in out
+    assert "solo" in out

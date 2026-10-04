@@ -62,17 +62,35 @@ USER_SEARCH_DIR = os.path.join(USER_DATA_DIR, "search")
 SERIES_CATEGORY = rb_tag_pipeline.SERIES_CATEGORY
 CHARACTER_CATEGORY = rb_tag_pipeline.CHARACTER_CATEGORY
 
-DEBUG: bool = os.getenv("RANBOORU_DEBUG", "0").lower() in ("1", "true", "yes")
+
+def _contain_catalog_path(root: str, value: str) -> str:
+    """Contain a catalog path under ``root``; relative values are relative to ``root``."""
+    if os.path.isabs(value):
+        return str(contained_path(root, value))
+    return str(safe_join(root, value))
 
 
-def _print_debug_traceback() -> None:
-    if DEBUG:
-        traceback.print_exc()
 USER_REMOVE_DIR = os.path.join(USER_DATA_DIR, "remove")
 LOG_DIR = os.path.join(USER_DATA_DIR, "logs")
 os.makedirs(USER_SEARCH_DIR, exist_ok=True)
 os.makedirs(USER_REMOVE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+
+DEBUG: bool = os.getenv("RANBOORU_DEBUG", "0").lower() in ("1", "true", "yes")
+
+
+def _report_exception(prefix: str, exc: BaseException) -> None:
+    """Print a sanitized one-line error; full traceback on console only when DEBUG.
+
+    The traceback is always sent to the ``ranboorux`` logger at DEBUG level so it can
+    be recovered for bug reports without turning on console noise.
+    """
+    print(f"{prefix}: {rb_http_client.sanitize_exception_text(str(exc))}")
+    if DEBUG:
+        traceback.print_exc()
+    else:
+        logging.getLogger("ranboorux").debug("%s", prefix, exc_info=True)
+
 
 GELBOORU_CREDENTIALS_DIR = os.path.join(USER_DATA_DIR, "gelbooru")
 GELBOORU_CREDENTIALS_FILE = os.path.join(GELBOORU_CREDENTIALS_DIR, "credentials.json")
@@ -768,14 +786,17 @@ class Script(scripts.Script):
             return BUNDLED_CATALOG_PATH
         if self._catalog_source == "custom":
             val = (self._custom_catalog_path or "").strip()
+            self._refused_catalog_name = ""
             if not val:
                 return ""
             try:
-                contained = contained_path(USER_CATALOGS_DIR, val)
-                return str(contained)
+                return _contain_catalog_path(USER_CATALOGS_DIR, val)
             except ValueError:
                 basename = os.path.basename(val) or "custom_catalog.csv"
-                print(f"[Ranbooru] Warn: Refused custom catalog path outside allowed roots: {basename}")
+                self._refused_catalog_name = basename
+                print(
+                    f"[Ranbooru] Warn: Refused custom catalog path outside allowed roots: {basename}"
+                )
                 return ""
         return ""
 
@@ -810,8 +831,7 @@ class Script(scripts.Script):
             allowed_roots = [USER_CATALOGS_DIR, BUNDLED_CATALOG_DIR]
             for root in allowed_roots:
                 try:
-                    contained = contained_path(root, hint)
-                    return str(contained), True
+                    return _contain_catalog_path(root, hint), True
                 except ValueError:
                     continue
             basename = os.path.basename(hint) or "unnamed"
@@ -861,6 +881,12 @@ class Script(scripts.Script):
         catalog = getattr(self, "_catalog", None)
         if not isinstance(catalog, CsvCatalog):
             selected = self._resolve_catalog_path()
+            refused = getattr(self, "_refused_catalog_name", "")
+            if not selected and refused:
+                return (
+                    f"Catalog mode: ON - Custom catalog `{refused}` is outside "
+                    "user/catalogs and was not loaded. Re-import it to use it."
+                )
             if not selected:
                 return "Catalog mode: ON - No catalog selected"
             source_label = "Bundled" if self._catalog_source == "bundled" else "Custom"
@@ -1461,7 +1487,7 @@ class Script(scripts.Script):
         post: Optional[Dict[str, object]],
         *,
         filter_ctx: Optional[Dict[str, object]],
-        toggles: Union[rb_tag_pipeline.FilterToggles, Tuple[bool, ...]],
+        toggles: rb_tag_pipeline.FilterToggles,
         base_colors: Tuple[Set[str], Set[str]],
         allowed_subjects: Set[str],
         cache: Dict[str, str],
@@ -1493,7 +1519,7 @@ class Script(scripts.Script):
         num_images_needed: int,
         max_pages: int,
         filter_ctx: Optional[Dict[str, object]],
-        toggles: Union[rb_tag_pipeline.FilterToggles, Tuple[bool, ...]],
+        toggles: rb_tag_pipeline.FilterToggles,
         base_colors: Tuple[Set[str], Set[str]],
         allowed_subjects: Set[str],
     ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], bool, bool]:
@@ -1918,10 +1944,16 @@ class Script(scripts.Script):
                 status = f"Validation failed: Refused path outside allowed roots: {basename}"
                 return _gr_component_update(gr.Markdown, value=status)
             if not candidate:
-                return _gr_component_update(gr.Markdown, value="Validation failed: No catalog file provided")
+                return _gr_component_update(
+                    gr.Markdown, value="Validation failed: No catalog file provided"
+                )
             ok, message = self._validate_csv_format(candidate)
             sanitized_msg = rb_http_client.sanitize_exception_text(message)
-            status = f"Validation passed: {sanitized_msg}" if ok else f"Validation failed: {sanitized_msg}"
+            status = (
+                f"Validation passed: {sanitized_msg}"
+                if ok
+                else f"Validation failed: {sanitized_msg}"
+            )
             return _gr_component_update(gr.Markdown, value=status)
 
         def _ui_import_custom_catalog(uploaded, path_value):
@@ -2704,7 +2736,9 @@ class Script(scripts.Script):
         if not folder:
             return lora_dir
         try:
-            return str(safe_join(lora_dir, folder))
+            # Lexical containment: LoRA subfolders are often symlinks/junctions to
+            # another drive, which realpath-based containment would reject.
+            return str(safe_join(lora_dir, folder, follow_symlinks=False))
         except ValueError:
             clean_name = os.path.basename(folder)
             print(f"[Ranbooru] Warn: Refused uncontained LoRA folder: {clean_name}")
@@ -2896,7 +2930,9 @@ class Script(scripts.Script):
         if auto_detect_pony:
             choice_names = detected_names or all_names
             if detected_names:
-                status = f"Detected {len(detected_names)} PonyXL-compatible LoRAs in `{folder_display}`."
+                status = (
+                    f"Detected {len(detected_names)} PonyXL-compatible LoRAs in `{folder_display}`."
+                )
             elif all_names:
                 status = (
                     f"No PonyXL markers detected in `{folder_display}`. "
@@ -2907,7 +2943,9 @@ class Script(scripts.Script):
         else:
             choice_names = all_names
             if all_names:
-                status = f"Auto-detect disabled. {len(all_names)} LoRAs available in `{folder_display}`."
+                status = (
+                    f"Auto-detect disabled. {len(all_names)} LoRAs available in `{folder_display}`."
+                )
             else:
                 status = scan.get("message") or "No LoRAs found."
 
@@ -3151,9 +3189,7 @@ class Script(scripts.Script):
             if search_lines:
                 selected_file_tags = random.choice(search_lines)
                 search_tags = (
-                    f"{search_tags},{selected_file_tags}"
-                    if search_tags
-                    else selected_file_tags
+                    f"{search_tags},{selected_file_tags}" if search_tags else selected_file_tags
                 )
                 print(f"[R] Added file tags: {selected_file_tags}")
             else:
@@ -3384,19 +3420,18 @@ class Script(scripts.Script):
         base_positive: str,
         base_negative: str,
         initial_additions: str,
-        settings: Union[rb_tag_pipeline.PromptRules, tuple],
+        settings: rb_tag_pipeline.PromptRules,
     ):
-        if isinstance(settings, tuple):
-            settings = rb_tag_pipeline.PromptRules.from_legacy_tuple(settings)
         shuffle_tags = settings.shuffle_tags
         chaos_mode = settings.chaos_mode
         chaos_amount = settings.chaos_amount
         limit_tags_pct = settings.limit_tags_pct
         max_tags_count = settings.max_tags_count
         change_dash = settings.change_dash
-        remove_artist_tags = settings.remove_artist_tags
-        remove_character_tags = settings.remove_character_tags
-        restrict_subject_tags = settings.restrict_subject_tags
+        filters = settings.filters
+        remove_artist_tags = filters.remove_artist
+        remove_character_tags = filters.remove_character
+        restrict_subject_tags = filters.restrict_subject
         current_prompt = f"{initial_additions},{raw_prompt}" if initial_additions else raw_prompt
         prompt_tags = [
             tag.strip().lower() for tag in re.split(r"[\,\t\s]+", current_prompt) if tag.strip()
@@ -3489,7 +3524,7 @@ class Script(scripts.Script):
                     continue
                 should_remove, _ = rb_tag_pipeline.should_remove_tag(
                     t,
-                    settings,
+                    filters,
                     filter_ctx=filter_ctx,
                     favorites_guard=favorites_guard,
                     base_hair=base_hair_colors,
@@ -3507,7 +3542,7 @@ class Script(scripts.Script):
                 )
                 if not should_remove:
                     if (
-                        settings.restrict_subject
+                        filters.restrict_subject
                         and not allowed_subjects
                         and rb_tag_pipeline.is_subject_tag(t)
                         and primary_subject is None
@@ -3791,7 +3826,9 @@ class Script(scripts.Script):
         # Clean up early protection state
         if hasattr(self, "_temp_disabled_adetailer"):
             # Force restore if cleanup is called early
-            self._adetailer_orch._restore_early_adetailer_protection(getattr(self, "_initial_pass_p", None))
+            self._adetailer_orch._restore_early_adetailer_protection(
+                getattr(self, "_initial_pass_p", None)
+            )
 
         # Ensure any manual patches are removed once we're finished.
         self._unpatch_manual_adetailer_overrides()
@@ -3980,7 +4017,7 @@ class Script(scripts.Script):
             return re.sub(r"[_ ]*\([^)]+\)$", "", tag).strip()
         return tag
 
-    def _detect_anima(self, options=None, sd_model=None, p=None) -> dict[str, Any]:
+    def _detect_anima(self, sd_model=None, p=None) -> dict[str, Any]:
         """Run the single Anima detection ladder, updating self attributes and returning info dict.
         Ladder:
         1. pending_ckpt from p.override_settings or shared.opts
@@ -4200,8 +4237,7 @@ class Script(scripts.Script):
             lora_detected_loras_ui = options.lora_detected_loras
             lora_blacklist_ui = options.lora_blacklist
         except Exception as e:
-            print(f"[R Before] CRITICAL Error unpack args: {e}. Aborting.")
-            _print_debug_traceback()
+            _report_exception("[R Before] CRITICAL Error unpack args (aborting)", e)
             self._abort_before_process_run("script argument parsing failed", p)
             return
 
@@ -4232,7 +4268,7 @@ class Script(scripts.Script):
 
         # Anima model detection
         try:
-            info = self._detect_anima(options=options, p=p)
+            info = self._detect_anima(p=p)
             if self._is_anima_model:
                 anima_auto_detect = getattr(options, "anima_auto_detect", True)
                 if anima_auto_detect:
@@ -4404,7 +4440,9 @@ class Script(scripts.Script):
         self._strict_img2img_relaxed = False
         self._strict_img2img_rejections = []
         self._strict_initial_additions = ""
-        self._strict_allowed_subjects = set(rb_tag_pipeline.extract_subject_tags(self.original_prompt))
+        self._strict_allowed_subjects = set(
+            rb_tag_pipeline.extract_subject_tags(self.original_prompt)
+        )
         base_subjects = set(self._strict_allowed_subjects)
 
         if not should_fetch_new:
@@ -4609,16 +4647,18 @@ class Script(scripts.Script):
                 limit_tags_pct=limit_tags_pct,
                 max_tags_count=max_tags_count,
                 change_dash=change_dash,
-                remove_artist_tags=self._remove_artist_tags,
-                remove_character_tags=self._remove_character_tags,
-                remove_clothing_tags=self._remove_clothing_tags,
-                remove_text_tags=self._remove_text_tags,
-                restrict_subject_tags=self._restrict_subject_tags,
-                remove_furry_tags=self._remove_furry_tags,
-                remove_headwear_tags=self._remove_headwear_tags,
-                remove_girl_suffix_tags=self._remove_girl_suffix_tags,
-                preserve_hair_eye_colors=self._preserve_hair_eye_colors,
-                remove_series_tags=self._remove_series_tags,
+                filters=rb_tag_pipeline.FilterToggles(
+                    remove_artist=self._remove_artist_tags,
+                    remove_character=self._remove_character_tags,
+                    remove_clothing=self._remove_clothing_tags,
+                    remove_text=self._remove_text_tags,
+                    restrict_subject=self._restrict_subject_tags,
+                    remove_furry=self._remove_furry_tags,
+                    remove_headwear=self._remove_headwear_tags,
+                    remove_girl_suffix=self._remove_girl_suffix_tags,
+                    preserve_hair_eye=self._preserve_hair_eye_colors,
+                    remove_series=self._remove_series_tags,
+                ),
             )
 
             # Ensure we only use the number of posts that match the current generation request
@@ -4764,8 +4804,7 @@ class Script(scripts.Script):
             self._prepare_img2img_pass(p, use_img2img, use_ip)
 
         except Exception as e:
-            print(f"[Ranbooru BeforeProcess] UNEXPECTED ERROR: {e}")
-            _print_debug_traceback()
+            _report_exception("[Ranbooru BeforeProcess] UNEXPECTED ERROR", e)
             self._abort_before_process_run("before_process failed", p)
             return
 
@@ -4955,14 +4994,14 @@ class Script(scripts.Script):
 
         use_cache = getattr(self, "_post_use_cache", True)
         crop_center = getattr(self, "_post_crop_center", False)
-        use_adetailer = (
-            getattr(self, "_post_adetailer_enabled", False)
-            and self._adetailer_orch.is_adetailer_enabled()
-        )
         enabled = getattr(self, "_post_enabled", False)
         use_img2img = getattr(self, "_post_use_img2img", False)
 
         try:
+            use_adetailer = (
+                getattr(self, "_post_adetailer_enabled", False)
+                and self._adetailer_orch.is_adetailer_enabled()
+            )
             if not processed or not hasattr(processed, "images"):
                 self._bail(p, use_cache, "Error: Invalid processed object, skipping img2img")
                 return None
@@ -5046,9 +5085,7 @@ class Script(scripts.Script):
         )
         img2img_width, img2img_height = prepared_images[0].size
 
-        print(
-            f"[R] Processing {len(prepared_images)} images individually to ensure compatibility"
-        )
+        print(f"[R] Processing {len(prepared_images)} images individually to ensure compatibility")
         print(
             f"[R] Running Img2Img ({len(prepared_images)} images) steps={self.real_steps}, Denoise={self.img2img_denoising}"
         )
@@ -5068,8 +5105,7 @@ class Script(scripts.Script):
 
             p_img2img = StableDiffusionProcessingImg2Img(
                 sd_model=shared.sd_model,
-                outpath_samples=shared.opts.outdir_samples
-                or shared.opts.outdir_img2img_samples,
+                outpath_samples=shared.opts.outdir_samples or shared.opts.outdir_img2img_samples,
                 outpath_grids=shared.opts.outdir_grids or shared.opts.outdir_img2img_grids,
                 prompt=current_prompt,
                 negative_prompt=current_negative,
@@ -5147,9 +5183,7 @@ class Script(scripts.Script):
         use_adetailer: bool,
     ) -> List[Any]:
         if not use_adetailer:
-            print(
-                "[R Post] Manual ADetailer support disabled; skipping manual ADetailer execution"
-            )
+            print("[R Post] Manual ADetailer support disabled; skipping manual ADetailer execution")
             return all_img2img_results
 
         print("[R Post] Attempting manual ADetailer run on img2img results...")
@@ -5198,9 +5232,7 @@ class Script(scripts.Script):
             delattr(self, "_ranbooru_intermediate_results")
 
         print("[R Post] Img2Img finished.")
-        print(
-            f"[R Post] Updated processed object with {len(all_img2img_results)} img2img results"
-        )
+        print(f"[R Post] Updated processed object with {len(all_img2img_results)} img2img results")
         self._force_ui_update(p, processed, all_img2img_results)
         print(
             "[R Post] RanbooruX processing complete - final results ready for UI and other extensions"
@@ -5239,8 +5271,7 @@ class Script(scripts.Script):
             self._finalize_results(p, processed, all_img2img_results)
 
         except Exception as e:
-            print(f"[R Post] Critical error during img2img processing: {e}")
-            _print_debug_traceback()
+            _report_exception("[R Post] Critical error during img2img processing", e)
             try:
                 # Attempt to preserve original images if img2img fails
                 if hasattr(self, "last_img") and self.last_img:

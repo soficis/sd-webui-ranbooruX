@@ -28,5 +28,8 @@ repos:
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.2
     hooks:
+      # Advisory only: not run on commit. Invoke with
+      #   pre-commit run --hook-stage manual gitleaks --all-files
       - id: gitleaks
+        stages: [manual]
         verbose: true

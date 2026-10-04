@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -69,10 +70,14 @@ def test_gelbooru_ui_save_clears_textboxes_and_hides_path(tmp_path, monkeypatch)
 def test_secret_scanner_configured_in_precommit_and_ci():
     precommit = Path(".pre-commit-config.yaml").read_text(encoding="utf-8")
     assert "gitleaks" in precommit
+    # Advisory: the hook must not block ordinary commits.
+    assert re.search(r"id: gitleaks\s+stages: \[manual\]", precommit)
 
     ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "gitleaks" in ci
     assert "continue-on-error: true" in ci
+    # Third-party actions added for supply-chain hardening are pinned to a commit SHA.
+    assert re.search(r"gitleaks/gitleaks-action@[0-9a-f]{40}", ci)
 
 
 def test_pip_audit_configured_in_ci():
@@ -106,20 +111,7 @@ def test_install_req_surfaces_errors_to_stderr_without_crashing(capsys, monkeypa
         "[RanbooruX] ERROR: Failed to install test package: simulated pip explosion" in captured.err
     )
 
-    # Case 2: Non-zero exit code returned by launch.run_pip
-    def mock_fail_code(cmd, desc):
-        return 1
-
-    monkeypatch.setattr(install.launch, "run_pip", mock_fail_code)
-    install._install_req(str(req_file), "test package")
-
-    captured = capsys.readouterr()
-    assert (
-        "[RanbooruX] ERROR: Pip installation of test package failed with exit code 1"
-        in captured.err
-    )
-
-    # Case 3: Success (returns 0 or None)
+    # Case 2: Success
     monkeypatch.setattr(install.launch, "run_pip", lambda cmd, desc: 0)
     install._install_req(str(req_file), "test package")
 
@@ -127,21 +119,34 @@ def test_install_req_surfaces_errors_to_stderr_without_crashing(capsys, monkeypa
     assert captured.err == ""
 
 
-def test_debug_flag_controls_traceback_printing(monkeypatch):
+def test_report_exception_sanitizes_and_gates_console_traceback(monkeypatch, capsys, caplog):
+    import logging
+
     import scripts.ranbooru as ranbooru
 
     called = []
     monkeypatch.setattr(ranbooru.traceback, "print_exc", lambda: called.append(True))
+    err = RuntimeError(r"boom at E:\private\secret\file.txt")
 
-    # When DEBUG is False, print_exc should NOT be called
     monkeypatch.setattr(ranbooru, "DEBUG", False)
-    ranbooru._print_debug_traceback()
-    assert len(called) == 0
+    with caplog.at_level(logging.DEBUG, logger="ranboorux"):
+        try:
+            raise err
+        except RuntimeError as exc:
+            ranbooru._report_exception("[R Test] failed", exc)
+    out = capsys.readouterr().out
+    assert "[R Test] failed" in out
+    assert "secret" not in out
+    assert called == []
+    # Traceback is still recoverable via the logger at DEBUG level.
+    assert any(rec.exc_info for rec in caplog.records)
 
-    # When DEBUG is True, print_exc should be called
     monkeypatch.setattr(ranbooru, "DEBUG", True)
-    ranbooru._print_debug_traceback()
-    assert len(called) == 1
+    try:
+        raise err
+    except RuntimeError as exc:
+        ranbooru._report_exception("[R Test] failed", exc)
+    assert called == [True]
 
 
 def test_fetch_booru_posts_sanitizes_errors():
