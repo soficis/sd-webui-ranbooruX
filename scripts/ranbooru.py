@@ -1545,16 +1545,16 @@ class Script(scripts.Script):
                 _gr_update(visible=True),
                 _gr_component_update(gr.Markdown, value="", visible=False),
                 _gr_component_update(gr.Button, visible=False),
-                _gr_component_update(gr.Textbox, value=""),
-                _gr_component_update(gr.Textbox, value=""),
+                _gr_update(),
+                _gr_update(),
             )
         # Hide for non-Gelbooru selections
         return (
             _gr_update(visible=False),
             _gr_component_update(gr.Markdown, value="", visible=False),
             _gr_component_update(gr.Button, visible=False),
-            _gr_component_update(gr.Textbox, value=""),
-            _gr_component_update(gr.Textbox, value=""),
+            _gr_update(),
+            _gr_update(),
         )
 
     def _update_gelbooru_compat_visibility(self, booru_name: Optional[str]):
@@ -2122,7 +2122,13 @@ class Script(scripts.Script):
             outputs=[custom_catalog_group, catalog_path, catalog_status],
             queue=False,
         )
-        catalog_path.change(
+        catalog_path.blur(
+            fn=_ui_set_catalog_path,
+            inputs=[catalog_path],
+            outputs=[catalog_path, catalog_status],
+            queue=False,
+        )
+        catalog_path.submit(
             fn=_ui_set_catalog_path,
             inputs=[catalog_path],
             outputs=[catalog_path, catalog_status],
@@ -2231,7 +2237,13 @@ class Script(scripts.Script):
                 )
                 lora_detect_status = gr.Markdown(initial_lora_status)
 
-        lora_folder.change(
+        lora_folder.blur(
+            fn=self._ui_refresh_loranado_controls,
+            inputs=[lora_folder, lora_auto_detect_pony, lora_detected_loras, lora_blacklist],
+            outputs=[lora_detected_loras, lora_blacklist, lora_detect_status],
+            queue=False,
+        )
+        lora_folder.submit(
             fn=self._ui_refresh_loranado_controls,
             inputs=[lora_folder, lora_auto_detect_pony, lora_detected_loras, lora_blacklist],
             outputs=[lora_detected_loras, lora_blacklist, lora_detect_status],
@@ -2638,7 +2650,13 @@ class Script(scripts.Script):
                 outputs=[gelbooru_compat_group, gelbooru_compat_base_url],
                 queue=False,
             )
-            gelbooru_compat_base_url.change(
+            gelbooru_compat_base_url.blur(
+                fn=self._ui_set_gelbooru_compat_base_url,
+                inputs=[gelbooru_compat_base_url],
+                outputs=[gelbooru_compat_base_url],
+                queue=False,
+            )
+            gelbooru_compat_base_url.submit(
                 fn=self._ui_set_gelbooru_compat_base_url,
                 inputs=[gelbooru_compat_base_url],
                 outputs=[gelbooru_compat_base_url],
