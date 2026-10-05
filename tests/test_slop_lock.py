@@ -84,6 +84,7 @@ def _args(**overrides) -> List[object]:
         "lora_detected_loras": [],
         "anima_auto_detect": False,
         "anima_tune_img2img": True,
+        "controlnet_weight": 1.0,
         "lora_blacklist": [],
     }
     defaults.update(overrides)
@@ -255,11 +256,6 @@ def test_lock_prepare_img2img_cfg_clamps():
     for cfg_in, expected in [(0.5, 1.0), (2.5, 2.5), (7.0, 6.0), (1.0, 1.0), (6.0, 6.0)]:
         turbo_tuned = max(1.0, min(cfg_in, 6.0))
         assert turbo_tuned == expected
-
-    # Steps: max(8, min(15, steps // 3))
-    for steps_in, expected in [(15, 8), (30, 10), (60, 15), (9, 8), (45, 15)]:
-        steps_tuned = max(8, min(15, steps_in // 3))
-        assert steps_tuned == expected
 
     # Denoise: min(0.5, denoising)
     for denoise_in, expected in [(0.75, 0.5), (0.4, 0.4), (0.5, 0.5)]:

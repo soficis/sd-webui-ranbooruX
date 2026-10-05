@@ -82,8 +82,77 @@ def stub_modules(tmp_path, request):
     gradio_mod = types.ModuleType("gradio")
     gradio_mod.__version__ = "4.0.0" if gradio_version == "4" else "3.41.2"
 
+    # Keyword arguments accepted by the real Gradio 4.40 constructors. Anything else
+    # raises TypeError, exactly as it would on Forge Neo.
+    _strict_kwargs = {
+        "File": {
+            "value",
+            "file_count",
+            "file_types",
+            "type",
+            "label",
+            "every",
+            "inputs",
+            "show_label",
+            "container",
+            "scale",
+            "min_width",
+            "height",
+            "interactive",
+            "visible",
+            "elem_id",
+            "elem_classes",
+            "render",
+            "key",
+        },
+        "Button": {
+            "value",
+            "every",
+            "inputs",
+            "variant",
+            "size",
+            "icon",
+            "link",
+            "visible",
+            "interactive",
+            "elem_id",
+            "elem_classes",
+            "render",
+            "key",
+            "scale",
+            "min_width",
+        },
+        "DownloadButton": {
+            "label",
+            "value",
+            "every",
+            "inputs",
+            "variant",
+            "visible",
+            "size",
+            "icon",
+            "scale",
+            "min_width",
+            "interactive",
+            "elem_id",
+            "elem_classes",
+            "render",
+            "key",
+        },
+    }
+
     class DummyComponent:
+        _allowed_kwargs = None
+
         def __init__(self, *args, **kwargs):
+            allowed = type(self)._allowed_kwargs
+            if allowed is not None:
+                unexpected = sorted(set(kwargs) - allowed)
+                if unexpected:
+                    raise TypeError(
+                        f"{type(self).__name__}.__init__() got an unexpected keyword "
+                        f"argument {unexpected[0]!r}"
+                    )
             self.args = args
             self.kwargs = kwargs
             self.value = kwargs.get("value")
@@ -140,7 +209,11 @@ def stub_modules(tmp_path, request):
         "DownloadButton",
         "State",
     ):
-        setattr(gradio_mod, _name, type(_name, (DummyComponent,), {}))
+        setattr(
+            gradio_mod,
+            _name,
+            type(_name, (DummyComponent,), {"_allowed_kwargs": _strict_kwargs.get(_name)}),
+        )
     for _name in ("Group", "Row", "Column", "Accordion", "Box"):
         setattr(gradio_mod, _name, DummyContext)
 

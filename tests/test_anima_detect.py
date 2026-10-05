@@ -131,7 +131,7 @@ def test_anima_tune_img2img_can_be_disabled():
     )
 
     # When anima_tune_img2img is False, script.img2img_denoising and p.steps should not be overridden by Anima bounds
-    opts = RunOptions.from_script_args([object()] * 63 + [False])
+    opts = RunOptions.from_script_args([object()] * 63 + [False, 1.0])
     script.options = opts
     script._prepare_img2img_pass(p, use_img2img=True, use_ip=False)
 

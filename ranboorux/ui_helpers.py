@@ -69,7 +69,7 @@ def format_list_status(
 ) -> str:
     """Format status messages for list operations."""
     if error:
-        return f"Failed to import: {error}"
+        return f"Failed to {op}: {error}"
     if op == "add":
         if added > 0:
             noun = "tag" if added == 1 else "tags"

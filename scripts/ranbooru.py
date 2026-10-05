@@ -1,3 +1,4 @@
+import copy
 import csv
 import difflib
 import json
@@ -7,6 +8,8 @@ import random
 import re
 import shutil
 import sys
+import tempfile
+import time
 import traceback
 import unicodedata
 from contextlib import ExitStack, contextmanager
@@ -108,19 +111,57 @@ def _record_processing_comment(p: Any, msg: str) -> None:
         pass
 
 
-def _note_run_failure(p: Any, reason: str) -> None:
-    if not p or not reason:
+CONTROLNET_NO_MODEL_NOTE = (
+    "RanbooruX: ControlNet skipped - ControlNet Unit 0 has no model selected. "
+    "Pick a model in the ControlNet panel's Unit 0."
+)
+
+
+CONTROLNET_IMG2IMG_FAILED_NOTE = (
+    "RanbooruX: ControlNet could not be applied to the Img2Img pass - "
+    "the image was made without it. See the console for the error."
+)
+
+
+def _controlnet_unit_copy(unit: Any, **fields: Any) -> Any:
+    """Copy a ControlNet unit (dict or object) with `fields` changed; the original is untouched."""
+    if isinstance(unit, dict):
+        return {**unit, **fields}
+    clone = copy.copy(unit)
+    for name, value in fields.items():
+        setattr(clone, name, value)
+    return clone
+
+
+def _controlnet_unit_enabled(unit: Any) -> bool:
+    return bool(unit.get("enabled") if isinstance(unit, dict) else getattr(unit, "enabled", False))
+
+
+def _controlnet_unit_has_model(unit: Any) -> bool:
+    """True when a ControlNet unit names a real model; Forge asserts on "None"."""
+    model = unit.get("model") if isinstance(unit, dict) else getattr(unit, "model", None)
+    name = str(model or "").strip()
+    return bool(name) and name.lower() != "none"
+
+
+def _note_run_failure(p: Any, reason: str, outcome: str = "") -> None:
+    """Record a sanitised failure note; `outcome` says what the user actually got."""
+    if not p:
         return
-    sanitized = rb_http_client.sanitize_exception_text(str(reason))
-    msg = f"RanbooruX: {sanitized}"
+    sanitized = rb_http_client.sanitize_exception_text(str(reason or "")).strip().rstrip(".")
+    msg = f"RanbooruX: {sanitized or 'unexpected error'}."
+    if outcome:
+        msg = f"{msg} {outcome}"
     _record_processing_comment(p, msg)
 
 
 def _note_run_success(
-    p: Any, booru: str, n_posts: int, tags_removed: int, catalog_on: bool
+    p: Any, booru: str, n_posts: int, tags_removed: int, catalog_label: str
 ) -> None:
-    cat_str = "on" if catalog_on else "off"
-    msg = f"RanbooruX: {booru} · {n_posts} post(s) · {tags_removed} tags removed by filters · catalog {cat_str}"
+    msg = (
+        f"RanbooruX: {booru} · {n_posts} post(s) · {tags_removed} tag(s) removed by filters "
+        f"(batch total) · catalog {catalog_label}"
+    )
     _record_processing_comment(p, msg)
 
 
@@ -273,6 +314,49 @@ def _gr_update(**kwargs):
     if callable(update_fn):
         return update_fn(**kwargs)
     return kwargs
+
+
+def _register_page_load(fn, inputs, outputs) -> bool:
+    """Run fn when the page loads, so values restored from ui-config.json get handled.
+
+    Blur/submit events never fire for a saved default, so dependent control states
+    would otherwise stay stale until the user touches the field.
+    """
+    try:
+        from gradio.context import Context
+    except ImportError:
+        return False
+    root = getattr(Context, "root_block", None)
+    load = getattr(root, "load", None)
+    if not callable(load):
+        return False
+    load(fn=fn, inputs=inputs, outputs=outputs, queue=False, show_progress="hidden")
+    return True
+
+
+EXPORT_MAX_AGE_SECONDS = 3600
+
+
+def _export_root() -> str:
+    """Folder that holds list exports; created on demand."""
+    root = os.path.join(tempfile.gettempdir(), "ranbooru_exports")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _prune_old_exports(root: str, max_age: float = EXPORT_MAX_AGE_SECONDS) -> None:
+    """Delete export folders older than max_age so exports do not pile up in temp."""
+    cutoff = time.time() - max_age
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=False) and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def get_available_ratings(booru, current=None):
@@ -769,10 +853,6 @@ class Script(scripts.Script):
     _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
     _WHITESPACE_RE = re.compile(r"\s+")
     _LORANADO_MAX_HEADER_BYTES = 4 * 1024 * 1024
-    _USER_LIST_PATHS = {
-        "personal": PERSONAL_REMOVE_FILE,
-        "favorites": FAVORITES_FILE,
-    }
 
     def _read_list_file(self, path: str) -> List[str]:
         try:
@@ -922,11 +1002,15 @@ class Script(scripts.Script):
                 return True, self._format_catalog_status()
             return False, load_message
         except Exception as exc:
-            return False, f"**Failed:** Failed to import custom catalog: {exc}"
+            return (
+                False,
+                "**Failed:** Could not import custom catalog: "
+                f"{rb_http_client.sanitize_exception_text(str(exc))}",
+            )
 
     def _format_catalog_status(self) -> str:
         if not self._use_tag_catalog:
-            return "**Off:** Tag catalog disabled"
+            return "**OK:** Bundled default catalog"
         catalog = getattr(self, "_catalog", None)
         if not isinstance(catalog, CsvCatalog):
             selected = self._resolve_catalog_path()
@@ -984,14 +1068,17 @@ class Script(scripts.Script):
         valid, validation_msg = self._validate_csv_format(path_value)
         if not valid:
             self._catalog = NoopCatalog()
-            return False, f"**Failed:** {validation_msg}"
+            return (
+                False,
+                f"**Failed:** {rb_http_client.sanitize_exception_text(str(validation_msg))}",
+            )
         try:
             self._catalog = CsvCatalog(path_value)
             self._tag_catalog_status_text = self._format_catalog_status()
             return True, self._tag_catalog_status_text
         except Exception as exc:
             self._catalog = NoopCatalog()
-            return False, f"**Failed:** {exc}"
+            return False, f"**Failed:** {rb_http_client.sanitize_exception_text(str(exc))}"
 
     def _render_tag_diag(self, diag: Dict[str, object]) -> str:
         if not diag:
@@ -1235,7 +1322,7 @@ class Script(scripts.Script):
         imported: Optional[List[str]] = None,
         dedupe: bool = False,
     ) -> List[str]:
-        path = PERSONAL_REMOVE_FILE if list_key == "personal" else FAVORITES_FILE
+        path, _title = self._user_list_spec(list_key)
         existing = self._read_list_file(path)
         working = list(existing)
         combined_additions: List[str] = []
@@ -1263,225 +1350,146 @@ class Script(scripts.Script):
         self._load_personal_lists()
         return working
 
-    def _ui_add_personal_tags(self, tags_text: str, current_selection: Optional[object]):
-        additions = self._parse_user_tags(tags_text)
-        existing = self._read_list_file(PERSONAL_REMOVE_FILE)
-        new_list = (
-            self._apply_list_operation("personal", additions=additions) if additions else existing
-        )
-        added = len(new_list) - len(existing)
-        skipped = len(additions) - added
-        status_msg = rb_ui_helpers.format_list_status("add", added=added, skipped=skipped)
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
-            _gr_component_update(gr.Textbox, value=""),
-            _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
+    def _user_list_spec(self, list_key: str) -> Tuple[str, str]:
+        """Return (file path, display title) for a user list.
+
+        Reads the module constants at call time so tests can monkeypatch them.
+        """
+        if list_key == "personal":
+            return PERSONAL_REMOVE_FILE, "Personal removal list"
+        if list_key == "favorites":
+            return FAVORITES_FILE, "Favorites list"
+        raise KeyError(f"Unknown user list: {list_key}")
+
+    def _list_ui_updates(
+        self,
+        list_key: str,
+        items: List[str],
+        status: str,
+        *,
+        clear_input: bool = False,
+        clear_file: bool = False,
+    ):
+        """Build the update tuple shared by every list handler.
+
+        Order: selector, [add-input], [import-file], display, status.
+        """
+        path, title = self._user_list_spec(list_key)
+        updates = [_gr_component_update(gr.Dropdown, choices=items, value=[])]
+        if clear_input:
+            updates.append(_gr_component_update(gr.Textbox, value=""))
+        if clear_file:
+            updates.append(_gr_component_update(gr.File, value=None))
+        updates.append(
             _gr_component_update(
                 gr.Textbox,
-                label=f"Personal removal list ({len(new_list)})",
-                value=", ".join(new_list),
-            ),
-            _gr_component_update(gr.Markdown, value=status_msg),
+                label=f"{title} ({len(items)})",
+                value=", ".join(items),
+            )
         )
+        updates.append(_gr_component_update(gr.Markdown, value=status))
+        return tuple(updates)
+
+    def _add_to_user_list(self, list_key: str, additions: List[str]) -> Tuple[List[str], int, int]:
+        """Add tags to a list. Returns (new list, added count, already-present count)."""
+        path, _title = self._user_list_spec(list_key)
+        existing = self._read_list_file(path)
+        if not additions:
+            return existing, 0, 0
+        before = self._merge_tag_lists([], existing)
+        unique_additions = self._merge_tag_lists([], additions)
+        new_list = self._apply_list_operation(list_key, additions=additions)
+        added = len(new_list) - len(before)
+        return new_list, added, len(unique_additions) - added
+
+    def _ui_list_add(self, list_key: str, tags_text: str):
+        new_list, added, skipped = self._add_to_user_list(
+            list_key, self._parse_user_tags(tags_text)
+        )
+        status = rb_ui_helpers.format_list_status("add", added=added, skipped=skipped)
+        return self._list_ui_updates(list_key, new_list, status, clear_input=True)
+
+    def _ui_list_remove(self, list_key: str, selected: Optional[object]):
+        path, _title = self._user_list_spec(list_key)
+        removals = self._coerce_selection(selected)
+        existing = self._read_list_file(path)
+        if not removals:
+            status = rb_ui_helpers.format_list_status("remove", removed=0)
+            return self._list_ui_updates(list_key, existing, status)
+        new_list = self._apply_list_operation(list_key, removals=removals)
+        status = rb_ui_helpers.format_list_status("remove", removed=len(existing) - len(new_list))
+        return self._list_ui_updates(list_key, new_list, status)
+
+    def _ui_list_dedupe(self, list_key: str):
+        path, _title = self._user_list_spec(list_key)
+        existing = self._read_list_file(path)
+        new_list = self._apply_list_operation(list_key, dedupe=True)
+        status = rb_ui_helpers.format_list_status("dedupe", removed=len(existing) - len(new_list))
+        return self._list_ui_updates(list_key, new_list, status)
+
+    def _ui_list_import(self, list_key: str, uploaded_file: Optional[object]):
+        upload_path = rb_ui_helpers.upload_to_path(uploaded_file)
+        text, err = rb_ui_helpers.read_uploaded_text(upload_path)
+        if err or not text:
+            path, _title = self._user_list_spec(list_key)
+            current = self._read_list_file(path)
+            status = rb_ui_helpers.format_list_status("import", error=err or "File is empty")
+            return self._list_ui_updates(list_key, current, status, clear_file=True)
+        new_list, added, skipped = self._add_to_user_list(list_key, self._parse_user_tags(text))
+        status = rb_ui_helpers.format_list_status(
+            "import",
+            added=added,
+            skipped=skipped,
+            filename=os.path.basename(upload_path),
+        )
+        return self._list_ui_updates(list_key, new_list, status, clear_file=True)
+
+    def _ui_add_personal_tags(self, tags_text: str):
+        return self._ui_list_add("personal", tags_text)
 
     def _ui_remove_personal_tags(self, selected: Optional[object]):
-        removals = self._coerce_selection(selected)
-        if not removals:
-            current = self._read_list_file(PERSONAL_REMOVE_FILE)
-            status_msg = rb_ui_helpers.format_list_status("remove", removed=0)
-            return (
-                _gr_component_update(gr.Dropdown, choices=current, value=[]),
-                _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
-                _gr_component_update(
-                    gr.Textbox,
-                    label=f"Personal removal list ({len(current)})",
-                    value=", ".join(current),
-                ),
-                _gr_component_update(gr.Markdown, value=status_msg),
-            )
-        existing = self._read_list_file(PERSONAL_REMOVE_FILE)
-        new_list = self._apply_list_operation("personal", removals=removals)
-        removed = len(existing) - len(new_list)
-        status_msg = rb_ui_helpers.format_list_status("remove", removed=removed)
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
-            _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
-            _gr_component_update(
-                gr.Textbox,
-                label=f"Personal removal list ({len(new_list)})",
-                value=", ".join(new_list),
-            ),
-            _gr_component_update(gr.Markdown, value=status_msg),
-        )
+        return self._ui_list_remove("personal", selected)
 
     def _ui_dedupe_personal_list(self):
-        existing = self._read_list_file(PERSONAL_REMOVE_FILE)
-        new_list = self._apply_list_operation("personal", dedupe=True)
-        removed = len(existing) - len(new_list)
-        status_msg = rb_ui_helpers.format_list_status("dedupe", removed=removed)
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
-            _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
-            _gr_component_update(
-                gr.Textbox,
-                label=f"Personal removal list ({len(new_list)})",
-                value=", ".join(new_list),
-            ),
-            _gr_component_update(gr.Markdown, value=status_msg),
-        )
+        return self._ui_list_dedupe("personal")
 
     def _ui_import_personal_list(self, uploaded_file: Optional[object]):
-        path = rb_ui_helpers.upload_to_path(uploaded_file)
-        text, err = rb_ui_helpers.read_uploaded_text(path)
-        if err or not text:
-            current = self._read_list_file(PERSONAL_REMOVE_FILE)
-            status_msg = rb_ui_helpers.format_list_status("import", error=err or "File is empty")
-            return (
-                _gr_component_update(gr.Dropdown, choices=current, value=[]),
-                _gr_component_update(gr.File, value=None),
-                _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
-                _gr_component_update(
-                    gr.Textbox,
-                    label=f"Personal removal list ({len(current)})",
-                    value=", ".join(current),
-                ),
-                _gr_component_update(gr.Markdown, value=status_msg),
-            )
-        filename = os.path.basename(path)
-        existing = self._read_list_file(PERSONAL_REMOVE_FILE)
-        additions = self._parse_user_tags(text)
-        new_list = (
-            self._apply_list_operation("personal", additions=additions) if additions else existing
-        )
-        added = len(new_list) - len(existing)
-        skipped = len(additions) - added
-        status_msg = rb_ui_helpers.format_list_status(
-            "import", added=added, skipped=skipped, filename=filename
-        )
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
-            _gr_component_update(gr.File, value=None),
-            _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
-            _gr_component_update(
-                gr.Textbox,
-                label=f"Personal removal list ({len(new_list)})",
-                value=", ".join(new_list),
-            ),
-            _gr_component_update(gr.Markdown, value=status_msg),
-        )
+        return self._ui_list_import("personal", uploaded_file)
 
-    def _ui_export_personal_list(self):
-        return PERSONAL_REMOVE_FILE
-
-    def _ui_add_favorite_tags(self, tags_text: str, current_selection: Optional[object]):
-        additions = self._parse_user_tags(tags_text)
-        existing = self._read_list_file(FAVORITES_FILE)
-        new_list = (
-            self._apply_list_operation("favorites", additions=additions) if additions else existing
-        )
-        added = len(new_list) - len(existing)
-        skipped = len(additions) - added
-        status_msg = rb_ui_helpers.format_list_status("add", added=added, skipped=skipped)
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
-            _gr_component_update(gr.Textbox, value=""),
-            _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
-            _gr_component_update(
-                gr.Textbox,
-                label=f"Favorites list ({len(new_list)})",
-                value=", ".join(new_list),
-            ),
-            _gr_component_update(gr.Markdown, value=status_msg),
-        )
+    def _ui_add_favorite_tags(self, tags_text: str):
+        return self._ui_list_add("favorites", tags_text)
 
     def _ui_remove_favorite_tags(self, selected: Optional[object]):
-        removals = self._coerce_selection(selected)
-        if not removals:
-            current = self._read_list_file(FAVORITES_FILE)
-            status_msg = rb_ui_helpers.format_list_status("remove", removed=0)
-            return (
-                _gr_component_update(gr.Dropdown, choices=current, value=[]),
-                _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
-                _gr_component_update(
-                    gr.Textbox,
-                    label=f"Favorites list ({len(current)})",
-                    value=", ".join(current),
-                ),
-                _gr_component_update(gr.Markdown, value=status_msg),
-            )
-        existing = self._read_list_file(FAVORITES_FILE)
-        new_list = self._apply_list_operation("favorites", removals=removals)
-        removed = len(existing) - len(new_list)
-        status_msg = rb_ui_helpers.format_list_status("remove", removed=removed)
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
-            _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
-            _gr_component_update(
-                gr.Textbox,
-                label=f"Favorites list ({len(new_list)})",
-                value=", ".join(new_list),
-            ),
-            _gr_component_update(gr.Markdown, value=status_msg),
-        )
+        return self._ui_list_remove("favorites", selected)
 
     def _ui_dedupe_favorite_list(self):
-        existing = self._read_list_file(FAVORITES_FILE)
-        new_list = self._apply_list_operation("favorites", dedupe=True)
-        removed = len(existing) - len(new_list)
-        status_msg = rb_ui_helpers.format_list_status("dedupe", removed=removed)
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
-            _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
-            _gr_component_update(
-                gr.Textbox,
-                label=f"Favorites list ({len(new_list)})",
-                value=", ".join(new_list),
-            ),
-            _gr_component_update(gr.Markdown, value=status_msg),
-        )
+        return self._ui_list_dedupe("favorites")
 
     def _ui_import_favorite_list(self, uploaded_file: Optional[object]):
-        path = rb_ui_helpers.upload_to_path(uploaded_file)
-        text, err = rb_ui_helpers.read_uploaded_text(path)
-        if err or not text:
-            current = self._read_list_file(FAVORITES_FILE)
-            status_msg = rb_ui_helpers.format_list_status("import", error=err or "File is empty")
-            return (
-                _gr_component_update(gr.Dropdown, choices=current, value=[]),
-                _gr_component_update(gr.File, value=None),
-                _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
-                _gr_component_update(
-                    gr.Textbox,
-                    label=f"Favorites list ({len(current)})",
-                    value=", ".join(current),
-                ),
-                _gr_component_update(gr.Markdown, value=status_msg),
-            )
-        filename = os.path.basename(path)
-        existing = self._read_list_file(FAVORITES_FILE)
-        additions = self._parse_user_tags(text)
-        new_list = (
-            self._apply_list_operation("favorites", additions=additions) if additions else existing
-        )
-        added = len(new_list) - len(existing)
-        skipped = len(additions) - added
-        status_msg = rb_ui_helpers.format_list_status(
-            "import", added=added, skipped=skipped, filename=filename
-        )
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
-            _gr_component_update(gr.File, value=None),
-            _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
-            _gr_component_update(
-                gr.Textbox,
-                label=f"Favorites list ({len(new_list)})",
-                value=", ".join(new_list),
-            ),
-            _gr_component_update(gr.Markdown, value=status_msg),
-        )
+        return self._ui_list_import("favorites", uploaded_file)
+
+    def _ui_export_list(self, list_key: str):
+        """Write the list as it is on disk now and show it in the export box.
+
+        Each export gets its own folder, so Gradio serves a fresh URL every time while
+        the file keeps the list's real name.
+        """
+        path, _title = self._user_list_spec(list_key)
+        tags = self._read_list_file(path)
+        export_root = _export_root()
+        _prune_old_exports(export_root)
+        export_dir = tempfile.mkdtemp(prefix=f"{list_key}_", dir=export_root)
+        export_path = os.path.join(export_dir, os.path.basename(path))
+        with open(export_path, "w", encoding="utf-8", newline="\n") as f:
+            for tag in tags:
+                f.write(f"{tag}\n")
+        return _gr_component_update(gr.File, value=export_path, visible=True)
+
+    def _ui_export_personal_list(self):
+        return self._ui_export_list("personal")
 
     def _ui_export_favorite_list(self):
-        return FAVORITES_FILE
+        return self._ui_export_list("favorites")
 
     def _get_saved_gelbooru_credentials(self) -> Optional[Dict[str, str]]:
         creds = self._gelbooru_saved_credentials
@@ -1992,10 +2000,9 @@ class Script(scripts.Script):
             visible=bool(self._use_tag_catalog and self._catalog_source == "custom")
         ) as custom_catalog_group:
             catalog_upload = gr.File(
-                label="Upload CSV",
+                label="Upload CSV, then click Import",
                 file_types=[".csv"],
                 file_count="single",
-                info="Upload, then click Import",
             )
             catalog_path = gr.Textbox(
                 label="Custom catalog path",
@@ -2009,7 +2016,7 @@ class Script(scripts.Script):
 
         reload_catalog = gr.Button("Reload Catalog", visible=bool(self._use_tag_catalog))
         catalog_status = gr.Markdown(
-            self._tag_catalog_status_text or "**Off:** Tag catalog disabled"
+            self._tag_catalog_status_text or "**OK:** Bundled default catalog"
         )
 
         self._catalog_status_md = catalog_status
@@ -2564,7 +2571,7 @@ class Script(scripts.Script):
                 label="Gelbooru: Fringe Benefits",
                 value=True,
                 visible=False,
-                info="Legacy option for Gelbooru API compatibility.",
+                info="Currently has no effect. Kept so saved settings and script arguments stay compatible.",
             )
             mature_rating = gr.Radio(
                 list(RATINGS.get("gelbooru", RATING_TYPES["none"])),
@@ -2653,6 +2660,9 @@ class Script(scripts.Script):
                                 interactive=False,
                                 lines=3,
                             )
+                            # Forge keys ui-config.json by label and would restore a stale copy
+                            # of the list over the real contents on the next launch.
+                            personal_remove_display.do_not_save_to_config = True
                             personal_remove_input = gr.Textbox(
                                 label="Add tags", placeholder="comma or newline separated"
                             )
@@ -2668,8 +2678,11 @@ class Script(scripts.Script):
                                     file_types=[".txt", ".csv"],
                                     visible=True,
                                 )
-                                personal_export_btn = gr.DownloadButton(
-                                    "Export removal list", value=PERSONAL_REMOVE_FILE
+                                personal_export_btn = gr.Button("Export removal list")
+                                personal_export_file = gr.File(
+                                    label="Exported removal list",
+                                    interactive=False,
+                                    visible=False,
                                 )
                             personal_status = gr.Markdown("", visible=True)
                         with gr.Column():
@@ -2687,6 +2700,7 @@ class Script(scripts.Script):
                                 interactive=False,
                                 lines=3,
                             )
+                            favorites_display.do_not_save_to_config = True
                             favorites_input = gr.Textbox(
                                 label="Add favorites", placeholder="comma or newline separated"
                             )
@@ -2700,8 +2714,11 @@ class Script(scripts.Script):
                                     file_types=[".txt", ".csv"],
                                     visible=True,
                                 )
-                                favorites_export_btn = gr.DownloadButton(
-                                    "Export favorites", value=FAVORITES_FILE
+                                favorites_export_btn = gr.Button("Export favorites")
+                                favorites_export_file = gr.File(
+                                    label="Exported favorites",
+                                    interactive=False,
+                                    visible=False,
                                 )
                             favorites_status = gr.Markdown("", visible=True)
                 self._ui_personal_dropdown = personal_remove_dropdown
@@ -2724,11 +2741,19 @@ class Script(scripts.Script):
                 use_ip = gr.Checkbox(label="Use Image for ControlNet (Unit 0)", value=False)
                 denoising = gr.Slider(
                     value=0.75,
-                    label="Img2Img denoising / ControlNet weight",
+                    label="Img2Img denoising",
                     minimum=0.0,
                     maximum=1.0,
                     step=0.05,
-                    info="Controls Img2Img denoising strength or ControlNet weight depending on which is enabled.",
+                    info="How far Img2Img may move away from the booru image.",
+                )
+                controlnet_weight = gr.Slider(
+                    value=1.0,
+                    label="ControlNet weight",
+                    minimum=0.0,
+                    maximum=2.0,
+                    step=0.05,
+                    info="Strength of ControlNet Unit 0. Replaces the weight set in the ControlNet panel.",
                 )
                 use_last_img = gr.Checkbox(label="Use same image for batch", value=False)
                 crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
@@ -2747,7 +2772,7 @@ class Script(scripts.Script):
                         minimum=2,
                         maximum=10,
                         step=1,
-                        visible=False,
+                        info="Only used when 'Mix tags from multiple posts' is on.",
                     )
                 with gr.Box():
                     chaos_mode = gr.Radio(
@@ -2761,7 +2786,7 @@ class Script(scripts.Script):
                         minimum=0.1,
                         maximum=1.0,
                         step=0.05,
-                        visible=False,
+                        info="Only used when 'Shuffle tags (chaos)' is not None.",
                     )
 
             with gr.Accordion("Run Options", open=False):
@@ -2856,17 +2881,10 @@ class Script(scripts.Script):
                 outputs=[tags, max_pages, sorting_order],
                 queue=False,
             )
-            mix_prompt.change(
-                fn=lambda enabled: _gr_component_update(gr.Slider, visible=bool(enabled)),
-                inputs=[mix_prompt],
-                outputs=[mix_amount],
-                queue=False,
-            )
-            chaos_mode.change(
-                fn=lambda mode: _gr_component_update(gr.Slider, visible=(mode != "None")),
-                inputs=[chaos_mode],
-                outputs=[chaos_amount],
-                queue=False,
+            _register_page_load(
+                self._ui_update_post_id_dependencies,
+                inputs=[post_id],
+                outputs=[tags, max_pages, sorting_order],
             )
         (
             lora_enabled,
@@ -2882,11 +2900,10 @@ class Script(scripts.Script):
         ) = self._build_lora_ui_section()
         personal_add_btn.click(
             fn=self._ui_add_personal_tags,
-            inputs=[personal_remove_input, personal_remove_dropdown],
+            inputs=[personal_remove_input],
             outputs=[
                 personal_remove_dropdown,
                 personal_remove_input,
-                personal_export_btn,
                 personal_remove_display,
                 personal_status,
             ],
@@ -2897,7 +2914,6 @@ class Script(scripts.Script):
             inputs=[personal_remove_dropdown],
             outputs=[
                 personal_remove_dropdown,
-                personal_export_btn,
                 personal_remove_display,
                 personal_status,
             ],
@@ -2908,7 +2924,6 @@ class Script(scripts.Script):
             inputs=[],
             outputs=[
                 personal_remove_dropdown,
-                personal_export_btn,
                 personal_remove_display,
                 personal_status,
             ],
@@ -2920,20 +2935,24 @@ class Script(scripts.Script):
             outputs=[
                 personal_remove_dropdown,
                 personal_import_file,
-                personal_export_btn,
                 personal_remove_display,
                 personal_status,
             ],
             queue=False,
         )
+        personal_export_btn.click(
+            fn=self._ui_export_personal_list,
+            inputs=[],
+            outputs=[personal_export_file],
+            queue=False,
+        )
 
         favorites_add_btn.click(
             fn=self._ui_add_favorite_tags,
-            inputs=[favorites_input, favorites_dropdown],
+            inputs=[favorites_input],
             outputs=[
                 favorites_dropdown,
                 favorites_input,
-                favorites_export_btn,
                 favorites_display,
                 favorites_status,
             ],
@@ -2944,7 +2963,6 @@ class Script(scripts.Script):
             inputs=[favorites_dropdown],
             outputs=[
                 favorites_dropdown,
-                favorites_export_btn,
                 favorites_display,
                 favorites_status,
             ],
@@ -2955,7 +2973,6 @@ class Script(scripts.Script):
             inputs=[],
             outputs=[
                 favorites_dropdown,
-                favorites_export_btn,
                 favorites_display,
                 favorites_status,
             ],
@@ -2967,10 +2984,15 @@ class Script(scripts.Script):
             outputs=[
                 favorites_dropdown,
                 favorites_import_file,
-                favorites_export_btn,
                 favorites_display,
                 favorites_status,
             ],
+            queue=False,
+        )
+        favorites_export_btn.click(
+            fn=self._ui_export_favorite_list,
+            inputs=[],
+            outputs=[favorites_export_file],
             queue=False,
         )
 
@@ -3039,6 +3061,7 @@ class Script(scripts.Script):
             lora_blacklist,
             anima_auto_detect,
             anima_tune_img2img,
+            controlnet_weight,
         ]
         return rb_run_options.RunComponents.from_sequence(components).script_args()
 
@@ -4014,11 +4037,13 @@ class Script(scripts.Script):
     def _prepare_img2img_pass(self, p, use_img2img, use_ip):
         self.run_img2img_pass = False
         if use_img2img:
-            initial_steps = max(5, min(10, p.steps // 3))  # Use 1/3 of total steps, min 5
+            # The host always runs its own generation first and Img2Img starts from the booru
+            # image, so that output is never used: one step keeps it as cheap as possible.
+            initial_steps = 1
             print(
-                f"[R] Prep Img2Img pass (steps={initial_steps}) - ControlNet {'enabled' if use_ip else 'disabled'}."
+                f"[R] Prep Img2Img pass (placeholder first pass: {initial_steps} step) - "
+                f"ControlNet {'enabled' if use_ip else 'disabled'}."
             )
-            print("[R] Using higher quality initial pass to prevent distortion")
             self.real_steps = p.steps
 
             # Preserve the user's prompt for the initial pass. ADetailer is explicitly blocked
@@ -4050,8 +4075,6 @@ class Script(scripts.Script):
                 options, "anima_tune_img2img", getattr(options, "anima_auto_detect", True)
             ):
                 self.img2img_denoising = min(0.5, self.img2img_denoising)
-                initial_steps = max(8, min(15, p.steps // 3))
-                self._host_scope.set_attr(p, "steps", initial_steps)
                 # Note: cfg_range declared in ModelCapabilities is divergent from these
                 # runtime clamp values pinned by test_lock_prepare_img2img_cfg_clamps.
                 variant = getattr(self, "_anima_model_variant", "base")
@@ -4062,7 +4085,7 @@ class Script(scripts.Script):
                 self._host_scope.set_attr(p, "cfg_scale", tuned_cfg)
                 print(
                     f"[R] Anima: using flow-matching optimized parameters "
-                    f"(denoise={self.img2img_denoising}, steps={initial_steps}, cfg={tuned_cfg})"
+                    f"(denoise={self.img2img_denoising}, cfg={tuned_cfg})"
                 )
 
             self.run_img2img_pass = True
@@ -4097,7 +4120,7 @@ class Script(scripts.Script):
 
             print("[R] AGGRESSIVE: Disabled all saving, minimized batch for initial pass")
             print(
-                f"[R] Optimized settings: steps={initial_steps}, cfg={p.cfg_scale}, denoising={self.img2img_denoising}"
+                f"[R] Img2Img settings: steps={self.real_steps}, cfg={p.cfg_scale}, denoising={self.img2img_denoising}"
             )
 
     def _cleanup_after_run(self, use_cache):
@@ -4120,6 +4143,7 @@ class Script(scripts.Script):
             delattr(self, "original_full_prompt")
         if hasattr(self, "_adetailer_script_args_snapshot"):
             delattr(self, "_adetailer_script_args_snapshot")
+        self._cn_img2img_handoff = None
         if hasattr(self, "_current_processing_object"):
             delattr(self, "_current_processing_object")
         if hasattr(self, "original_cfg"):
@@ -4446,6 +4470,7 @@ class Script(scripts.Script):
         return base_seed, base_subseed
 
     def before_process(self, p: StableDiffusionProcessing, *args):
+        prompts_applied = False
         try:
             # Fast-path for our own internal img2img calls: initialize seeds and exit
             if getattr(p, "_ranbooru_internal_img2img", False):
@@ -4561,6 +4586,7 @@ class Script(scripts.Script):
             lora_auto_detect_pony_ui = options.lora_auto_detect_pony
             lora_detected_loras_ui = options.lora_detected_loras
             lora_blacklist_ui = options.lora_blacklist
+            controlnet_weight_ui = options.controlnet_weight
         except Exception as e:
             _report_exception("[R Before] CRITICAL Error unpack args (aborting)", e)
             self._abort_before_process_run("script argument parsing failed", p)
@@ -4575,6 +4601,11 @@ class Script(scripts.Script):
             print(
                 f"[R Before] Warn: invalid denoising value '{denoising}', falling back to {self.img2img_denoising}"
             )
+
+        try:
+            self.controlnet_weight = float(controlnet_weight_ui)  # type: ignore[arg-type]
+        except Exception:
+            self.controlnet_weight = 1.0
 
         # Persist values needed for postprocess to avoid fragile unpacking there
         self._post_enabled = bool(enabled)
@@ -5054,6 +5085,7 @@ class Script(scripts.Script):
                 final_negative_prompts[i] = processed_negative
 
             valid_final_prompts = [s for s in final_prompts if s and not s.isspace()]
+            prompts_applied = True
             if not valid_final_prompts:
                 p.prompt = " "
                 p.negative_prompt = "" if num_images_needed == 1 else [""] * num_images_needed
@@ -5072,8 +5104,10 @@ class Script(scripts.Script):
                 p.seed = p.seed if p.seed != -1 else random.randint(0, 2**32 - 1)
                 print(f"[R] Using same seed: {p.seed}")
 
+            self._cn_img2img_handoff = None
             if use_ip and self.last_img and self.last_img[0] is not None:
                 cn_configured = False
+                cn_skipped = False
                 # Forge Neo direct: find ControlNet script in alwayson_scripts
                 try:
                     scripts_runner = getattr(p, "scripts", None)
@@ -5095,7 +5129,33 @@ class Script(scripts.Script):
                                 if isinstance(p.script_args, tuple)
                                 else list(p.script_args or [])
                             )
-                            if end <= len(full_args):
+                            if end <= len(full_args) and not _controlnet_unit_has_model(
+                                full_args[start]
+                            ):
+                                # Enabling a unit without a model makes Forge's ControlNet
+                                # assert in process() and then KeyError in later hooks.
+                                cn_skipped = True
+                                print(
+                                    "[R Before] ControlNet skipped: Unit 0 has no model selected."
+                                )
+                                _record_processing_comment(p, CONTROLNET_NO_MODEL_NOTE)
+                            elif end <= len(full_args) and use_img2img:
+                                # The first pass is thrown away when Img2Img is on, so
+                                # ControlNet is attached to the Img2Img pass instead.
+                                self._cn_img2img_handoff = (cn_script, start, list(full_args))
+                                # Units left on for the placeholder pass would cost time or,
+                                # with no image of their own, raise inside ControlNet.
+                                for index in range(start, end):
+                                    if _controlnet_unit_enabled(full_args[index]):
+                                        full_args[index] = _controlnet_unit_copy(
+                                            full_args[index], enabled=False
+                                        )
+                                self._host_scope.set_attr(p, "script_args", tuple(full_args))
+                                cn_configured = True
+                                print(
+                                    "[R Before] ControlNet Unit 0 will be applied to the Img2Img pass."
+                                )
+                            elif end <= len(full_args):
                                 unit = full_args[start]
                                 img_for_cn = (
                                     self.last_img[0].convert("RGB")
@@ -5106,11 +5166,11 @@ class Script(scripts.Script):
 
                                 if isinstance(unit, dict):
                                     unit["enabled"] = True
-                                    unit["weight"] = float(self.img2img_denoising)
+                                    unit["weight"] = self.controlnet_weight
                                     unit["image"] = cn_image
                                 elif hasattr(unit, "enabled"):
                                     unit.enabled = True
-                                    unit.weight = float(self.img2img_denoising)
+                                    unit.weight = self.controlnet_weight
                                     unit.image = cn_image
 
                                 setattr(p, "resize_mode", 1)
@@ -5122,24 +5182,32 @@ class Script(scripts.Script):
                 except Exception as e:
                     print(f"[R Before] ControlNet config error: {e}")
 
-                if not cn_configured and use_ip:
+                if not cn_configured and not cn_skipped and use_ip:
                     if not hasattr(p, "resize_mode"):
                         setattr(p, "resize_mode", 1)
                     print("[R Before] ControlNet script not found; p.resize_mode safeguard set.")
 
             self._prepare_img2img_pass(p, use_img2img, use_ip)
 
-            catalog_on = bool(getattr(self, "_use_tag_catalog", False))
+            # The bundled catalog still classifies tags when the custom-catalog toggle is off.
+            uses_custom_catalog = bool(
+                getattr(self, "_use_tag_catalog", False)
+                and getattr(self, "_catalog_source", "bundled") == "custom"
+            )
             n_posts = len(getattr(self, "_posts_used_for_generation", []))
             tags_removed = int(getattr(self, "_run_tags_removed_count", 0))
-            _note_run_success(p, booru, n_posts, tags_removed, catalog_on)
+            _note_run_success(
+                p, booru, n_posts, tags_removed, "custom" if uses_custom_catalog else "bundled"
+            )
 
         except Exception as e:
             _report_exception("[Ranbooru BeforeProcess] UNEXPECTED ERROR", e)
-            _note_run_failure(
-                p,
-                f"{rb_http_client.sanitize_exception_text(str(e))}. Generated with your prompt unchanged.",
+            outcome = (
+                "The booru prompt was already applied; the remaining RanbooruX steps were skipped."
+                if prompts_applied
+                else "Generated with your prompt unchanged."
             )
+            _note_run_failure(p, str(e), outcome)
             self._abort_before_process_run("before_process failed", p)
             return
 
@@ -5367,6 +5435,34 @@ class Script(scripts.Script):
             self._bail(p, use_cache, f"Error in postprocess validation: {e}")
             return None
 
+    def _attach_controlnet_to_img2img(self, p, p_img2img, control_img) -> bool:
+        """Give the internal Img2Img pass a runner holding only ControlNet, with Unit 0 on."""
+        handoff = getattr(self, "_cn_img2img_handoff", None)
+        if not handoff:
+            return False
+        cn_script, start, original_args = handoff
+        try:
+            full_args = list(original_args)
+            # Use the prepared init image so the control map lines up with it exactly.
+            cn_image = {"image": np.array(control_img.convert("RGB")), "mask": None}
+            full_args[start] = _controlnet_unit_copy(
+                full_args[start],
+                enabled=True,
+                weight=float(getattr(self, "controlnet_weight", 1.0)),
+                image=cn_image,
+            )
+
+            runner = scripts.ScriptRunner()
+            runner.alwayson_scripts = [cn_script]
+            runner.scripts = [cn_script]
+            p_img2img.scripts = runner
+            p_img2img.script_args = tuple(full_args)
+            return True
+        except Exception as e:
+            print(f"[R Post] ControlNet could not be attached to Img2Img: {e}")
+            _record_processing_comment(p, CONTROLNET_IMG2IMG_FAILED_NOTE)
+            return False
+
     def _run_img2img_batch(
         self,
         p: StableDiffusionProcessing,
@@ -5375,6 +5471,9 @@ class Script(scripts.Script):
         use_cache: bool,
     ) -> Optional[List[Any]]:
         print("[R Post] Starting separate Img2Img run...")
+        # The placeholder pass is over; ADetailer reads p.steps, so give it the real count.
+        if getattr(self, "real_steps", 0):
+            p.steps = self.real_steps
         valid_images = [img for img in self.last_img if img is not None]
         if not valid_images:
             self._bail(p, use_cache, "No valid images for Img2Img.", processed=processed)
@@ -5482,6 +5581,9 @@ class Script(scripts.Script):
             final_batch_size = getattr(self, "_img2img_final_batch_size", None)
             if final_batch_size:
                 p_img2img.batch_size = final_batch_size
+
+            if self._attach_controlnet_to_img2img(p, p_img2img, img):
+                print(f"[R Post] ControlNet Unit 0 attached to Img2Img image {i+1}.")
 
             print(f"[R] Processing image {i+1}/{len(prepared_images)} individually")
             single_result = process_images(p_img2img)

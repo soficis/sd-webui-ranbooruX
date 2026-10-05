@@ -45,6 +45,7 @@ def test_update_gelbooru_ui_visibility_branches(monkeypatch):
         res[4].get("value") if isinstance(res[4], dict) else None
     )
     assert val3 is None or val3 != ""
+    assert val4 is None or val4 != ""
 
     # Branch 3: non-gelbooru
     res = script._update_gelbooru_ui_visibility("danbooru")
@@ -55,3 +56,4 @@ def test_update_gelbooru_ui_visibility_branches(monkeypatch):
         res[4].get("value") if isinstance(res[4], dict) else None
     )
     assert val3 is None or val3 != ""
+    assert val4 is None or val4 != ""

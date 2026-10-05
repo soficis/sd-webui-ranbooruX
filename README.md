@@ -131,7 +131,7 @@ For Img2Img workflows, RanbooruX executes a coordinated multi-stage process:
 
 1. **Initial Pass & Preview Guard**: Generates the base image while suppressing intermediate preview flashes until final images are rendered.
 2. **Img2Img Pass**: Automatically applies tuned denoising caps to refine details without breaking composition.
-3. **ControlNet Handoff**: When `Use Image for ControlNet (Unit 0)` is enabled, the fetched booru reference image is automatically assigned to Unit 0 in Forge Neo's ControlNet runner.
+3. **ControlNet Handoff**: When `Use Image for ControlNet (Unit 0)` is enabled, the fetched booru reference image is automatically assigned to Unit 0 in Forge Neo's ControlNet runner. With Img2Img on, ControlNet is applied to the Img2Img pass that produces the final image (the host's own first pass is a one-step placeholder whose output is discarded, so it runs without ControlNet); with Img2Img off, it is applied to the normal generation. Unit 0 needs a model selected, otherwise ControlNet is skipped with a note under the image.
 4. **ADetailer / ADetailer Neo Pass**: Runs a guarded postprocessing pass on the final images, auto-detecting both standard ADetailer and ADetailer Neo scripts.
 
 ## Supported Model Families
@@ -181,7 +181,7 @@ When an Anima model is loaded and **`Auto-detect Anima model`** is enabled:
 RanbooruX includes dedicated UI controls for Anima sampler and step optimization:
 
 - **`Auto-tune Img2Img parameters for Anima`** (`anima_tune_img2img`, default ON):
-  - **When Enabled**: Automatically optimizes step counts, CFG scale (3.0–6.0), and denoising strength (capped at 0.5) tuned for Anima's flow-matching scheduler during Img2Img passes.
+  - **When Enabled**: Automatically optimizes CFG scale (3.0–6.0) and denoising strength (capped at 0.5) tuned for Anima's flow-matching scheduler during Img2Img passes.
   - **When Disabled**: RanbooruX preserves your manual step count, CFG scale, and denoising strength set in Forge Neo, giving full manual control to users who prefer custom sampler settings.
 
 ### Recommended Settings
@@ -279,18 +279,24 @@ In the panel UX update, several component labels and button texts were renamed f
 | Textbox | `Tags to Search (Pre)` | `Search tags` | Search input |
 | Textbox | `Tags to Remove (Post)` | `Always remove tags` | Removal input |
 | Radio | `Tag Shuffling (Chaos)` | `Shuffle tags (chaos)` | Chaos mode selector |
-| Slider | `Img2Img Denoising / CN Weight` | `Img2Img denoising / ControlNet weight` | Info text explains dual role |
-| Textbox | `Tag Catalog Path` | `Custom catalog path` | Custom CSV catalog path |
+| Slider | `Img2Img Denoising / CN Weight` | `Img2Img denoising` | Img2Img strength only |
+| Slider | *(new)* | `ControlNet weight` | Weight for ControlNet Unit 0 (0 to 2, default 1.0); replaces the weight set in the ControlNet panel |
+| Textbox | `Custom CSV Path (must be inside user/catalogs/ or data/catalogs/; other files must be uploaded)` | `Custom catalog path` | Custom CSV catalog path |
+| Dropdown | `Removal Tags` | `Select tags to remove` | Selector now starts empty; it only picks tags to delete from the removal list |
+| Dropdown | `Favorite Tags` | `Select favorites to remove` | Selector now starts empty; it only picks tags to delete from the favorites list |
+| File | `Upload CSV` | `Upload CSV, then click Import` | Catalog upload; label now states the second step |
 | Button | `Remove Text-like Tags` | *(Removed)* | Covered by `Reset to defaults` |
 | Button | *(New)* | `Reset to defaults` | Preset resetting to bad + text tags |
 | Button | `Add` (removal) | `Add to removal list` | Unique button identifier |
 | Button | `Remove Selected` (removal) | `Remove selected (removal)` | Unique button identifier |
 | Button | `De-duplicate` (removal) | `De-duplicate removal list` | Unique button identifier |
-| DownloadButton | `Export` (removal) | `Export removal list` | Unique button identifier |
+| Button | `Export` (removal) | `Export removal list` | Now a plain button; each click writes a fresh copy into the new `Exported removal list` box, which you click to download |
+| File | *(New)* | `Exported removal list` | Hidden until the first export |
 | Button | `Add` (favorites) | `Add to favorites` | Unique button identifier |
 | Button | `Remove Selected` (favorites) | `Remove selected (favorites)` | Unique button identifier |
 | Button | `De-duplicate` (favorites) | `De-duplicate favorites` | Unique button identifier |
-| DownloadButton | `Export` (favorites) | `Export favorites` | Unique button identifier |
+| Button | `Export` (favorites) | `Export favorites` | Now a plain button; each click writes a fresh copy into the new `Exported favorites` box, which you click to download |
+| File | *(New)* | `Exported favorites` | Hidden until the first export |
 | Button | `Refresh` (search file) | `Refresh search files` | Unique button identifier |
 | Button | `Refresh` (remove file) | `Refresh remove files` | Unique button identifier |
 | File | `Import CSV/TXT` (removal) | `Import removal list (CSV/TXT)` | Unique file upload identifier |

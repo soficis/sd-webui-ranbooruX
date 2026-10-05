@@ -131,7 +131,7 @@ def test_turbo_cfg_floor_is_one(script):
     script._is_anima_model = True
     script._anima_model_variant = "turbo"
     script.img2img_denoising = 0.5
-    options = RunOptions.from_script_args([object()] * 64)
+    options = RunOptions.from_script_args([object()] * 65)
     script.options = options
 
     p = types.SimpleNamespace(

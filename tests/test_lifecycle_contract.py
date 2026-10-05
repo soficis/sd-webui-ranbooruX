@@ -68,6 +68,7 @@ def _args(**overrides):
         "lora_detected_loras": [],
         "anima_auto_detect": False,
         "anima_tune_img2img": True,
+        "controlnet_weight": 1.0,
         "lora_blacklist": [],
     }
     defaults.update(overrides)
@@ -322,7 +323,7 @@ def test_before_process_comments_on_success_and_failure(monkeypatch, stub_module
     assert len(p_success.comments) == 1
     assert (
         p_success.comments[0]
-        == "RanbooruX: danbooru · 1 post(s) · 1 tags removed by filters · catalog on"
+        == "RanbooruX: danbooru · 1 post(s) · 1 tag(s) removed by filters (batch total) · catalog bundled"
     )
 
     # Failure case
@@ -341,3 +342,52 @@ def test_before_process_comments_on_success_and_failure(monkeypatch, stub_module
     fail_comment = p_fail.comments[0]
     assert fail_comment.startswith("RanbooruX: network failure contacting booru")
     assert "Generated with your prompt unchanged." in fail_comment
+
+
+def test_before_process_failure_after_prompt_applied_says_so(monkeypatch, stub_modules):
+    import scripts.ranbooru as ranbooru
+
+    script = ranbooru.Script()
+
+    class FakeApi:
+        booru_name = "danbooru"
+
+        def get_posts(self, **_kwargs):
+            return [{"id": 1, "tags": "1girl solo", "file_url": "https://img.test/a.png"}]
+
+    monkeypatch.setattr(script, "_get_booru_api", lambda *_args, **_kwargs: FakeApi())
+
+    def fail_late(*_args, **_kwargs):
+        raise RuntimeError("img2img prep exploded")
+
+    monkeypatch.setattr(script, "_prepare_img2img_pass", fail_late)
+
+    p = _processing()
+    p.comments = []
+    p.comment = lambda text: p.comments.append(text)
+
+    script.before_process(p, *_args(enabled=True, booru="danbooru"))
+
+    assert len(p.comments) == 1
+    assert p.comments[0].startswith("RanbooruX: img2img prep exploded.")
+    assert "The booru prompt was already applied" in p.comments[0]
+    assert "unchanged" not in p.comments[0]
+
+
+def test_note_run_failure_handles_empty_reason(stub_modules):
+    import scripts.ranbooru as ranbooru
+
+    class P:
+        def __init__(self):
+            self.notes = []
+
+        def comment(self, text):
+            self.notes.append(text)
+
+    p = P()
+    ranbooru._note_run_failure(p, "")
+    ranbooru._note_run_failure(p, "boom.", "Generated with your prompt unchanged.")
+    assert p.notes == [
+        "RanbooruX: unexpected error.",
+        "RanbooruX: boom. Generated with your prompt unchanged.",
+    ]

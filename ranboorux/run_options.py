@@ -69,6 +69,7 @@ UI_ARGUMENT_FIELDS: Tuple[str, ...] = (
     "lora_blacklist",
     "anima_auto_detect",
     "anima_tune_img2img",
+    "controlnet_weight",
 )
 
 
@@ -86,6 +87,7 @@ class ImageWorkflowOptions:
     denoising: object
     use_last_img: object
     use_ip: object
+    controlnet_weight: object
     crop_center: object
     enable_adetailer_support: object
     use_same_seed: object
@@ -193,6 +195,7 @@ class RunOptions:
     lora_blacklist: object
     anima_auto_detect: bool = True
     anima_tune_img2img: bool = True
+    controlnet_weight: object = 1.0
 
     @classmethod
     def from_script_args(cls, args: Sequence[object]) -> "RunOptions":
@@ -222,6 +225,7 @@ class RunOptions:
             denoising=self.denoising,
             use_last_img=self.use_last_img,
             use_ip=self.use_ip,
+            controlnet_weight=self.controlnet_weight,
             crop_center=self.crop_center,
             enable_adetailer_support=self.enable_adetailer_support,
             use_same_seed=self.use_same_seed,
