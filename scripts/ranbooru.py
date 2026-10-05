@@ -875,13 +875,16 @@ class Script(scripts.Script):
         source_path, from_hint = self._resolve_catalog_source(uploaded, path_hint)
         if from_hint and not source_path:
             basename = os.path.basename((path_hint or "").strip()) or "file"
-            return False, f"Refused custom catalog path outside allowed roots: {basename}"
+            return (
+                False,
+                f"**Failed:** Refused custom catalog path outside allowed roots: {basename}",
+            )
         if not source_path:
-            return False, "No catalog file provided"
+            return False, "**Failed:** No catalog file provided"
 
         ok, validation_message = self._validate_csv_format(source_path)
         if not ok:
-            return False, f"Invalid CSV: {validation_message}"
+            return False, f"**Failed:** Invalid CSV: {validation_message}"
         try:
             os.makedirs(USER_CATALOGS_DIR, exist_ok=True)
             user_catalogs_real = os.path.realpath(USER_CATALOGS_DIR)
@@ -905,29 +908,29 @@ class Script(scripts.Script):
                 return True, self._format_catalog_status()
             return False, load_message
         except Exception as exc:
-            return False, f"Failed to import custom catalog: {exc}"
+            return False, f"**Failed:** Failed to import custom catalog: {exc}"
 
     def _format_catalog_status(self) -> str:
         if not self._use_tag_catalog:
-            return "Catalog mode: ON - Bundled default"
+            return "**Off:** Tag catalog disabled"
         catalog = getattr(self, "_catalog", None)
         if not isinstance(catalog, CsvCatalog):
             selected = self._resolve_catalog_path()
             refused = getattr(self, "_refused_catalog_name", "")
             if not selected and refused:
                 return (
-                    f"Catalog mode: ON - Custom catalog `{refused}` is outside "
+                    f"**Failed:** Custom catalog `{refused}` is outside "
                     "user/catalogs and was not loaded. Re-import it to use it."
                 )
             if not selected:
-                return "Catalog mode: ON - No catalog selected"
+                return "**Failed:** No catalog selected"
             source_label = "Bundled" if self._catalog_source == "bundled" else "Custom"
-            return f"Catalog mode: ON - {source_label}: {os.path.basename(selected)} (not loaded)"
+            return f"**Failed:** {source_label}: {os.path.basename(selected)} (not loaded)"
         source_label = "Bundled" if self._catalog_source == "bundled" else "Custom"
         filename = os.path.basename(catalog._path)
         tag_count = len(getattr(catalog, "_all_tags", set()))
         alias_count = len(getattr(catalog, "_aliases", {}))
-        return f"Catalog mode: ON - {source_label}: {filename}\nTags: {tag_count:,} | Aliases: {alias_count:,}"
+        return f"**OK:** {source_label}: {filename}\nTags: {tag_count:,} | Aliases: {alias_count:,}"
 
     def _active_catalog(self) -> Optional[TagCatalogProvider]:
         if not self._use_tag_catalog and self._catalog_source != "bundled":
@@ -963,18 +966,18 @@ class Script(scripts.Script):
             path_value = self._resolve_catalog_path()
             if not path_value:
                 self._catalog = NoopCatalog()
-                return False, "Catalog load failed: bundled catalog path is not set"
+                return False, "**Failed:** Bundled catalog path is not set"
         valid, validation_msg = self._validate_csv_format(path_value)
         if not valid:
             self._catalog = NoopCatalog()
-            return False, f"Catalog load failed: {validation_msg}"
+            return False, f"**Failed:** {validation_msg}"
         try:
             self._catalog = CsvCatalog(path_value)
             self._tag_catalog_status_text = self._format_catalog_status()
             return True, self._tag_catalog_status_text
         except Exception as exc:
             self._catalog = NoopCatalog()
-            return False, f"Catalog load failed: {exc}"
+            return False, f"**Failed:** {exc}"
 
     def _render_tag_diag(self, diag: Dict[str, object]) -> str:
         if not diag:
@@ -1248,11 +1251,13 @@ class Script(scripts.Script):
 
     def _ui_add_personal_tags(self, tags_text: str, current_selection: Optional[object]):
         additions = self._parse_user_tags(tags_text)
+        existing = self._read_list_file(PERSONAL_REMOVE_FILE)
         new_list = (
-            self._apply_list_operation("personal", additions=additions)
-            if additions
-            else self._read_list_file(PERSONAL_REMOVE_FILE)
+            self._apply_list_operation("personal", additions=additions) if additions else existing
         )
+        added = len(new_list) - len(existing)
+        skipped = len(additions) - added
+        status_msg = rb_ui_helpers.format_list_status("add", added=added, skipped=skipped)
         return (
             _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
             _gr_component_update(gr.Textbox, value=""),
@@ -1262,12 +1267,14 @@ class Script(scripts.Script):
                 label=f"Personal removal list ({len(new_list)})",
                 value=", ".join(new_list),
             ),
+            _gr_component_update(gr.Markdown, value=status_msg),
         )
 
     def _ui_remove_personal_tags(self, selected: Optional[object]):
         removals = self._coerce_selection(selected)
         if not removals:
             current = self._read_list_file(PERSONAL_REMOVE_FILE)
+            status_msg = rb_ui_helpers.format_list_status("remove", removed=0)
             return (
                 _gr_component_update(gr.Dropdown, choices=current, value=[]),
                 _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
@@ -1276,8 +1283,12 @@ class Script(scripts.Script):
                     label=f"Personal removal list ({len(current)})",
                     value=", ".join(current),
                 ),
+                _gr_component_update(gr.Markdown, value=status_msg),
             )
+        existing = self._read_list_file(PERSONAL_REMOVE_FILE)
         new_list = self._apply_list_operation("personal", removals=removals)
+        removed = len(existing) - len(new_list)
+        status_msg = rb_ui_helpers.format_list_status("remove", removed=removed)
         return (
             _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
             _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
@@ -1286,10 +1297,14 @@ class Script(scripts.Script):
                 label=f"Personal removal list ({len(new_list)})",
                 value=", ".join(new_list),
             ),
+            _gr_component_update(gr.Markdown, value=status_msg),
         )
 
     def _ui_dedupe_personal_list(self):
+        existing = self._read_list_file(PERSONAL_REMOVE_FILE)
         new_list = self._apply_list_operation("personal", dedupe=True)
+        removed = len(existing) - len(new_list)
+        status_msg = rb_ui_helpers.format_list_status("dedupe", removed=removed)
         return (
             _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
             _gr_component_update(gr.DownloadButton, value=PERSONAL_REMOVE_FILE),
@@ -1298,6 +1313,7 @@ class Script(scripts.Script):
                 label=f"Personal removal list ({len(new_list)})",
                 value=", ".join(new_list),
             ),
+            _gr_component_update(gr.Markdown, value=status_msg),
         )
 
     def _ui_import_personal_list(self, uploaded_file: Optional[object]):
@@ -1305,6 +1321,7 @@ class Script(scripts.Script):
         text, err = rb_ui_helpers.read_uploaded_text(path)
         if err or not text:
             current = self._read_list_file(PERSONAL_REMOVE_FILE)
+            status_msg = rb_ui_helpers.format_list_status("import", error=err or "File is empty")
             return (
                 _gr_component_update(gr.Dropdown, choices=current, value=[]),
                 _gr_component_update(gr.File, value=None),
@@ -1314,12 +1331,18 @@ class Script(scripts.Script):
                     label=f"Personal removal list ({len(current)})",
                     value=", ".join(current),
                 ),
+                _gr_component_update(gr.Markdown, value=status_msg),
             )
+        filename = os.path.basename(path)
+        existing = self._read_list_file(PERSONAL_REMOVE_FILE)
         additions = self._parse_user_tags(text)
         new_list = (
-            self._apply_list_operation("personal", additions=additions)
-            if additions
-            else self._read_list_file(PERSONAL_REMOVE_FILE)
+            self._apply_list_operation("personal", additions=additions) if additions else existing
+        )
+        added = len(new_list) - len(existing)
+        skipped = len(additions) - added
+        status_msg = rb_ui_helpers.format_list_status(
+            "import", added=added, skipped=skipped, filename=filename
         )
         return (
             _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
@@ -1330,6 +1353,7 @@ class Script(scripts.Script):
                 label=f"Personal removal list ({len(new_list)})",
                 value=", ".join(new_list),
             ),
+            _gr_component_update(gr.Markdown, value=status_msg),
         )
 
     def _ui_export_personal_list(self):
@@ -1337,11 +1361,13 @@ class Script(scripts.Script):
 
     def _ui_add_favorite_tags(self, tags_text: str, current_selection: Optional[object]):
         additions = self._parse_user_tags(tags_text)
+        existing = self._read_list_file(FAVORITES_FILE)
         new_list = (
-            self._apply_list_operation("favorites", additions=additions)
-            if additions
-            else self._read_list_file(FAVORITES_FILE)
+            self._apply_list_operation("favorites", additions=additions) if additions else existing
         )
+        added = len(new_list) - len(existing)
+        skipped = len(additions) - added
+        status_msg = rb_ui_helpers.format_list_status("add", added=added, skipped=skipped)
         return (
             _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
             _gr_component_update(gr.Textbox, value=""),
@@ -1351,12 +1377,14 @@ class Script(scripts.Script):
                 label=f"Favorites list ({len(new_list)})",
                 value=", ".join(new_list),
             ),
+            _gr_component_update(gr.Markdown, value=status_msg),
         )
 
     def _ui_remove_favorite_tags(self, selected: Optional[object]):
         removals = self._coerce_selection(selected)
         if not removals:
             current = self._read_list_file(FAVORITES_FILE)
+            status_msg = rb_ui_helpers.format_list_status("remove", removed=0)
             return (
                 _gr_component_update(gr.Dropdown, choices=current, value=[]),
                 _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
@@ -1365,8 +1393,12 @@ class Script(scripts.Script):
                     label=f"Favorites list ({len(current)})",
                     value=", ".join(current),
                 ),
+                _gr_component_update(gr.Markdown, value=status_msg),
             )
+        existing = self._read_list_file(FAVORITES_FILE)
         new_list = self._apply_list_operation("favorites", removals=removals)
+        removed = len(existing) - len(new_list)
+        status_msg = rb_ui_helpers.format_list_status("remove", removed=removed)
         return (
             _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
             _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
@@ -1375,10 +1407,14 @@ class Script(scripts.Script):
                 label=f"Favorites list ({len(new_list)})",
                 value=", ".join(new_list),
             ),
+            _gr_component_update(gr.Markdown, value=status_msg),
         )
 
     def _ui_dedupe_favorite_list(self):
+        existing = self._read_list_file(FAVORITES_FILE)
         new_list = self._apply_list_operation("favorites", dedupe=True)
+        removed = len(existing) - len(new_list)
+        status_msg = rb_ui_helpers.format_list_status("dedupe", removed=removed)
         return (
             _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
             _gr_component_update(gr.DownloadButton, value=FAVORITES_FILE),
@@ -1387,6 +1423,7 @@ class Script(scripts.Script):
                 label=f"Favorites list ({len(new_list)})",
                 value=", ".join(new_list),
             ),
+            _gr_component_update(gr.Markdown, value=status_msg),
         )
 
     def _ui_import_favorite_list(self, uploaded_file: Optional[object]):
@@ -1394,6 +1431,7 @@ class Script(scripts.Script):
         text, err = rb_ui_helpers.read_uploaded_text(path)
         if err or not text:
             current = self._read_list_file(FAVORITES_FILE)
+            status_msg = rb_ui_helpers.format_list_status("import", error=err or "File is empty")
             return (
                 _gr_component_update(gr.Dropdown, choices=current, value=[]),
                 _gr_component_update(gr.File, value=None),
@@ -1403,12 +1441,18 @@ class Script(scripts.Script):
                     label=f"Favorites list ({len(current)})",
                     value=", ".join(current),
                 ),
+                _gr_component_update(gr.Markdown, value=status_msg),
             )
+        filename = os.path.basename(path)
+        existing = self._read_list_file(FAVORITES_FILE)
         additions = self._parse_user_tags(text)
         new_list = (
-            self._apply_list_operation("favorites", additions=additions)
-            if additions
-            else self._read_list_file(FAVORITES_FILE)
+            self._apply_list_operation("favorites", additions=additions) if additions else existing
+        )
+        added = len(new_list) - len(existing)
+        skipped = len(additions) - added
+        status_msg = rb_ui_helpers.format_list_status(
+            "import", added=added, skipped=skipped, filename=filename
         )
         return (
             _gr_component_update(gr.Dropdown, choices=new_list, value=[]),
@@ -1419,6 +1463,7 @@ class Script(scripts.Script):
                 label=f"Favorites list ({len(new_list)})",
                 value=", ".join(new_list),
             ),
+            _gr_component_update(gr.Markdown, value=status_msg),
         )
 
     def _ui_export_favorite_list(self):
@@ -1474,7 +1519,7 @@ class Script(scripts.Script):
         return None
 
     def _gelbooru_saved_message(self) -> str:
-        return "? Using saved Gelbooru credentials."
+        return "Using saved Gelbooru credentials."
 
     def _ui_save_gelbooru_credentials(self, api_key: Optional[str], user_id: Optional[str]):
         api_key = _sanitize_gelbooru_credential(api_key)
@@ -1924,11 +1969,16 @@ class Script(scripts.Script):
         with gr.Group(
             visible=bool(self._use_tag_catalog and self._catalog_source == "custom")
         ) as custom_catalog_group:
-            catalog_upload = gr.File(label="Upload CSV", file_types=[".csv"], file_count="single")
+            catalog_upload = gr.File(
+                label="Upload CSV",
+                file_types=[".csv"],
+                file_count="single",
+                info="Upload, then click Import",
+            )
             catalog_path = gr.Textbox(
-                label="Custom CSV Path (must be inside user/catalogs/ or data/catalogs/; other files must be uploaded)",
+                label="Custom catalog path",
                 value=self._custom_catalog_path,
-                placeholder="/path/to/custom_catalog.csv",
+                placeholder="user/catalogs/my_tags.csv",
                 info="Selects a CSV already inside user/catalogs/ or data/catalogs/. Other files must be uploaded.",
             )
             with gr.Row():
@@ -1936,7 +1986,9 @@ class Script(scripts.Script):
                 catalog_validate_btn = gr.Button("Validate CSV")
 
         reload_catalog = gr.Button("Reload Catalog", visible=bool(self._use_tag_catalog))
-        catalog_status = gr.Markdown(self._tag_catalog_status_text or "Catalog mode: OFF")
+        catalog_status = gr.Markdown(
+            self._tag_catalog_status_text or "**Off:** Tag catalog disabled"
+        )
 
         self._catalog_status_md = catalog_status
         self._tag_diag_md = None
@@ -2009,7 +2061,7 @@ class Script(scripts.Script):
                         self._tag_catalog_status_text = self._format_catalog_status()
                 else:
                     self._catalog = NoopCatalog()
-                    self._tag_catalog_status_text = "Catalog mode: ON - No path set"
+                    self._tag_catalog_status_text = "**Failed:** No path set"
             else:
                 self._tag_catalog_status_text = self._format_catalog_status()
             self._save_tag_catalog_preferences()
@@ -2043,7 +2095,7 @@ class Script(scripts.Script):
                 self._custom_catalog_path = guessed_path
                 self._tag_catalog_path = guessed_path
                 self._save_tag_catalog_preferences()
-                msg = f"Selected custom catalog file: {os.path.basename(guessed_path)}"
+                msg = f"**OK:** Selected custom catalog file: {os.path.basename(guessed_path)}"
             else:
                 msg = self._tag_catalog_status_text
             return (
@@ -2059,24 +2111,22 @@ class Script(scripts.Script):
             candidate, from_hint = self._resolve_catalog_source(uploaded, path_value)
             if from_hint and not candidate:
                 basename = os.path.basename((path_value or "").strip()) or "file"
-                status = f"Validation failed: Refused path outside allowed roots: {basename}"
+                status = f"**Failed:** Refused path outside allowed roots: {basename}"
                 return _gr_component_update(gr.Markdown, value=status)
             if not candidate:
                 return _gr_component_update(
-                    gr.Markdown, value="Validation failed: No catalog file provided"
+                    gr.Markdown, value="**Failed:** No catalog file provided"
                 )
             ok, message = self._validate_csv_format(candidate)
             sanitized_msg = rb_http_client.sanitize_exception_text(message)
-            status = (
-                f"Validation passed: {sanitized_msg}"
-                if ok
-                else f"Validation failed: {sanitized_msg}"
-            )
+            status = f"**OK:** {sanitized_msg}" if ok else f"**Failed:** {sanitized_msg}"
             return _gr_component_update(gr.Markdown, value=status)
 
         def _ui_import_custom_catalog(uploaded, path_value):
             ok, message = self._import_custom_catalog(uploaded, path_hint=path_value)
             if not ok:
+                err_msg = rb_http_client.sanitize_exception_text(message)
+                status = err_msg if err_msg.startswith("**Failed:**") else f"**Failed:** {err_msg}"
                 return (
                     _gr_component_update(
                         gr.Radio,
@@ -2091,9 +2141,7 @@ class Script(scripts.Script):
                         value=self._custom_catalog_path,
                         visible=bool(self._use_tag_catalog and self._catalog_source == "custom"),
                     ),
-                    _gr_component_update(
-                        gr.Markdown, value=rb_http_client.sanitize_exception_text(message)
-                    ),
+                    _gr_component_update(gr.Markdown, value=status),
                 )
             self._tag_catalog_status_text = self._format_catalog_status()
             self._update_tag_diag()
@@ -2564,6 +2612,7 @@ class Script(scripts.Script):
                             personal_export_btn = gr.DownloadButton(
                                 "Export", value=PERSONAL_REMOVE_FILE
                             )
+                        personal_status = gr.Markdown("", visible=True)
                     with gr.Column():
                         gr.Markdown("**Favorites List**")
                         favorites_dropdown = gr.Dropdown(
@@ -2591,6 +2640,7 @@ class Script(scripts.Script):
                                 label="Import CSV/TXT", file_types=[".txt", ".csv"], visible=True
                             )
                             favorites_export_btn = gr.DownloadButton("Export", value=FAVORITES_FILE)
+                        favorites_status = gr.Markdown("", visible=True)
             self._ui_personal_dropdown = personal_remove_dropdown
             self._ui_favorites_dropdown = favorites_dropdown
             shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
@@ -2764,19 +2814,30 @@ class Script(scripts.Script):
                 personal_remove_input,
                 personal_export_btn,
                 personal_remove_display,
+                personal_status,
             ],
             queue=False,
         )
         personal_remove_btn.click(
             fn=self._ui_remove_personal_tags,
             inputs=[personal_remove_dropdown],
-            outputs=[personal_remove_dropdown, personal_export_btn, personal_remove_display],
+            outputs=[
+                personal_remove_dropdown,
+                personal_export_btn,
+                personal_remove_display,
+                personal_status,
+            ],
             queue=False,
         )
         personal_dedupe_btn.click(
             fn=self._ui_dedupe_personal_list,
             inputs=[],
-            outputs=[personal_remove_dropdown, personal_export_btn, personal_remove_display],
+            outputs=[
+                personal_remove_dropdown,
+                personal_export_btn,
+                personal_remove_display,
+                personal_status,
+            ],
             queue=False,
         )
         personal_import_file.upload(
@@ -2787,6 +2848,7 @@ class Script(scripts.Script):
                 personal_import_file,
                 personal_export_btn,
                 personal_remove_display,
+                personal_status,
             ],
             queue=False,
         )
@@ -2799,19 +2861,30 @@ class Script(scripts.Script):
                 favorites_input,
                 favorites_export_btn,
                 favorites_display,
+                favorites_status,
             ],
             queue=False,
         )
         favorites_remove_btn.click(
             fn=self._ui_remove_favorite_tags,
             inputs=[favorites_dropdown],
-            outputs=[favorites_dropdown, favorites_export_btn, favorites_display],
+            outputs=[
+                favorites_dropdown,
+                favorites_export_btn,
+                favorites_display,
+                favorites_status,
+            ],
             queue=False,
         )
         favorites_dedupe_btn.click(
             fn=self._ui_dedupe_favorite_list,
             inputs=[],
-            outputs=[favorites_dropdown, favorites_export_btn, favorites_display],
+            outputs=[
+                favorites_dropdown,
+                favorites_export_btn,
+                favorites_display,
+                favorites_status,
+            ],
             queue=False,
         )
         favorites_import_file.upload(
@@ -2822,6 +2895,7 @@ class Script(scripts.Script):
                 favorites_import_file,
                 favorites_export_btn,
                 favorites_display,
+                favorites_status,
             ],
             queue=False,
         )

@@ -153,3 +153,99 @@ def test_note_postprocess_failure():
     ranbooru._note_postprocess_failure(proc, "No valid images for Img2Img.")
     assert "Existing comment" in proc.comments
     assert "RanbooruX: No valid images for Img2Img." in proc.comments
+
+
+def test_gelbooru_saved_message_no_mojibake():
+    ranbooru = _get_ranbooru()
+    script = ranbooru.Script()
+    msg = script._gelbooru_saved_message()
+    assert msg == "Using saved Gelbooru credentials."
+    assert "?" not in msg
+
+
+def test_list_handlers_status_message(monkeypatch, tmp_path):
+    ranbooru = _get_ranbooru()
+    script = ranbooru.Script()
+
+    p_file = tmp_path / "personal_remove.txt"
+    p_file.write_text("existing_tag\n", encoding="utf-8")
+    monkeypatch.setattr(ranbooru, "PERSONAL_REMOVE_FILE", str(p_file))
+
+    # Add tag -> outputs[4] has status
+    res = script._ui_add_personal_tags("new_tag", [])
+    val = getattr(res[4], "value", None) or (
+        res[4].get("value") if isinstance(res[4], dict) else None
+    )
+    assert val == "Added 1 tag."
+
+    # Remove with nothing selected -> outputs[3] has status
+    res = script._ui_remove_personal_tags([])
+    val = getattr(res[3], "value", None) or (
+        res[3].get("value") if isinstance(res[3], dict) else None
+    )
+    assert val == "Nothing selected."
+
+    # Import valid -> outputs[4] has status
+    import_file = tmp_path / "import_personal.txt"
+    import_file.write_text("imported_tag_1, imported_tag_2\n", encoding="utf-8")
+    res = script._ui_import_personal_list(str(import_file))
+    val = getattr(res[4], "value", None) or (
+        res[4].get("value") if isinstance(res[4], dict) else None
+    )
+    assert "Imported 2 tags" in val
+
+    # Favorites: Add, Remove, Dedupe, Import
+    f_file = tmp_path / "favorites.txt"
+    f_file.write_text("fav_tag\n", encoding="utf-8")
+    monkeypatch.setattr(ranbooru, "FAVORITES_FILE", str(f_file))
+
+    res = script._ui_add_favorite_tags("new_fav", [])
+    val = getattr(res[4], "value", None) or (
+        res[4].get("value") if isinstance(res[4], dict) else None
+    )
+    assert val == "Added 1 tag."
+
+    res = script._ui_remove_favorite_tags([])
+    val = getattr(res[3], "value", None) or (
+        res[3].get("value") if isinstance(res[3], dict) else None
+    )
+    assert val == "Nothing selected."
+
+    res = script._ui_dedupe_favorite_list()
+    val = getattr(res[3], "value", None) or (
+        res[3].get("value") if isinstance(res[3], dict) else None
+    )
+    assert "duplicate" in val.lower()
+
+    res = script._ui_import_favorite_list(str(import_file))
+    val = getattr(res[4], "value", None) or (
+        res[4].get("value") if isinstance(res[4], dict) else None
+    )
+    assert "Imported 2 tags" in val
+
+
+def test_catalog_status_prefixes(monkeypatch, tmp_path):
+    ranbooru = _get_ranbooru()
+    script = ranbooru.Script()
+
+    # Disabled catalog
+    script._use_tag_catalog = False
+    assert script._format_catalog_status().startswith("**Off:**")
+
+    # Enabled but no catalog loaded
+    script._use_tag_catalog = True
+    script._catalog = None
+    assert script._format_catalog_status().startswith("**Failed:**")
+
+    # Load valid catalog
+    cat_file = tmp_path / "danbooru_tags.csv"
+    cat_file.write_text("tag,category,count,alias\n1girl,0,100,\n", encoding="utf-8")
+    monkeypatch.setattr(script, "_resolve_catalog_path", lambda: str(cat_file))
+    ok, msg = script._load_tag_catalog()
+    assert ok
+    assert msg.startswith("**OK:**")
+
+    # Import failure has prefix
+    ok, msg = script._import_custom_catalog(uploaded=None, path_hint="../../nonexistent.csv")
+    assert not ok
+    assert msg.startswith("**Failed:**")

@@ -56,3 +56,47 @@ def next_rating(current: Optional[str], available: Sequence[str]) -> str:
     if "All" in available:
         return "All"
     return available[0] if available else "All"
+
+
+def format_list_status(
+    op: str,
+    *,
+    added: int = 0,
+    skipped: int = 0,
+    removed: int = 0,
+    filename: str = "",
+    error: Optional[str] = None,
+) -> str:
+    """Format status messages for list operations."""
+    if error:
+        return f"Failed to import: {error}"
+    if op == "add":
+        if added > 0:
+            noun = "tag" if added == 1 else "tags"
+            if skipped > 0:
+                return f"Added {added} {noun} ({skipped} already present)."
+            return f"Added {added} {noun}."
+        if skipped > 0:
+            return f"No new tags added ({skipped} already present)."
+        return "No tags added."
+    if op == "remove":
+        if removed > 0:
+            noun = "tag" if removed == 1 else "tags"
+            return f"Removed {removed} {noun}."
+        return "Nothing selected."
+    if op == "dedupe":
+        if removed > 0:
+            noun = "duplicate" if removed == 1 else "duplicates"
+            return f"Removed {removed} {noun}."
+        return "No duplicates found."
+    if op == "import":
+        fn = filename or "file"
+        if added > 0:
+            noun = "tag" if added == 1 else "tags"
+            if skipped > 0:
+                return f"Imported {added} {noun} from {fn} ({skipped} already present)."
+            return f"Imported {added} {noun} from {fn}."
+        if skipped > 0:
+            return f"No new tags imported from {fn} ({skipped} already present)."
+        return f"No tags found to import from {fn}."
+    return ""
