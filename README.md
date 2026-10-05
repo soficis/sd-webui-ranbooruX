@@ -4,58 +4,48 @@
 
 ![RanbooruX logo](pics/ranbooru.png)
 
-RanbooruX is a fork of Ranbooru built **exclusively for Forge Neo**, featuring native support for **ADetailer Neo**.
+RanbooruX turns one search tag into a finished image, and you never write the prompt.
 
 </div>
 
-It fetches booru tags and source images, builds prompts, and supports a two-stage generation flow with Img2Img, ControlNet handoff, and ADetailer / ADetailer Neo postprocessing.
+RanbooruX is a fork of Ranbooru for **Forge Neo**. It picks a booru post that matches your tags. It builds the prompt from that post's tags. It can also feed the post's image to Img2Img, ControlNet, and ADetailer.
 
-![UI screenshot](pics/image.jpg)
+![The RanbooruX panel](pics/panel.png)
 
-## Features & Exclusive Fork Capabilities
+## What it does
 
-RanbooruX delivers massive architectural and feature upgrades over original Ranbooru:
+- **Fetches posts.** Ten sources: `danbooru`, `gelbooru`, `gelbooru-compatible`, `xbooru`, `rule34`, `safebooru`, `konachan`, `yande.re`, `aibooru`, `e621`.
+- **Cleans tags.** A bundled Danbooru catalog fixes aliases and sorts tags by category. Filters strip artists, characters, series, clothing, and text.
+- **Reuses the image.** Img2Img starts from the booru image. ControlNet Unit 0 can follow its shape.
+- **Runs ADetailer last.** ADetailer and ADetailer Neo both work on the final image.
+- **Knows Anima.** RanbooruX detects Anima checkpoints and adjusts tags, quality prefix, CFG, and denoising.
+- **Reports each run.** A one-line summary appears under the image. Failures appear there too.
 
-- **Forge Neo & ADetailer Neo Native Support**: Built exclusively for Forge Neo, with full support for ADetailer Neo and standard ADetailer in two-pass Img2Img workflows.
-- **Anima (2B DiT) Support**: Native auto-detection of Anima models with automatic flow-matching scheduler tuning, prompt quality prefixes, and generic ControlNet Unit 0 image handoff.
-- **Danbooru Tag Catalog System**: Bundled tag catalog (`data/catalogs/danbooru_tags.csv`) providing alias normalization, category-aware filtering, custom CSV import, and hair/eye color preservation.
-- **Safer Two-Pass Img2Img & Guarded Postprocessing**: Preview guard suppresses initial-pass flashes until final img2img outputs are rendered; guarded script runner prevents script collisions.
-- **Rich Booru & Tag Removal Filters**: Multi-booru search (`aibooru`, `danbooru`, `e621`, `gelbooru`, `konachan`, `rule34`, `safebooru`, `xbooru`, `yande.re`) with fine-grained removal toggles (artist, character, series, clothing, commentary, furry, headwear, `*_girl` suffix cleanup).
-- **LoRAnado Random LoRA Injection**: Automatic detection and control surfaces for PonyXL-compatible LoRAs with blacklist support (Anima LoRA pattern detection is not currently implemented).
-- **Modular Codebase & Quality Tooling**: Refactored from a monolithic script into a clean `ranboorux/` module with unit tests (`pytest`), strict type checking (`mypy`), linting (`ruff`), and formatting (`black`).
-- **User Conveniences**: Favorites management, file-driven tag sources, prompt/source logging, and sensible caching.
+## Install
 
-## Installation
-
-### Method 1: Install from URL in Forge Neo (Recommended)
+### From URL (recommended)
 
 1. Open **Forge Neo**.
-2. Navigate to the **Extensions** tab -> **Install from URL** sub-tab.
-3. Paste the URL of this repository into **URL for extension's git repository**:
-   `https://github.com/soficis/sd-webui-ranbooruX`
+2. Go to **Extensions** → **Install from URL**.
+3. Paste `https://github.com/soficis/sd-webui-ranbooruX`.
 4. Click **Install**.
-5. Restart **Forge Neo** or click **Apply and restart UI**.
+5. Restart Forge Neo.
 
-### Method 2: Manual Installation
+### Manual
 
-1. Copy or clone this repository to your WebUI extensions directory:
-   - `extensions/sd-webui-ranbooruX`
-2. Start or restart WebUI.
-3. `install.py` installs extension dependencies from `requirements.txt`.
-4. Open the **RanbooruX** panel.
+1. Clone this repository into `extensions/sd-webui-ranbooruX`.
+2. Restart Forge Neo. `install.py` installs `requests`, `requests-cache`, and `Pillow`.
+3. Open the **RanbooruX** panel.
 
 <details>
-<summary><b>Environment Configuration Overrides</b></summary>
+<summary><b>ControlNet in a non-standard folder</b></summary>
 
-If your Forge Neo ControlNet extension is located in a custom or non-standard directory outside of `extensions/sd_forge_controlnet` or `extensions-builtin/sd_forge_controlnet`, RanbooruX supports optional environment variables to override the ControlNet detection path:
+RanbooruX looks for ControlNet in `extensions/sd_forge_controlnet` and `extensions-builtin/sd_forge_controlnet`. Two environment variables override that:
 
-* `SD_FORGE_CONTROLNET_PATH`: Primary override pointing to the root directory of `sd_forge_controlnet` (containing `lib_controlnet/external_code.py`).
-* `RANBOORUX_CN_PATH`: Secondary fallback override path for RanbooruX ControlNet asset resolution.
+* `SD_FORGE_CONTROLNET_PATH`: the root of `sd_forge_controlnet`. It must contain `lib_controlnet/external_code.py`.
+* `RANBOORUX_CN_PATH`: a fallback path.
 
-#### How to Configure
-
-##### Option 1: In WebUI Startup Scripts (Recommended)
-Add the environment variable directly to your WebUI launcher so it persists across restarts:
+Set the variable in your launcher so it survives restarts.
 
 * **Windows (`webui-user.bat`)**:
   ```cmd
@@ -65,242 +55,249 @@ Add the environment variable directly to your WebUI launcher so it persists acro
   ```bash
   export SD_FORGE_CONTROLNET_PATH="/path/to/sd_forge_controlnet"
   ```
-
-##### Option 2: Terminal / Shell
-
-* **Windows PowerShell**:
+* **PowerShell (current session only)**:
   ```powershell
   $env:SD_FORGE_CONTROLNET_PATH="C:\path\to\sd_forge_controlnet"
-  ```
-* **Windows Command Prompt (`cmd.exe`)**:
-  ```cmd
-  set SD_FORGE_CONTROLNET_PATH=C:\path\to\sd_forge_controlnet
-  ```
-* **Linux / macOS (`bash` / `zsh`)**:
-  ```bash
-  export SD_FORGE_CONTROLNET_PATH="/path/to/sd_forge_controlnet"
   ```
 
 </details>
 
-## Quick Start & Usage Workflow
+## Quick start
 
-RanbooruX integrates prompt fetching, tag catalog processing, two-pass generation, ControlNet handoff, and postprocessing into a streamlined workflow:
+1. Tick the **RanbooruX** checkbox to enable it.
+2. Pick a **Booru** and a **Mature Rating**.
+3. Type **Search tags**. Or enter a **Post ID** to use one exact post.
+4. Click **Generate**.
 
-1. **Select Source & Query Tags**: Choose a booru source (`danbooru`, `gelbooru`, `e621`, etc.), enter your desired search tags, and specify post limits.
-2. **Apply Tag Catalog & Removal Filters**: Keep `Use Danbooru Tag Catalog` enabled (default ON) for alias normalization and category-aware filtering. Configure tag removal toggles to strip unwanted artist/character/clothing metadata.
-3. **Configure Image Handoff (Optional)**:
-   - Check `Use Image for Img2Img` to run an initial pass followed by an Img2Img pass with automatic denoising caps.
-   - Check `Use Image for ControlNet (Unit 0)` to automatically pass the fetched booru image into Forge Neo's ControlNet Unit 0 slot.
-4. **Enable Postprocessing (Optional)**: Check `Enable RanbooruX ADetailer support` to automatically run a guarded manual ADetailer or ADetailer Neo pass on the final outputs.
-5. **Generate**: Click **Generate** — RanbooruX fetches posts, processes prompts, and executes the multi-pass pipeline automatically.
+RanbooruX fetches up to **Max Pages** pages and picks a post. **Sort Order** decides how: random, highest score, or lowest score. The post's tags join your own prompt.
 
-## Tag Filters & Catalog Processing
+Gelbooru needs an API key and a user ID. The fields appear when you select it.
 
-RanbooruX provides powerful tag filtering and catalog normalization to keep prompts clean and coherent.
+### Prompt controls
 
-![Tag Removal Filters](pics/filters.jpg)
+| Control | Effect |
+|---|---|
+| `Shuffle tags` | Randomizes tag order. |
+| `Convert "_" to spaces` | Turns `blue_hair` into `blue hair`. |
+| `Limit tags by %` | Keeps a share of the tags. Runs first. |
+| `Max tags (0=disabled)` | Caps the tag count. Runs second. |
+| `Change Background` / `Change Color` | Forces a background or color style. |
+| `Use same prompt for batch` | Gives every image in the batch one prompt. |
 
-### Danbooru Tag Catalog
+**Extra Prompt Modes** adds `Mix tags from multiple posts` and `Shuffle tags (chaos)`. **Run Options** holds seed, cache, logging, and Anima switches.
 
-RanbooruX includes a bundled catalog used by the tag-catalog pipeline.
+## Tag filtering
 
-- Bundled file: `data/catalogs/danbooru_tags.csv`
-- Catalog mode toggle: `Use Danbooru Tag Catalog` (default ON)
-- Source selection: `Bundled` or `Custom file`
+![Tag Filtering](pics/tag-filtering.png)
 
-With catalog mode enabled (default), the pipeline provides:
-- Alias normalization (maps variant tags to canonical Danbooru tags)
-- Category-aware tag filtering (artist, character, series, meta, general)
-- Smart hair & eye color preservation
-- Textual & commentary tag cleanup
+Each checkbox removes one kind of tag. Four preset buttons set several at once:
 
-### Custom Catalog Files
+| Preset | Use it to |
+|---|---|
+| `Strip Series/Character` | Drop artists, characters, and series. |
+| `Preserve Base Colors` | Keep the hair and eye colors from your prompt. |
+| `Quick Strip` | Turn on all eleven filters. |
+| `Reset to defaults` | Return to bad-tag and text removal only. |
 
-Custom CSV catalogs can be imported into `user/catalogs/` via the UI.
+Every preset keeps bad-tag and text removal on.
 
-Accepted formats:
-- Header-based CSV (`tag,category,count,alias`)
-- Headerless 4-column CSV (`tag,category,count,alias`)
+`Always remove tags` takes a list of tags you never want.
 
-Validation and management buttons (`Validate CSV`, `Import Custom Catalog`, `Reload Catalog`) are provided in the UI.
+### Personal lists
 
-## Two-Pass Img2Img + ADetailer / ADetailer Neo Pipeline
+**Personal Lists** stores two lists on disk: a removal list and a favorites list. You can add, remove, de-duplicate, import (`.txt` or `.csv`), and export. Export writes a fresh copy into a box below the button. Click the box to download it.
 
-For Img2Img workflows, RanbooruX executes a coordinated multi-stage process:
+### Danbooru tag catalog
 
-1. **Initial Pass & Preview Guard**: Generates the base image while suppressing intermediate preview flashes until final images are rendered.
-2. **Img2Img Pass**: Automatically applies tuned denoising caps to refine details without breaking composition.
-3. **ControlNet Handoff**: When `Use Image for ControlNet (Unit 0)` is enabled, the fetched booru reference image is automatically assigned to Unit 0 in Forge Neo's ControlNet runner. With Img2Img on, ControlNet is applied to the Img2Img pass that produces the final image (the host's own first pass is a one-step placeholder whose output is discarded, so it runs without ControlNet); with Img2Img off, it is applied to the normal generation. Unit 0 needs a model selected, otherwise ControlNet is skipped with a note under the image.
-4. **ADetailer / ADetailer Neo Pass**: Runs a guarded postprocessing pass on the final images, auto-detecting both standard ADetailer and ADetailer Neo scripts.
+`Use Danbooru Tag Catalog` is on by default. The catalog lives at `data/catalogs/danbooru_tags.csv`. It does three jobs:
 
-## Supported Model Families
+- It maps tag variants to the canonical Danbooru tag.
+- It tells the filters which tags are artists, characters, series, or metadata.
+- It protects hair and eye colors when you ask it to.
 
-Forge Neo ships 15 diffusion engines (`backend/loader.py:46`). RanbooruX's support across these families is as follows:
+You can load your own catalog. Upload a CSV, then click **Import Custom Catalog**. RanbooruX copies it to `user/catalogs/`. **Validate CSV** checks a file first. **Reload Catalog** rereads it.
 
-| Model Family | Engine / Class | RanbooruX Handling | Notes |
-|---|---|---|---|
-| **Anima** (2B / 2.9B / 3.8B) | `Anima` | Checkpoint detection, quality prefix, score tag preservation, flow-matching img2img tuning | Hybrid tag/prose architecture via Qwen3 + learned T5-token adapter. |
-| **PonyXL** | `StableDiffusionXL` | LoRA-file level pattern detection only | Checkpoint is not detected; LoRAnado filters Pony-compatible LoRAs. |
-| **SD 1.5 / SDXL / Illustrious / NoobAI / CKXL** | `StableDiffusion`, `StableDiffusionXL` | Standard booru tag processing | Tag-native CLIP models; standard UNet-era parameters applied. |
-| **Flux / Flux2 / Chroma / Lumina2 / Wan / QwenImage / ZImage / Krea2 / ErnieImage / PiD / Mugen** | Various DiT engines | Not detected | Caption/prose-oriented DiT models; default prompt pipeline applied. |
+The CSV has four columns: `tag,category,count,alias`. A header row is optional.
 
-## Anima Model Support
+## Img2Img and ControlNet
 
-RanbooruX natively supports **Anima** (a 2B parameter DiT model by CircleStone Labs + Comfy Org built on NVIDIA Cosmos-Predict2) in Forge Neo with basic Img2Img support fully working.
+![Img2Img / ControlNet](pics/img2img-controlnet.png)
 
-### Anima ControlNet Support
+| Control | Effect |
+|---|---|
+| `Use Image for Img2Img` | Starts the final image from the booru image. |
+| `Use Image for ControlNet (Unit 0)` | Sends the booru image to ControlNet Unit 0. |
+| `Img2Img denoising` | Sets how far Img2Img may move from the booru image. |
+| `ControlNet weight` | Sets Unit 0's strength, 0 to 2. Default 1.0. |
+| `Use same image for batch` | Uses one booru image for the whole batch. |
+| `Crop image to fit target` | Crops to your width and height. Off, RanbooruX picks a size that fits the image's shape. |
+| `Enable RanbooruX ADetailer support` | Runs ADetailer on the final image. |
 
-RanbooruX supports **generic ControlNet Unit 0 image handoff** for workflows in Forge Neo, including Anima.
+### What happens when Img2Img is on
 
-Anima uses a 2B Diffusion Transformer (DiT) architecture, which in Forge Neo utilizes specialized **ControlNet-LLLite** models rather than standard SD/SDXL ControlNets:
+Forge always runs its own generation first. RanbooruX cannot stop it. So RanbooruX shrinks it to **one step** and throws the result away. You pay a second or two.
 
-- **How to Use**:
-  1. Open Forge Neo's **ControlNet** panel (Unit 0 tab).
-  2. Select an Anima LLLite model and matching preprocessor (e.g. line art, depth, inpainting) manually in Forge Neo's interface.
-  3. In RanbooruX, check **`Use Image for ControlNet (Unit 0)`**.
-  4. Click **Generate** — RanbooruX passes the fetched booru image to Unit 0.
-- **Scope & Limitations**: RanbooruX handles standard ControlNet image handoff into Unit 0. Model selection and preprocessing are managed directly within Forge Neo.
+Then the real work starts:
 
-### How "ControlNet Unit 0" Works in Forge Neo
+1. **Img2Img** runs your full step count on the booru image.
+2. **ControlNet** joins that pass if you ticked it.
+3. **ADetailer** fixes faces on the result.
 
-In Forge Neo, ControlNet units are 0-indexed under the hood:
-- **Unit 0** corresponds to the **1st ControlNet tab/accordion slot** in Forge Neo's ControlNet interface.
-- When **`Use Image for ControlNet (Unit 0)`** is enabled, RanbooruX automatically fetches the target booru image and populates Unit 0's control image slot before triggering generation.
+RanbooruX hides previews until the final image is ready.
 
-### Understanding & Customizing Anima Settings
+Three limits apply to the Img2Img pass:
 
-When an Anima model is loaded and **`Auto-detect Anima model`** is enabled:
-- **Tag Formatting**: Automatically converts underscores (`_`) to spaces (e.g. `blue_hair` → `blue hair`) while preserving `score_*` tags for Anima's hybrid Qwen3 text encoder (which accepts tags via a learned T5-token adapter).
-- **Default Quality Prefix**: Auto-prepends `masterpiece, best quality, score_7, safe, ` if no quality tags are present (for variants emitting score tags).
-- **Default Negative Prompt**: Auto-fills default negative prompt (`worst quality, low quality, score_1, score_2...`) if negative prompt is empty.
-- **Customization**: Uncheck **`Auto-detect Anima model`** to bypass default quality prefixes and negative prompts for 100% custom prompt construction.
+- Denoising caps at 0.6. Anima caps at 0.5.
+- CFG is held between 4 and 8. Anima uses 3 to 6. Anima turbo uses 1 to 6.
+- With Img2Img on, RanbooruX rejects posts that break your filters **before** download. A filtered tag would still be in the picture.
 
-### How to Control Anima Sampler Tuning
+### What you need for ControlNet
 
-RanbooruX includes dedicated UI controls for Anima sampler and step optimization:
+1. Open Forge Neo's main **ControlNet** panel. ADetailer has its own ControlNet section. That one is separate.
+2. Select a **model** and a **preprocessor** in **Unit 0**, the first tab.
+3. Tick `Use Image for ControlNet (Unit 0)` in RanbooruX.
 
-- **`Auto-tune Img2Img parameters for Anima`** (`anima_tune_img2img`, default ON):
-  - **When Enabled**: Automatically optimizes CFG scale (3.0–6.0) and denoising strength (capped at 0.5) tuned for Anima's flow-matching scheduler during Img2Img passes.
-  - **When Disabled**: RanbooruX preserves your manual step count, CFG scale, and denoising strength set in Forge Neo, giving full manual control to users who prefer custom sampler settings.
+RanbooruX supplies the image and the weight. Your `ControlNet weight` slider replaces the weight in the ControlNet panel. Other units you enabled run too.
 
-### Recommended Settings
+With Img2Img on, ControlNet shapes the Img2Img pass. With Img2Img off, it shapes the normal generation.
+
+### When something is missing
+
+RanbooruX tells you under the image.
+
+| Problem | Result |
+|---|---|
+| Unit 0 has no model | ControlNet is skipped. Img2Img still runs. |
+| A post has no downloadable image | RanbooruX picks from the posts that have one. |
+| The download fails anyway | Img2Img is skipped. You get a normal full-step image from the booru prompt. |
+
+### ADetailer
+
+ADetailer uses your real step count, not the one-step placeholder. Many faces mean many passes. Set separate steps inside ADetailer if runs take too long.
+
+## Supported models
+
+Forge Neo ships 15 diffusion engines. RanbooruX treats them differently:
+
+| Model family | What RanbooruX does |
+|---|---|
+| **Anima** (base, aesthetic, turbo, 2.9B, 3.8B) | Detects the checkpoint. Adds a quality prefix. Keeps score tags. Tunes Img2Img. |
+| **PonyXL** | Does not detect the checkpoint. LoRAnado detects Pony-compatible LoRA files. |
+| **SD 1.5 / SDXL / Illustrious / NoobAI** | Standard booru tag handling. |
+| **Flux, Flux2, Chroma, Lumina2, Wan, QwenImage, ZImage, Krea2, ErnieImage, PiD, Mugen** | No detection. The default prompt pipeline applies. These models prefer prose to tags. |
+
+## Anima
+
+Anima is a DiT model from CircleStone Labs and Comfy Org. RanbooruX detects it from the loaded checkpoint.
+
+`Auto-detect Anima model` (default on) does three things:
+
+- It converts underscores to spaces and keeps `score_*` tags intact.
+- It prepends `masterpiece, best quality, score_7, safe, ` when your prompt has no quality tags. The aesthetic variant gets no `score_7`.
+- It fills an empty negative prompt with `worst quality, low quality, score_1, score_2, score_3, ...`.
+
+Untick it to write the whole prompt yourself.
+
+`Auto-tune Img2Img parameters for Anima` (default on) applies the Anima caps above. Untick it and the general caps apply instead: denoising 0.6, CFG 4 to 8. Your step count is never changed.
+
+Anima uses **ControlNet-LLLite** models in Forge Neo, not standard SD or SDXL ControlNets. Pick an LLLite model in Unit 0.
+
+Settings that work well:
+
 - CFG: 4–5
 - Steps: 30–50
 - Sampler: Euler a or er_sde
-- Resolution: 512²–1536²
+- Resolution: 512² to 1536²
 - Clip Skip: 1
 
-## RanbooruX vs Original Ranbooru
+## LoRAnado
 
-Original Ranbooru was a monolithic single-script extension (~1.1k lines). RanbooruX is a complete overhaul built specifically for Forge Neo:
+> [!NOTE]
+> LoRAnado is a legacy feature from the original Ranbooru.
+
+LoRAnado adds random LoRAs to the prompt. It finds PonyXL-compatible LoRAs by filename and metadata. If it finds none, it uses every LoRA in the folder. It does not detect Anima LoRAs.
+
+Controls: `Auto-detect PonyXL-compatible LoRAs`, `Scan LoRAs`, `Select All Compatible`, `Detected LoRAs (toggle enabled)`, `LoRAnado blacklist`.
+
+## RanbooruX vs original Ranbooru
 
 | Aspect | Original Ranbooru | RanbooruX |
 | --- | --- | --- |
-| **Target Platform** | Legacy SD WebUI / A1111 | Exclusively **Forge Neo** & **ADetailer Neo** |
-| **Architecture** | Single file (`scripts/ranbooru.py`) | Modular package (`ranboorux/`) + script wrappers |
-| **Anima Model Support** | None | Auto-detection, quality defaults, img2img tuning, generic ControlNet Unit 0 handoff |
-| **ADetailer Integration** | None / basic script calling | Guarded two-pass runner supporting ADetailer & ADetailer Neo |
-| **Tag Processing** | Ad-hoc string replacements | Bundled Danbooru Tag Catalog (`data/catalogs/danbooru_tags.csv`) |
-| **Testing & Quality** | No tests | Complete `pytest` test suite, `mypy`, `ruff`, `black` & CI |
-| **Dependency Management** | Implicit / unmanaged | Automated via `requirements.txt` & `install.py` |
+| **Platform** | SD WebUI / A1111 | Forge Neo only |
+| **Code** | One 1,100-line script | `ranboorux/` package plus `scripts/ranbooru.py` |
+| **Anima** | None | Detection, quality defaults, Img2Img tuning |
+| **ControlNet** | Bundled copy | Uses Forge Neo's ControlNet, on the final pass |
+| **ADetailer** | None | ADetailer and ADetailer Neo on the final image |
+| **Tags** | String replacement | Danbooru tag catalog |
+| **Quality checks** | None | `pytest`, `mypy`, `ruff`, `black`, CI |
 
-## Forge Neo Technical Notes
+## Limits
 
-- Target Platform: Developed and tested **strictly for Forge Neo only**. Other WebUI distributions are not supported or tested.
-- ControlNet integration is designed for Forge Neo and tested only in that environment.
-- Deepbooru support has been removed in RanbooruX.
-- The previously bundled `scripts/controlnet.py` has been removed; runtime integration dynamically resolves external/builtin ControlNet paths.
-- InputAccordion includes compatibility fallbacks for environments where it is unavailable.
-- Gradio update calls are routed through compatibility helpers for Gradio 3/4 behavior.
+- RanbooruX is tested on Forge Neo only. Other WebUIs are unsupported.
+- Deepbooru support is gone.
+- The bundled `scripts/controlnet.py` is gone. RanbooruX finds Forge Neo's ControlNet at run time.
+- A sampler that cannot run one step will break the placeholder pass. Euler-family samplers work.
 
-## Developer & Verification Guide
+## For developers
 
-RanbooruX uses a modular architecture with comprehensive automated tests, linting, and type safety checks.
+- `scripts/ranbooru.py`: the extension entry point and the Gradio UI.
+- `ranboorux/`: catalog, booru clients, ADetailer and ControlNet integration, Anima detection.
+- `tests/`: the `pytest` suite.
+- `tools/`: CI helpers such as `check_no_gradio_update.py` and `repo_guard.py`.
 
-### Repository Architecture
-- `scripts/ranbooru.py`: WebUI Extension entry point and Gradio UI definition.
-- `ranboorux/`: Core modular package (catalog pipeline, booru API clients, ADetailer runtime/orchestration, ControlNet integration, Anima model detection).
-- `tests/`: Automated test suite covering wrappers, catalog processing, ADetailer runtime, and lifecycle contracts.
-- `tools/`: CI helper scripts (`check_no_gradio_update.py`, `repo_guard.py`).
-
-### Cross-Platform Development Commands
-
-Run tests, linters, and type checkers locally in your operating system environment:
+CI runs these commands. Run them before you push.
 
 #### Windows (PowerShell)
 ```powershell
 $env:PYTHONPATH="."
+python tools/check_no_gradio_update.py
 python -m pytest tests/ -q
+python -m pytest tests/ -q --gradio-version=4
 python -m ruff check scripts/ranbooru.py ranboorux tests tools install.py
 python -m black --check scripts/ranbooru.py ranboorux tests tools install.py
 python -m mypy ranboorux --warn-return-any --warn-unused-ignores
 ```
 
-#### Windows (Command Prompt `cmd.exe`)
-```cmd
-set PYTHONPATH=.
-python -m pytest tests/ -q
-python -m ruff check scripts/ranbooru.py ranboorux tests tools install.py
-python -m black --check scripts/ranbooru.py ranboorux tests tools install.py
-python -m mypy ranboorux --warn-return-any --warn-unused-ignores
-```
-
-#### Linux / macOS (`bash` / `zsh`)
+#### Linux / macOS
 ```bash
-PYTHONPATH=. python3 -m pytest tests/ -q
-PYTHONPATH=. python3 -m ruff check scripts/ranbooru.py ranboorux tests tools install.py
-PYTHONPATH=. python3 -m black --check scripts/ranbooru.py ranboorux tests tools install.py
-PYTHONPATH=. python3 -m mypy ranboorux --warn-return-any --warn-unused-ignores
+export PYTHONPATH=.
+python3 tools/check_no_gradio_update.py
+python3 -m pytest tests/ -q
+python3 -m pytest tests/ -q --gradio-version=4
+python3 -m ruff check scripts/ranbooru.py ranboorux tests tools install.py
+python3 -m black --check scripts/ranbooru.py ranboorux tests tools install.py
+python3 -m mypy ranboorux --warn-return-any --warn-unused-ignores
 ```
 
-## LoRAnado (PonyXL LoRA Detection)
+## Upgrade notes
 
-> [!NOTE]
-> LoRAnado is a legacy feature inherited from original Ranbooru.
+Forge saves your UI defaults in `ui-config.json` by control label. Several labels changed. Defaults you saved for those controls reset once. New defaults save under the new labels.
 
-LoRAnado includes detection and control surfaces to filter PonyXL-compatible LoRAs based on filename tokens and model metadata keys (`_LORANADO_PONY_PATTERNS`). If no compatible LoRAs are detected, RanbooruX falls back to all LoRAs in the target directory. Note: Anima LoRA pattern detection is not currently implemented.
-
-Controls:
-- `Auto-detect PonyXL-compatible LoRAs`
-- `Scan LoRAs`
-- `Select All Compatible`
-- `Detected LoRAs (toggle enabled)`
-- `LoRAnado blacklist`
-
-## Upgrade Notes
-
-In the panel UX update, several component labels and button texts were renamed for clarity and to ensure all interactive controls have unique identifiers. In WebUI, saved defaults in `ui-config.json` are keyed by component label. Because of these renames, any custom UI defaults previously saved for these controls will reset once to their code defaults; subsequent customizations will be saved under the new labels.
-
-### Renamed Controls & Buttons
-
-| Control Type | Old Label / Text | New Label / Text | Note |
+| Control | Old label | New label | Note |
 |---|---|---|---|
-| Textbox | `Tags to Search (Pre)` | `Search tags` | Search input |
-| Textbox | `Tags to Remove (Post)` | `Always remove tags` | Removal input |
-| Radio | `Tag Shuffling (Chaos)` | `Shuffle tags (chaos)` | Chaos mode selector |
-| Slider | `Img2Img Denoising / CN Weight` | `Img2Img denoising` | Img2Img strength only |
-| Slider | *(new)* | `ControlNet weight` | Weight for ControlNet Unit 0 (0 to 2, default 1.0); replaces the weight set in the ControlNet panel |
-| Textbox | `Custom CSV Path (must be inside user/catalogs/ or data/catalogs/; other files must be uploaded)` | `Custom catalog path` | Custom CSV catalog path |
-| Dropdown | `Removal Tags` | `Select tags to remove` | Selector now starts empty; it only picks tags to delete from the removal list |
-| Dropdown | `Favorite Tags` | `Select favorites to remove` | Selector now starts empty; it only picks tags to delete from the favorites list |
-| File | `Upload CSV` | `Upload CSV, then click Import` | Catalog upload; label now states the second step |
-| Button | `Remove Text-like Tags` | *(Removed)* | Covered by `Reset to defaults` |
-| Button | *(New)* | `Reset to defaults` | Preset resetting to bad + text tags |
-| Button | `Add` (removal) | `Add to removal list` | Unique button identifier |
-| Button | `Remove Selected` (removal) | `Remove selected (removal)` | Unique button identifier |
-| Button | `De-duplicate` (removal) | `De-duplicate removal list` | Unique button identifier |
-| Button | `Export` (removal) | `Export removal list` | Now a plain button; each click writes a fresh copy into the new `Exported removal list` box, which you click to download |
-| File | *(New)* | `Exported removal list` | Hidden until the first export |
-| Button | `Add` (favorites) | `Add to favorites` | Unique button identifier |
-| Button | `Remove Selected` (favorites) | `Remove selected (favorites)` | Unique button identifier |
-| Button | `De-duplicate` (favorites) | `De-duplicate favorites` | Unique button identifier |
-| Button | `Export` (favorites) | `Export favorites` | Now a plain button; each click writes a fresh copy into the new `Exported favorites` box, which you click to download |
-| File | *(New)* | `Exported favorites` | Hidden until the first export |
-| Button | `Refresh` (search file) | `Refresh search files` | Unique button identifier |
-| Button | `Refresh` (remove file) | `Refresh remove files` | Unique button identifier |
-| File | `Import CSV/TXT` (removal) | `Import removal list (CSV/TXT)` | Unique file upload identifier |
-| File | `Import CSV/TXT` (favorites) | `Import favorites (CSV/TXT)` | Unique file upload identifier |
+| Textbox | `Tags to Search (Pre)` | `Search tags` | |
+| Textbox | `Tags to Remove (Post)` | `Always remove tags` | |
+| Radio | `Tag Shuffling (Chaos)` | `Shuffle tags (chaos)` | |
+| Slider | `Img2Img Denoising / CN Weight` | `Img2Img denoising` | Img2Img strength only. |
+| Slider | *(new)* | `ControlNet weight` | 0 to 2, default 1.0. Replaces the weight in the ControlNet panel. |
+| Textbox | `Custom CSV Path (...)` | `Custom catalog path` | |
+| Dropdown | `Removal Tags` | `Select tags to remove` | Starts empty. It only picks tags to delete. |
+| Dropdown | `Favorite Tags` | `Select favorites to remove` | Starts empty. It only picks tags to delete. |
+| File | `Upload CSV` | `Upload CSV, then click Import` | |
+| Button | `Remove Text-like Tags` | *(removed)* | `Reset to defaults` covers it. |
+| Button | *(new)* | `Reset to defaults` | |
+| Button | `Add` | `Add to removal list` / `Add to favorites` | |
+| Button | `Remove Selected` | `Remove selected (removal)` / `Remove selected (favorites)` | |
+| Button | `De-duplicate` | `De-duplicate removal list` / `De-duplicate favorites` | |
+| Button | `Export` | `Export removal list` / `Export favorites` | Writes a copy into the `Exported ...` box. Click the box to download. |
+| File | *(new)* | `Exported removal list` / `Exported favorites` | Hidden until the first export. |
+| Button | `Refresh` | `Refresh search files` / `Refresh remove files` | |
+| File | `Import CSV/TXT` | `Import removal list (CSV/TXT)` / `Import favorites (CSV/TXT)` | |
+
+Two behaviors also changed:
+
+- With Img2Img on, ControlNet now shapes the final image. Before, it shaped a first pass that RanbooruX discarded.
+- ADetailer now runs your full step count. Before, it inherited a reduced count.
 
 ## Credits
 
