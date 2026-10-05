@@ -45,6 +45,11 @@ def test_gelbooru_saved_message_does_not_echo_file_path():
     assert "Using saved Gelbooru credentials" in msg
 
 
+def _update_value(update):
+    """Read `value` from a Gradio 3 update dict or a Gradio 4 component instance."""
+    return update.get("value") if isinstance(update, dict) else getattr(update, "value", None)
+
+
 def test_gelbooru_ui_save_clears_textboxes_and_hides_path(tmp_path, monkeypatch):
     import scripts.ranbooru as ranbooru
 
@@ -57,11 +62,11 @@ def test_gelbooru_ui_save_clears_textboxes_and_hides_path(tmp_path, monkeypatch)
     )
 
     # API key and user ID textboxes must be cleared
-    assert key_tb.get("value") == ""
-    assert uid_tb.get("value") == ""
+    assert _update_value(key_tb) == ""
+    assert _update_value(uid_tb) == ""
 
     # Status message must not contain secret or file path
-    status_text = status.get("value", "")
+    status_text = _update_value(status) or ""
     assert "my_secret_key" not in status_text
     assert str(cred_file) not in status_text
     assert "credentials.json" not in status_text
