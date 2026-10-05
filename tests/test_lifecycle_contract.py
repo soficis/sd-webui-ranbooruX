@@ -297,3 +297,47 @@ def test_bail_releases_guards():
     assert not getattr(ranbooru.Script, "_ranbooru_global_processing", False)
     assert not getattr(p, "_ranbooru_already_processing", False)
     assert not hasattr(script, "_current_processing_object")
+
+
+def test_before_process_comments_on_success_and_failure(monkeypatch, stub_modules):
+    import scripts.ranbooru as ranbooru
+
+    script = ranbooru.Script()
+
+    # Success case
+    class FakeApi:
+        booru_name = "danbooru"
+
+        def get_posts(self, **_kwargs):
+            return [{"id": 1, "tags": "1girl solo watermark", "file_url": "https://img.test/a.png"}]
+
+    monkeypatch.setattr(script, "_get_booru_api", lambda *_args, **_kwargs: FakeApi())
+
+    p_success = _processing()
+    p_success.comments = []
+    p_success.comment = lambda text: p_success.comments.append(text)
+
+    script.before_process(p_success, *_args(enabled=True, booru="danbooru", remove_bad_tags=True))
+
+    assert len(p_success.comments) == 1
+    assert (
+        p_success.comments[0]
+        == "RanbooruX: danbooru · 1 post(s) · 1 tags removed by filters · catalog on"
+    )
+
+    # Failure case
+    p_fail = _processing()
+    p_fail.comments = []
+    p_fail.comment = lambda text: p_fail.comments.append(text)
+
+    def fail_fetch(*_args, **_kwargs):
+        raise RuntimeError("network failure contacting booru")
+
+    monkeypatch.setattr(script, "_fetch_booru_posts", fail_fetch)
+
+    script.before_process(p_fail, *_args(enabled=True, booru="danbooru"))
+
+    assert len(p_fail.comments) == 1
+    fail_comment = p_fail.comments[0]
+    assert fail_comment.startswith("RanbooruX: network failure contacting booru")
+    assert "Generated with your prompt unchanged." in fail_comment

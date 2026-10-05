@@ -93,11 +93,9 @@ def _report_exception(prefix: str, exc: BaseException) -> None:
         logging.getLogger("ranboorux").debug("%s", prefix, exc_info=True)
 
 
-def _note_run_failure(p: Any, reason: str) -> None:
-    if not p or not reason:
+def _record_processing_comment(p: Any, msg: str) -> None:
+    if not p or not msg:
         return
-    sanitized = rb_http_client.sanitize_exception_text(str(reason))
-    msg = f"RanbooruX: {sanitized}"
     try:
         if hasattr(p, "comment") and callable(p.comment):
             p.comment(msg)
@@ -108,6 +106,22 @@ def _note_run_failure(p: Any, reason: str) -> None:
                 p.comments.append(msg)
     except Exception:
         pass
+
+
+def _note_run_failure(p: Any, reason: str) -> None:
+    if not p or not reason:
+        return
+    sanitized = rb_http_client.sanitize_exception_text(str(reason))
+    msg = f"RanbooruX: {sanitized}"
+    _record_processing_comment(p, msg)
+
+
+def _note_run_success(
+    p: Any, booru: str, n_posts: int, tags_removed: int, catalog_on: bool
+) -> None:
+    cat_str = "on" if catalog_on else "off"
+    msg = f"RanbooruX: {booru} · {n_posts} post(s) · {tags_removed} tags removed by filters · catalog {cat_str}"
+    _record_processing_comment(p, msg)
 
 
 def _note_postprocess_failure(processed: Any, reason: str) -> None:
@@ -3856,6 +3870,10 @@ class Script(scripts.Script):
                     ):
                         primary_subject = t_norm or canonical_tag
                     filtered_prompt_tags.append(self._strip_disambiguator(t))
+            tags_removed_in_prompt = max(0, len(prompt_tags) - len(filtered_prompt_tags))
+            self._run_tags_removed_count = (
+                getattr(self, "_run_tags_removed_count", 0) + tags_removed_in_prompt
+            )
             prompt_tags = filtered_prompt_tags
         except Exception:
             # fallback: ignore removal if anything goes wrong
@@ -5022,6 +5040,7 @@ class Script(scripts.Script):
                     mixed_prompts.append(",".join(final_mix_tags))
                 raw_prompts = mixed_prompts
 
+            self._run_tags_removed_count = 0
             for i, rp in enumerate(raw_prompts):
                 processed_prompt, processed_negative = self._process_single_prompt(
                     i,
@@ -5109,6 +5128,11 @@ class Script(scripts.Script):
                     print("[R Before] ControlNet script not found; p.resize_mode safeguard set.")
 
             self._prepare_img2img_pass(p, use_img2img, use_ip)
+
+            catalog_on = bool(getattr(self, "_use_tag_catalog", False))
+            n_posts = len(getattr(self, "_posts_used_for_generation", []))
+            tags_removed = int(getattr(self, "_run_tags_removed_count", 0))
+            _note_run_success(p, booru, n_posts, tags_removed, catalog_on)
 
         except Exception as e:
             _report_exception("[Ranbooru BeforeProcess] UNEXPECTED ERROR", e)
