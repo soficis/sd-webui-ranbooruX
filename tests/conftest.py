@@ -25,9 +25,6 @@ def stub_modules(tmp_path, request):
     scripts_mod = types.ModuleType("modules.scripts")
 
     class DummyScript:
-        def __init__(self):
-            pass
-
         def elem_id(self, name):
             return name
 
@@ -85,9 +82,84 @@ def stub_modules(tmp_path, request):
     gradio_mod = types.ModuleType("gradio")
     gradio_mod.__version__ = "4.0.0" if gradio_version == "4" else "3.41.2"
 
+    # Keyword arguments accepted by the real Gradio 4.40 constructors. Anything else
+    # raises TypeError, exactly as it would on Forge Neo.
+    _strict_kwargs = {
+        "File": {
+            "value",
+            "file_count",
+            "file_types",
+            "type",
+            "label",
+            "every",
+            "inputs",
+            "show_label",
+            "container",
+            "scale",
+            "min_width",
+            "height",
+            "interactive",
+            "visible",
+            "elem_id",
+            "elem_classes",
+            "render",
+            "key",
+        },
+        "Button": {
+            "value",
+            "every",
+            "inputs",
+            "variant",
+            "size",
+            "icon",
+            "link",
+            "visible",
+            "interactive",
+            "elem_id",
+            "elem_classes",
+            "render",
+            "key",
+            "scale",
+            "min_width",
+        },
+        "DownloadButton": {
+            "label",
+            "value",
+            "every",
+            "inputs",
+            "variant",
+            "visible",
+            "size",
+            "icon",
+            "scale",
+            "min_width",
+            "interactive",
+            "elem_id",
+            "elem_classes",
+            "render",
+            "key",
+        },
+    }
+
     class DummyComponent:
+        _allowed_kwargs = None
+
         def __init__(self, *args, **kwargs):
-            pass
+            allowed = type(self)._allowed_kwargs
+            if allowed is not None:
+                unexpected = sorted(set(kwargs) - allowed)
+                if unexpected:
+                    raise TypeError(
+                        f"{type(self).__name__}.__init__() got an unexpected keyword "
+                        f"argument {unexpected[0]!r}"
+                    )
+            self.args = args
+            self.kwargs = kwargs
+            self.value = kwargs.get("value")
+            self.label = kwargs.get("label")
+            self.choices = kwargs.get("choices")
+            self.interactive = kwargs.get("interactive")
+            self.visible = kwargs.get("visible", True)
 
         def change(self, *args, **kwargs):
             return None
@@ -99,6 +171,12 @@ def stub_modules(tmp_path, request):
             return None
 
         def select(self, *args, **kwargs):
+            return None
+
+        def blur(self, *args, **kwargs):
+            return None
+
+        def submit(self, *args, **kwargs):
             return None
 
     if gradio_version == "3":
@@ -131,7 +209,11 @@ def stub_modules(tmp_path, request):
         "DownloadButton",
         "State",
     ):
-        setattr(gradio_mod, _name, DummyComponent)
+        setattr(
+            gradio_mod,
+            _name,
+            type(_name, (DummyComponent,), {"_allowed_kwargs": _strict_kwargs.get(_name)}),
+        )
     for _name in ("Group", "Row", "Column", "Accordion", "Box"):
         setattr(gradio_mod, _name, DummyContext)
 
@@ -163,7 +245,28 @@ def stub_modules(tmp_path, request):
     requests_cache_mod.uninstall_cache = uninstall_cache
     sys.modules["requests_cache"] = requests_cache_mod
 
+    try:
+        import requests.exceptions as _real_exceptions
+
+        requests_exceptions_mod = _real_exceptions
+    except ImportError:
+        requests_exceptions_mod = types.ModuleType("requests.exceptions")
+
+        class _RequestException(Exception):
+            pass
+
+        class _HTTPError(_RequestException):
+            pass
+
+        class _InvalidURL(_RequestException):
+            pass
+
+        requests_exceptions_mod.RequestException = _RequestException
+        requests_exceptions_mod.HTTPError = _HTTPError
+        requests_exceptions_mod.InvalidURL = _InvalidURL
+
     requests_mod = types.ModuleType("requests")
+    requests_mod.__path__ = []  # treat as package for submodule imports
     requests_adapters_mod = types.ModuleType("requests.adapters")
 
     class _DummyHTTPAdapter:
@@ -197,12 +300,15 @@ def stub_modules(tmp_path, request):
     requests_mod.put = _dummy_get
     requests_mod.delete = _dummy_get
     requests_mod.Response = _DummyResponse
-    requests_mod.RequestException = Exception
+    requests_mod.RequestException = requests_exceptions_mod.RequestException
+    requests_mod.HTTPError = getattr(requests_exceptions_mod, "HTTPError", Exception)
+    requests_mod.exceptions = requests_exceptions_mod
     requests_mod.Session = lambda: types.SimpleNamespace(get=_dummy_get, post=_dummy_get)
     requests_adapters_mod.HTTPAdapter = _DummyHTTPAdapter
     requests_mod.adapters = requests_adapters_mod
     sys.modules["requests"] = requests_mod
     sys.modules["requests.adapters"] = requests_adapters_mod
+    sys.modules["requests.exceptions"] = requests_exceptions_mod
 
     numpy_mod = types.ModuleType("numpy")
     sys.modules["numpy"] = numpy_mod
@@ -240,6 +346,7 @@ def stub_modules(tmp_path, request):
         "requests_cache",
         "requests",
         "requests.adapters",
+        "requests.exceptions",
         "numpy",
         "PIL.Image",
         "PIL",

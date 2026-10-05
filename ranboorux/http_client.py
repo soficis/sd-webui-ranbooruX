@@ -218,7 +218,6 @@ def redact_paths(text: str) -> str:
 
 
 def redact_urls_in_text(text: str) -> str:
-    # Find all http/https URLs in the text
     url_pattern = re.compile(r"https?://[^\s'\")]+", re.IGNORECASE)
 
     def repl(match):
@@ -457,7 +456,7 @@ class BooruSession:
                 location = (getattr(response, "headers", {}) or {}).get("location")
 
                 # Remove from cache if the redirect target contains any sensitive queries
-                if status_code in REDIRECT_STATUSES and location:
+                if location:
                     redirect_target = urljoin(current_url, location)
                     if _has_sensitive_query(redirect_target):
                         chain_is_sensitive = True
@@ -471,9 +470,7 @@ class BooruSession:
                                 except Exception:
                                     pass
 
-                close = getattr(response, "close", None)
-                if callable(close):
-                    close()
+                _close_socket(response)
                 if not location:
                     return response
                 current_url = validate_outbound_url(urljoin(current_url, location))
@@ -518,9 +515,7 @@ class BooruSession:
                 )
             return content
         finally:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
+            _close_socket(response)
 
     def get_json(
         self,
@@ -549,34 +544,7 @@ class BooruSession:
             except Exception as exc:
                 raise BooruResponseError(sanitize_exception_text(str(exc))) from exc
         except Exception:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
-            raise
-
-    def get_text(
-        self,
-        url: str,
-        *,
-        headers: Optional[Mapping[str, str]] = None,
-        timeout: int = 30,
-        max_bytes: int = DEFAULT_API_MAX_BYTES,
-    ) -> BoundedResponse:
-        response = self.get(url, headers=headers, timeout=timeout, stream=True)
-        try:
-            response.raise_for_status()
-            content = self._read_bounded_response(response, url, max_bytes)
-            return BoundedResponse(
-                url=str(getattr(response, "url", url) or url),
-                status_code=int(getattr(response, "status_code", 200) or 200),
-                headers=getattr(response, "headers", {}) or {},
-                content=content,
-                encoding=getattr(response, "encoding", None),
-            )
-        except Exception:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
+            _close_socket(response)
             raise
 
     def get_bytes(
@@ -600,13 +568,9 @@ class BooruSession:
                 )
             return self._read_bounded_response(response, url, max_bytes)
         except Exception:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
+            _close_socket(response)
             raise
 
     def close(self) -> None:
         for session in (self._session, self._uncached_session):
-            close = getattr(session, "close", None)
-            if callable(close):
-                close()
+            _close_socket(session)

@@ -1,3 +1,4 @@
+import copy
 import csv
 import difflib
 import json
@@ -7,12 +8,14 @@ import random
 import re
 import shutil
 import sys
+import tempfile
+import time
 import traceback
 import unicodedata
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from io import BytesIO
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import gradio as gr
 import modules.scripts as scripts
@@ -38,27 +41,160 @@ from ranboorux import loranado as rb_loranado
 from ranboorux import mutation_scope as rb_mutation_scope
 from ranboorux import run_options as rb_run_options
 from ranboorux import tag_pipeline as rb_tag_pipeline
+from ranboorux import ui_helpers as rb_ui_helpers
 from ranboorux import user_store as rb_user_store
-from ranboorux.anima_detect import get_anima_model_info
+from ranboorux.anima_detect import (
+    get_anima_model_info,
+    get_capabilities,
+    resolve_anima_variant,
+)
 from ranboorux.boorus import Booru
 from ranboorux.integrations import adetailer as rb_adetailer_integration
 from ranboorux.integrations import adetailer_orchestration as rb_adetailer_orch
 from ranboorux.integrations import adetailer_runtime as rb_adetailer_runtime
 from ranboorux.integrations import controlnet as rb_controlnet_integration
 from ranboorux.integrations import img2img_lifecycle as rb_img2img_lifecycle
+from ranboorux.safe_paths import contained_path, safe_join
 
-# --- Constants and Paths ---
 EXTENSION_ROOT = basedir()
 # Ensure extension root is on sys.path for local package imports (e.g., sd_forge_controlnet)
 if EXTENSION_ROOT not in sys.path:
     sys.path.append(EXTENSION_ROOT)
 USER_DATA_DIR = os.path.join(EXTENSION_ROOT, "user")
 USER_SEARCH_DIR = os.path.join(USER_DATA_DIR, "search")
+
+SERIES_CATEGORY = rb_tag_pipeline.SERIES_CATEGORY
+CHARACTER_CATEGORY = rb_tag_pipeline.CHARACTER_CATEGORY
+
+
+def _contain_catalog_path(root: str, value: str) -> str:
+    """Contain a catalog path under ``root``; relative values are relative to ``root``."""
+    if os.path.isabs(value):
+        return str(contained_path(root, value))
+    return str(safe_join(root, value))
+
+
 USER_REMOVE_DIR = os.path.join(USER_DATA_DIR, "remove")
 LOG_DIR = os.path.join(USER_DATA_DIR, "logs")
 os.makedirs(USER_SEARCH_DIR, exist_ok=True)
 os.makedirs(USER_REMOVE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+
+DEBUG: bool = os.getenv("RANBOORU_DEBUG", "0").lower() in ("1", "true", "yes")
+
+
+def _report_exception(prefix: str, exc: BaseException) -> None:
+    """Print a sanitized one-line error; full traceback on console only when DEBUG.
+
+    The traceback is always sent to the ``ranboorux`` logger at DEBUG level so it can
+    be recovered for bug reports without turning on console noise.
+    """
+    print(f"{prefix}: {rb_http_client.sanitize_exception_text(str(exc))}")
+    if DEBUG:
+        traceback.print_exc()
+    else:
+        logging.getLogger("ranboorux").debug("%s", prefix, exc_info=True)
+
+
+def _record_processing_comment(p: Any, msg: str) -> None:
+    if not p or not msg:
+        return
+    try:
+        if hasattr(p, "comment") and callable(p.comment):
+            p.comment(msg)
+        elif hasattr(p, "comments"):
+            if isinstance(p.comments, dict):
+                p.comments[msg] = 1
+            elif isinstance(p.comments, list):
+                p.comments.append(msg)
+    except Exception:
+        pass
+
+
+CONTROLNET_NO_MODEL_NOTE = (
+    "RanbooruX: ControlNet skipped - ControlNet Unit 0 has no model selected. "
+    "Pick a model in the ControlNet panel's Unit 0."
+)
+
+
+CONTROLNET_IMG2IMG_FAILED_NOTE = (
+    "RanbooruX: ControlNet could not be applied to the Img2Img pass - "
+    "the image was made without it. See the console for the error."
+)
+
+
+IMG2IMG_NO_SOURCE_NOTE = (
+    "RanbooruX: Img2Img skipped - the booru image could not be downloaded. "
+    "Generated from the booru prompt only."
+)
+
+
+def _post_has_image_url(post: Any) -> bool:
+    url = post.get("file_url") if isinstance(post, dict) else None
+    return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+
+def _controlnet_unit_copy(unit: Any, **fields: Any) -> Any:
+    """Copy a ControlNet unit (dict or object) with `fields` changed; the original is untouched."""
+    if isinstance(unit, dict):
+        return {**unit, **fields}
+    clone = copy.copy(unit)
+    for name, value in fields.items():
+        setattr(clone, name, value)
+    return clone
+
+
+def _controlnet_unit_enabled(unit: Any) -> bool:
+    return bool(unit.get("enabled") if isinstance(unit, dict) else getattr(unit, "enabled", False))
+
+
+def _controlnet_unit_has_model(unit: Any) -> bool:
+    """True when a ControlNet unit names a real model; Forge asserts on "None"."""
+    model = unit.get("model") if isinstance(unit, dict) else getattr(unit, "model", None)
+    name = str(model or "").strip()
+    return bool(name) and name.lower() != "none"
+
+
+def _note_run_failure(p: Any, reason: str, outcome: str = "") -> None:
+    """Record a sanitised failure note; `outcome` says what the user actually got."""
+    if not p:
+        return
+    sanitized = rb_http_client.sanitize_exception_text(str(reason or "")).strip().rstrip(".")
+    msg = f"RanbooruX: {sanitized or 'unexpected error'}."
+    if outcome:
+        msg = f"{msg} {outcome}"
+    _record_processing_comment(p, msg)
+
+
+def _note_run_success(
+    p: Any, booru: str, n_posts: int, tags_removed: int, catalog_label: str
+) -> None:
+    msg = (
+        f"RanbooruX: {booru} · {n_posts} post(s) · {tags_removed} tag(s) removed by filters "
+        f"(batch total) · catalog {catalog_label}"
+    )
+    _record_processing_comment(p, msg)
+
+
+def _note_postprocess_failure(processed: Any, reason: str) -> None:
+    if not processed or not reason:
+        return
+    sanitized = rb_http_client.sanitize_exception_text(str(reason))
+    msg = f"RanbooruX: {sanitized}"
+    try:
+        comments = getattr(processed, "comments", None)
+        if isinstance(comments, str):
+            if comments and not comments.endswith("\n"):
+                processed.comments = f"{comments}\n{msg}\n"
+            else:
+                processed.comments = f"{comments or ''}{msg}\n"
+        elif isinstance(comments, list):
+            comments.append(msg)
+        elif hasattr(processed, "comments"):
+            setattr(processed, "comments", f"{msg}\n")
+    except Exception:
+        pass
+
 
 GELBOORU_CREDENTIALS_DIR = os.path.join(USER_DATA_DIR, "gelbooru")
 GELBOORU_CREDENTIALS_FILE = os.path.join(GELBOORU_CREDENTIALS_DIR, "credentials.json")
@@ -77,7 +213,6 @@ REMOVAL_SYNONYM_GROUPS_RAW: Tuple[Set[str], ...] = (
     {"1girl", "1female", "1woman"},
 )
 
-# Ensure default files exist
 for filename in ["tags_search.txt", "tags_remove.txt"]:
     dir_path = USER_SEARCH_DIR if "search" in filename else USER_REMOVE_DIR
     filepath = os.path.join(dir_path, filename)
@@ -93,10 +228,8 @@ for ensured_path in (PERSONAL_REMOVE_FILE, FAVORITES_FILE, PROMPT_LOG_JSONL):
     try:
         os.makedirs(parent, exist_ok=True)
         if not os.path.isfile(ensured_path):
-            mode = "w"
-            with open(ensured_path, mode, encoding="utf-8") as f:
-                if ensured_path == PROMPT_LOG_JSONL:
-                    pass
+            with open(ensured_path, "w", encoding="utf-8") as f:
+                pass
     except Exception as exc:
         print(f"[Ranbooru] Error ensuring file {ensured_path}: {exc}")
 
@@ -124,7 +257,6 @@ ADD_BG = ["outdoors", "indoors"]
 BW_BG = ["monochrome", "greyscale", "grayscale"]
 POST_AMOUNT = 100
 COUNT = 100
-DEBUG = False
 MAX_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_SOURCE_IMAGE_PIXELS = 50_000_000
 MAX_SOURCE_IMAGE_FRAMES = 1
@@ -195,9 +327,53 @@ def _gr_update(**kwargs):
     return kwargs
 
 
-def get_available_ratings(booru):
+def _register_page_load(fn, inputs, outputs) -> bool:
+    """Run fn when the page loads, so values restored from ui-config.json get handled.
+
+    Blur/submit events never fire for a saved default, so dependent control states
+    would otherwise stay stale until the user touches the field.
+    """
+    try:
+        from gradio.context import Context
+    except ImportError:
+        return False
+    root = getattr(Context, "root_block", None)
+    load = getattr(root, "load", None)
+    if not callable(load):
+        return False
+    load(fn=fn, inputs=inputs, outputs=outputs, queue=False, show_progress="hidden")
+    return True
+
+
+EXPORT_MAX_AGE_SECONDS = 3600
+
+
+def _export_root() -> str:
+    """Folder that holds list exports; created on demand."""
+    root = os.path.join(tempfile.gettempdir(), "ranbooru_exports")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _prune_old_exports(root: str, max_age: float = EXPORT_MAX_AGE_SECONDS) -> None:
+    """Delete export folders older than max_age so exports do not pile up in temp."""
+    cutoff = time.time() - max_age
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=False) and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def get_available_ratings(booru, current=None):
     choices = list(RATINGS.get(booru, RATING_TYPES["none"]).keys())
-    return _gr_component_update(gr.Radio, choices=choices, value="All", visible=True)
+    value = rb_ui_helpers.next_rating(current, choices)
+    return _gr_component_update(gr.Radio, choices=choices, value=value, visible=True)
 
 
 def show_fringe_benefits(booru):
@@ -633,7 +809,7 @@ class Script(scripts.Script):
         self._synonym_groups: Tuple[Set[str], ...] = tuple()
         self._synonym_lookup: Dict[str, Set[str]] = {}
         try:
-            norm = self._normalize_tag
+            norm = rb_tag_pipeline.normalize_tag
             groups: List[Set[str]] = []
             for group in REMOVAL_SYNONYM_GROUPS_RAW:
                 normalized_group = {norm(tag) for tag in group if norm(tag)}
@@ -688,35 +864,17 @@ class Script(scripts.Script):
     _DASH_UNDERSCORE_RE = re.compile(r"[_\-]+")
     _WHITESPACE_RE = re.compile(r"\s+")
     _LORANADO_MAX_HEADER_BYTES = 4 * 1024 * 1024
-    _USER_LIST_PATHS = {
-        "personal": PERSONAL_REMOVE_FILE,
-        "favorites": FAVORITES_FILE,
-    }
-
-    @staticmethod
-    def _canonicalize_raw_tag(tag: str) -> str:
-        return rb_tag_pipeline.canonicalize_raw_tag(tag)
-
-    @staticmethod
-    def _normalize_tag(tag: str) -> str:
-        return rb_tag_pipeline.normalize_tag(tag)
-
-    def _ensure_user_file(self, path: str) -> None:
-        try:
-            rb_user_store.ensure_text_file(path)
-        except Exception as exc:
-            print(f"[R Files] Failed to ensure file {path}: {exc}")
 
     def _read_list_file(self, path: str) -> List[str]:
         try:
-            return rb_user_store.read_list_file(path, normalize_fn=self._normalize_tag)
+            return rb_user_store.read_list_file(path, normalize_fn=rb_tag_pipeline.normalize_tag)
         except Exception as exc:
             print(f"[R Files] Failed to read list file {path}: {exc}")
             return []
 
     def _write_list_file(self, path: str, tags: Iterable[str]) -> None:
         try:
-            rb_user_store.write_list_file(path, tags, normalize_fn=self._normalize_tag)
+            rb_user_store.write_list_file(path, tags, normalize_fn=rb_tag_pipeline.normalize_tag)
         except Exception as exc:
             print(f"[R Files] Failed to write list file {path}: {exc}")
 
@@ -771,7 +929,19 @@ class Script(scripts.Script):
                 return bundled_override
             return BUNDLED_CATALOG_PATH
         if self._catalog_source == "custom":
-            return (self._custom_catalog_path or "").strip()
+            val = (self._custom_catalog_path or "").strip()
+            self._refused_catalog_name = ""
+            if not val:
+                return ""
+            try:
+                return _contain_catalog_path(USER_CATALOGS_DIR, val)
+            except ValueError:
+                basename = os.path.basename(val) or "custom_catalog.csv"
+                self._refused_catalog_name = basename
+                print(
+                    f"[Ranbooru] Warn: Refused custom catalog path outside allowed roots: {basename}"
+                )
+                return ""
         return ""
 
     def _set_catalog_source(self, source: str) -> str:
@@ -787,29 +957,52 @@ class Script(scripts.Script):
         return self._catalog_source
 
     def _catalog_path_from_upload(self, uploaded: object) -> str:
-        if isinstance(uploaded, str):
-            return uploaded
-        if isinstance(uploaded, dict):
-            for key in ("name", "path", "orig_name"):
-                value = uploaded.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-        return ""
+        return rb_ui_helpers.upload_to_path(uploaded)
 
     def _validate_csv_format(self, path: str) -> Tuple[bool, str]:
         return rb_catalog.validate_catalog_csv(path)
 
+    def _resolve_catalog_source(self, uploaded: object, path_hint: str = "") -> Tuple[str, bool]:
+        hint = (path_hint or "").strip()
+        if hint:
+            allowed_roots = [USER_CATALOGS_DIR, BUNDLED_CATALOG_DIR]
+            for root in allowed_roots:
+                try:
+                    return _contain_catalog_path(root, hint), True
+                except ValueError:
+                    continue
+            basename = os.path.basename(hint) or "unnamed"
+            print(f"[Ranbooru] Warn: Refused custom catalog path outside allowed roots: {basename}")
+            return "", True
+        return self._catalog_path_from_upload(uploaded), False
+
     def _import_custom_catalog(self, uploaded: object, path_hint: str = "") -> Tuple[bool, str]:
-        source_path = (path_hint or "").strip() or self._catalog_path_from_upload(uploaded)
+        source_path, from_hint = self._resolve_catalog_source(uploaded, path_hint)
+        if from_hint and not source_path:
+            basename = os.path.basename((path_hint or "").strip()) or "file"
+            return (
+                False,
+                f"**Failed:** Refused custom catalog path outside allowed roots: {basename}",
+            )
+        if not source_path:
+            return False, "**Failed:** No catalog file provided"
+
         ok, validation_message = self._validate_csv_format(source_path)
         if not ok:
-            return False, f"Invalid CSV: {validation_message}"
+            return False, f"**Failed:** Invalid CSV: {validation_message}"
         try:
             os.makedirs(USER_CATALOGS_DIR, exist_ok=True)
-            source_name = os.path.basename(source_path) or "catalog.csv"
-            safe_name = re.sub(r"[^\w\-.]", "_", source_name)
-            destination = os.path.join(USER_CATALOGS_DIR, safe_name)
-            shutil.copy2(source_path, destination)
+            user_catalogs_real = os.path.realpath(USER_CATALOGS_DIR)
+            source_real = os.path.realpath(source_path)
+            if os.path.commonpath([user_catalogs_real, source_real]) == user_catalogs_real:
+                destination = str(source_real)
+            else:
+                source_name = os.path.basename(source_path) or "catalog.csv"
+                safe_name = re.sub(r"[^\w\-.]", "_", source_name)
+                computed_dest = os.path.join(USER_CATALOGS_DIR, safe_name)
+                destination = str(contained_path(USER_CATALOGS_DIR, computed_dest))
+                shutil.copy2(source_path, destination)
+
             self._catalog_source = "custom"
             self._custom_catalog_path = destination
             self._tag_catalog_path = destination
@@ -820,23 +1013,33 @@ class Script(scripts.Script):
                 return True, self._format_catalog_status()
             return False, load_message
         except Exception as exc:
-            return False, f"Failed to import custom catalog: {exc}"
+            return (
+                False,
+                "**Failed:** Could not import custom catalog: "
+                f"{rb_http_client.sanitize_exception_text(str(exc))}",
+            )
 
     def _format_catalog_status(self) -> str:
         if not self._use_tag_catalog:
-            return "Catalog mode: ON - Bundled default"
+            return "**OK:** Bundled default catalog"
         catalog = getattr(self, "_catalog", None)
         if not isinstance(catalog, CsvCatalog):
             selected = self._resolve_catalog_path()
+            refused = getattr(self, "_refused_catalog_name", "")
+            if not selected and refused:
+                return (
+                    f"**Failed:** Custom catalog `{refused}` is outside "
+                    "user/catalogs and was not loaded. Re-import it to use it."
+                )
             if not selected:
-                return "Catalog mode: ON - No catalog selected"
+                return "**Failed:** No catalog selected"
             source_label = "Bundled" if self._catalog_source == "bundled" else "Custom"
-            return f"Catalog mode: ON - {source_label}: {os.path.basename(selected)} (not loaded)"
+            return f"**Failed:** {source_label}: {os.path.basename(selected)} (not loaded)"
         source_label = "Bundled" if self._catalog_source == "bundled" else "Custom"
         filename = os.path.basename(catalog._path)
         tag_count = len(getattr(catalog, "_all_tags", set()))
         alias_count = len(getattr(catalog, "_aliases", {}))
-        return f"Catalog mode: ON - {source_label}: {filename}\nTags: {tag_count:,} | Aliases: {alias_count:,}"
+        return f"**OK:** {source_label}: {filename}\nTags: {tag_count:,} | Aliases: {alias_count:,}"
 
     def _active_catalog(self) -> Optional[TagCatalogProvider]:
         if not self._use_tag_catalog and self._catalog_source != "bundled":
@@ -872,18 +1075,21 @@ class Script(scripts.Script):
             path_value = self._resolve_catalog_path()
             if not path_value:
                 self._catalog = NoopCatalog()
-                return False, "Catalog load failed: bundled catalog path is not set"
+                return False, "**Failed:** Bundled catalog path is not set"
         valid, validation_msg = self._validate_csv_format(path_value)
         if not valid:
             self._catalog = NoopCatalog()
-            return False, f"Catalog load failed: {validation_msg}"
+            return (
+                False,
+                f"**Failed:** {rb_http_client.sanitize_exception_text(str(validation_msg))}",
+            )
         try:
             self._catalog = CsvCatalog(path_value)
             self._tag_catalog_status_text = self._format_catalog_status()
             return True, self._tag_catalog_status_text
         except Exception as exc:
             self._catalog = NoopCatalog()
-            return False, f"Catalog load failed: {exc}"
+            return False, f"**Failed:** {rb_http_client.sanitize_exception_text(str(exc))}"
 
     def _render_tag_diag(self, diag: Dict[str, object]) -> str:
         if not diag:
@@ -1007,9 +1213,9 @@ class Script(scripts.Script):
                 original_subjects.append(canonical)
 
             reason: Optional[str] = None
-            if drop_series and category == 3:
+            if drop_series and category == SERIES_CATEGORY:
                 reason = "series"
-            elif drop_characters and category == 4:
+            elif drop_characters and category == CHARACTER_CATEGORY:
                 reason = "character"
             elif drop_textual and catalog.is_textual(canonical):
                 reason = "textual"
@@ -1054,7 +1260,7 @@ class Script(scripts.Script):
     def _normalize_cached(self, tag: str, cache: Dict[str, str]) -> str:
         if tag in cache:
             return cache[tag]
-        normalized = self._normalize_tag(tag)
+        normalized = rb_tag_pipeline.normalize_tag(tag)
         if normalized:
             catalog = self._active_catalog()
             if catalog:
@@ -1064,9 +1270,6 @@ class Script(scripts.Script):
                     normalized = canonical.replace("_", " ")
         cache[tag] = normalized
         return normalized
-
-    def _expand_with_synonyms(self, normalized_tag: str, target_set: Set[str]) -> None:
-        rb_tag_pipeline.expand_with_synonyms(normalized_tag, target_set, self._synonym_lookup)
 
     def _build_removal_context(
         self, removal_raw: Iterable[str], favorites_raw: Iterable[str]
@@ -1091,7 +1294,7 @@ class Script(scripts.Script):
         seen: Set[str] = set()
         ordered: List[str] = []
         for seg in segments:
-            norm = self._normalize_tag(seg) or seg.casefold()
+            norm = rb_tag_pipeline.normalize_tag(seg) or seg.casefold()
             if norm in seen:
                 continue
             seen.add(norm)
@@ -1114,7 +1317,7 @@ class Script(scripts.Script):
             cleaned = (tag or "").strip()
             if not cleaned:
                 continue
-            key = self._normalize_tag(cleaned) or cleaned.casefold()
+            key = rb_tag_pipeline.normalize_tag(cleaned) or cleaned.casefold()
             if key in seen:
                 continue
             seen.add(key)
@@ -1130,7 +1333,7 @@ class Script(scripts.Script):
         imported: Optional[List[str]] = None,
         dedupe: bool = False,
     ) -> List[str]:
-        path = self._USER_LIST_PATHS[list_key]
+        path, _title = self._user_list_spec(list_key)
         existing = self._read_list_file(path)
         working = list(existing)
         combined_additions: List[str] = []
@@ -1142,7 +1345,7 @@ class Script(scripts.Script):
             working = self._merge_tag_lists(working, combined_additions)
         if removals:
             removal_keys = {
-                self._normalize_tag(tag) or tag.casefold()
+                rb_tag_pipeline.normalize_tag(tag) or tag.casefold()
                 for tag in removals
                 if isinstance(tag, str)
             }
@@ -1150,7 +1353,7 @@ class Script(scripts.Script):
                 working = [
                     tag
                     for tag in working
-                    if (self._normalize_tag(tag) or tag.casefold()) not in removal_keys
+                    if (rb_tag_pipeline.normalize_tag(tag) or tag.casefold()) not in removal_keys
                 ]
         if dedupe:
             working = self._merge_tag_lists([], working)
@@ -1158,97 +1361,146 @@ class Script(scripts.Script):
         self._load_personal_lists()
         return working
 
-    def _ui_add_personal_tags(self, tags_text: str, current_selection: Optional[object]):
-        additions = self._parse_user_tags(tags_text)
-        new_list = self._apply_list_operation("personal", additions=additions)
-        selection = additions or self._coerce_selection(current_selection)
-        selection = [tag for tag in selection if tag in new_list]
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=selection),
-            _gr_component_update(gr.Textbox, value=""),
+    def _user_list_spec(self, list_key: str) -> Tuple[str, str]:
+        """Return (file path, display title) for a user list.
+
+        Reads the module constants at call time so tests can monkeypatch them.
+        """
+        if list_key == "personal":
+            return PERSONAL_REMOVE_FILE, "Personal removal list"
+        if list_key == "favorites":
+            return FAVORITES_FILE, "Favorites list"
+        raise KeyError(f"Unknown user list: {list_key}")
+
+    def _list_ui_updates(
+        self,
+        list_key: str,
+        items: List[str],
+        status: str,
+        *,
+        clear_input: bool = False,
+        clear_file: bool = False,
+    ):
+        """Build the update tuple shared by every list handler.
+
+        Order: selector, [add-input], [import-file], display, status.
+        """
+        path, title = self._user_list_spec(list_key)
+        updates = [_gr_component_update(gr.Dropdown, choices=items, value=[])]
+        if clear_input:
+            updates.append(_gr_component_update(gr.Textbox, value=""))
+        if clear_file:
+            updates.append(_gr_component_update(gr.File, value=None))
+        updates.append(
+            _gr_component_update(
+                gr.Textbox,
+                label=f"{title} ({len(items)})",
+                value=", ".join(items),
+            )
         )
+        updates.append(_gr_component_update(gr.Markdown, value=status))
+        return tuple(updates)
+
+    def _add_to_user_list(self, list_key: str, additions: List[str]) -> Tuple[List[str], int, int]:
+        """Add tags to a list. Returns (new list, added count, already-present count)."""
+        path, _title = self._user_list_spec(list_key)
+        existing = self._read_list_file(path)
+        if not additions:
+            return existing, 0, 0
+        before = self._merge_tag_lists([], existing)
+        unique_additions = self._merge_tag_lists([], additions)
+        new_list = self._apply_list_operation(list_key, additions=additions)
+        added = len(new_list) - len(before)
+        return new_list, added, len(unique_additions) - added
+
+    def _ui_list_add(self, list_key: str, tags_text: str):
+        new_list, added, skipped = self._add_to_user_list(
+            list_key, self._parse_user_tags(tags_text)
+        )
+        status = rb_ui_helpers.format_list_status("add", added=added, skipped=skipped)
+        return self._list_ui_updates(list_key, new_list, status, clear_input=True)
+
+    def _ui_list_remove(self, list_key: str, selected: Optional[object]):
+        path, _title = self._user_list_spec(list_key)
+        removals = self._coerce_selection(selected)
+        existing = self._read_list_file(path)
+        if not removals:
+            status = rb_ui_helpers.format_list_status("remove", removed=0)
+            return self._list_ui_updates(list_key, existing, status)
+        new_list = self._apply_list_operation(list_key, removals=removals)
+        status = rb_ui_helpers.format_list_status("remove", removed=len(existing) - len(new_list))
+        return self._list_ui_updates(list_key, new_list, status)
+
+    def _ui_list_dedupe(self, list_key: str):
+        path, _title = self._user_list_spec(list_key)
+        existing = self._read_list_file(path)
+        new_list = self._apply_list_operation(list_key, dedupe=True)
+        status = rb_ui_helpers.format_list_status("dedupe", removed=len(existing) - len(new_list))
+        return self._list_ui_updates(list_key, new_list, status)
+
+    def _ui_list_import(self, list_key: str, uploaded_file: Optional[object]):
+        upload_path = rb_ui_helpers.upload_to_path(uploaded_file)
+        text, err = rb_ui_helpers.read_uploaded_text(upload_path)
+        if err or not text:
+            path, _title = self._user_list_spec(list_key)
+            current = self._read_list_file(path)
+            status = rb_ui_helpers.format_list_status("import", error=err or "File is empty")
+            return self._list_ui_updates(list_key, current, status, clear_file=True)
+        new_list, added, skipped = self._add_to_user_list(list_key, self._parse_user_tags(text))
+        status = rb_ui_helpers.format_list_status(
+            "import",
+            added=added,
+            skipped=skipped,
+            filename=os.path.basename(upload_path),
+        )
+        return self._list_ui_updates(list_key, new_list, status, clear_file=True)
+
+    def _ui_add_personal_tags(self, tags_text: str):
+        return self._ui_list_add("personal", tags_text)
 
     def _ui_remove_personal_tags(self, selected: Optional[object]):
-        removals = self._coerce_selection(selected)
-        new_list = (
-            self._apply_list_operation("personal", removals=removals)
-            if removals
-            else self._read_list_file(PERSONAL_REMOVE_FILE)
-        )
-        return _gr_component_update(gr.Dropdown, choices=new_list, value=[])
+        return self._ui_list_remove("personal", selected)
 
     def _ui_dedupe_personal_list(self):
-        new_list = self._apply_list_operation("personal", dedupe=True)
-        return _gr_component_update(gr.Dropdown, choices=new_list, value=new_list)
+        return self._ui_list_dedupe("personal")
 
-    def _ui_import_personal_list(self, uploaded_file: Optional[dict]):
-        if not uploaded_file:
-            current = self._read_list_file(PERSONAL_REMOVE_FILE)
-            return _gr_component_update(
-                gr.Dropdown, choices=current, value=current
-            ), _gr_component_update(gr.File, value=None)
-        data = uploaded_file.get("data") if isinstance(uploaded_file, dict) else None
-        text = ""
-        if isinstance(data, bytes):
-            try:
-                text = data.decode("utf-8", errors="ignore")
-            except Exception as exc:
-                print(f"[R Lists] Failed to decode personal import: {exc}")
-        additions = self._parse_user_tags(text)
-        new_list = self._apply_list_operation("personal", additions=additions)
-        selection = [tag for tag in additions if tag in new_list]
-        return _gr_component_update(
-            gr.Dropdown, choices=new_list, value=selection
-        ), _gr_component_update(gr.File, value=None)
+    def _ui_import_personal_list(self, uploaded_file: Optional[object]):
+        return self._ui_list_import("personal", uploaded_file)
 
-    def _ui_export_personal_list(self):
-        return PERSONAL_REMOVE_FILE
-
-    def _ui_add_favorite_tags(self, tags_text: str, current_selection: Optional[object]):
-        additions = self._parse_user_tags(tags_text)
-        new_list = self._apply_list_operation("favorites", additions=additions)
-        selection = additions or self._coerce_selection(current_selection)
-        selection = [tag for tag in selection if tag in new_list]
-        return (
-            _gr_component_update(gr.Dropdown, choices=new_list, value=selection),
-            _gr_component_update(gr.Textbox, value=""),
-        )
+    def _ui_add_favorite_tags(self, tags_text: str):
+        return self._ui_list_add("favorites", tags_text)
 
     def _ui_remove_favorite_tags(self, selected: Optional[object]):
-        removals = self._coerce_selection(selected)
-        new_list = (
-            self._apply_list_operation("favorites", removals=removals)
-            if removals
-            else self._read_list_file(FAVORITES_FILE)
-        )
-        return _gr_component_update(gr.Dropdown, choices=new_list, value=[])
+        return self._ui_list_remove("favorites", selected)
 
     def _ui_dedupe_favorite_list(self):
-        new_list = self._apply_list_operation("favorites", dedupe=True)
-        return _gr_component_update(gr.Dropdown, choices=new_list, value=new_list)
+        return self._ui_list_dedupe("favorites")
 
-    def _ui_import_favorite_list(self, uploaded_file: Optional[dict]):
-        if not uploaded_file:
-            current = self._read_list_file(FAVORITES_FILE)
-            return _gr_component_update(
-                gr.Dropdown, choices=current, value=current
-            ), _gr_component_update(gr.File, value=None)
-        data = uploaded_file.get("data") if isinstance(uploaded_file, dict) else None
-        text = ""
-        if isinstance(data, bytes):
-            try:
-                text = data.decode("utf-8", errors="ignore")
-            except Exception as exc:
-                print(f"[R Lists] Failed to decode favorites import: {exc}")
-        additions = self._parse_user_tags(text)
-        new_list = self._apply_list_operation("favorites", additions=additions)
-        selection = [tag for tag in additions if tag in new_list]
-        return _gr_component_update(
-            gr.Dropdown, choices=new_list, value=selection
-        ), _gr_component_update(gr.File, value=None)
+    def _ui_import_favorite_list(self, uploaded_file: Optional[object]):
+        return self._ui_list_import("favorites", uploaded_file)
+
+    def _ui_export_list(self, list_key: str):
+        """Write the list as it is on disk now and show it in the export box.
+
+        Each export gets its own folder, so Gradio serves a fresh URL every time while
+        the file keeps the list's real name.
+        """
+        path, _title = self._user_list_spec(list_key)
+        tags = self._read_list_file(path)
+        export_root = _export_root()
+        _prune_old_exports(export_root)
+        export_dir = tempfile.mkdtemp(prefix=f"{list_key}_", dir=export_root)
+        export_path = os.path.join(export_dir, os.path.basename(path))
+        with open(export_path, "w", encoding="utf-8", newline="\n") as f:
+            for tag in tags:
+                f.write(f"{tag}\n")
+        return _gr_component_update(gr.File, value=export_path, visible=True)
+
+    def _ui_export_personal_list(self):
+        return self._ui_export_list("personal")
 
     def _ui_export_favorite_list(self):
-        return FAVORITES_FILE
+        return self._ui_export_list("favorites")
 
     def _get_saved_gelbooru_credentials(self) -> Optional[Dict[str, str]]:
         creds = self._gelbooru_saved_credentials
@@ -1300,7 +1552,7 @@ class Script(scripts.Script):
         return None
 
     def _gelbooru_saved_message(self) -> str:
-        return f"? Using saved Gelbooru credentials from `{GELBOORU_CREDENTIALS_FILE}`."
+        return "Using saved Gelbooru credentials."
 
     def _ui_save_gelbooru_credentials(self, api_key: Optional[str], user_id: Optional[str]):
         api_key = _sanitize_gelbooru_credential(api_key)
@@ -1371,16 +1623,16 @@ class Script(scripts.Script):
                 _gr_update(visible=True),
                 _gr_component_update(gr.Markdown, value="", visible=False),
                 _gr_component_update(gr.Button, visible=False),
-                _gr_component_update(gr.Textbox, value=""),
-                _gr_component_update(gr.Textbox, value=""),
+                _gr_update(),
+                _gr_update(),
             )
         # Hide for non-Gelbooru selections
         return (
             _gr_update(visible=False),
             _gr_component_update(gr.Markdown, value="", visible=False),
             _gr_component_update(gr.Button, visible=False),
-            _gr_component_update(gr.Textbox, value=""),
-            _gr_component_update(gr.Textbox, value=""),
+            _gr_update(),
+            _gr_update(),
         )
 
     def _update_gelbooru_compat_visibility(self, booru_name: Optional[str]):
@@ -1399,6 +1651,14 @@ class Script(scripts.Script):
         self._gelbooru_compat_base_url = sanitized
         return _gr_component_update(gr.Textbox, value=self._gelbooru_compat_base_url)
 
+    def _ui_update_post_id_dependencies(self, post_id_val: Optional[str]):
+        is_empty = not bool((post_id_val or "").strip())
+        return (
+            _gr_component_update(gr.Textbox, interactive=is_empty),
+            _gr_component_update(gr.Slider, interactive=is_empty),
+            _gr_component_update(gr.Radio, interactive=is_empty),
+        )
+
     def _extract_color_tags(self, text: str) -> tuple[set[str], set[str]]:
         hair_tags: set[str] = set()
         eye_tags: set[str] = set()
@@ -1407,9 +1667,9 @@ class Script(scripts.Script):
         catalog = self._active_catalog()
         tokens = [token.strip() for token in re.split(r"[\s,]+", text) if token.strip()]
         for token in tokens:
-            normalized = (self._normalize_tag(token) or "").strip().lower()
+            normalized = (rb_tag_pipeline.normalize_tag(token) or "").strip().lower()
             if not normalized:
-                normalized = self._canonicalize_raw_tag(token)
+                normalized = rb_tag_pipeline.canonicalize_raw_tag(token)
             if not normalized:
                 continue
             if catalog:
@@ -1426,25 +1686,12 @@ class Script(scripts.Script):
                 eye_tags.add(normalized)
         return hair_tags, eye_tags
 
-    def _extract_subject_tags(self, text: str) -> set:
-        return rb_tag_pipeline.extract_subject_tags(text)
-
-    def _normalize_post_tags(
-        self, post: Optional[Dict[str, object]], cache: Dict[str, str]
-    ) -> Tuple[Set[str], Dict[str, List[str]]]:
-        catalog = self._active_catalog()
-        return rb_tag_pipeline.normalize_post_tags(
-            post,
-            cache,
-            catalog.resolve_alias if catalog else None,
-        )
-
     def _post_rejected_by_filter(
         self,
         post: Optional[Dict[str, object]],
         *,
         filter_ctx: Optional[Dict[str, object]],
-        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool],
+        toggles: rb_tag_pipeline.FilterToggles,
         base_colors: Tuple[Set[str], Set[str]],
         allowed_subjects: Set[str],
         cache: Dict[str, str],
@@ -1476,7 +1723,7 @@ class Script(scripts.Script):
         num_images_needed: int,
         max_pages: int,
         filter_ctx: Optional[Dict[str, object]],
-        toggles: Tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool],
+        toggles: rb_tag_pipeline.FilterToggles,
         base_colors: Tuple[Set[str], Set[str]],
         allowed_subjects: Set[str],
     ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], bool, bool]:
@@ -1675,29 +1922,6 @@ class Script(scripts.Script):
         except Exception as exc:
             print(f"[R Log] Failed to log prompt sources: {exc}")
 
-    def _ensure_pil_images_in_processed(self, processed_obj):
-        try:
-            if hasattr(processed_obj, "images") and isinstance(processed_obj.images, list):
-                for i, im in enumerate(list(processed_obj.images)):
-                    pil_im = self._ensure_pil_image(im)
-                    if pil_im is not None:
-                        processed_obj.images[i] = pil_im
-            # Ensure single image too
-            if hasattr(processed_obj, "image"):
-                processed_obj.image = self._ensure_pil_image(getattr(processed_obj, "image"))
-        except Exception:
-            pass
-
-    def _ensure_pil_in_processing(self, p):
-        try:
-            if hasattr(p, "init_images") and isinstance(p.init_images, list) and p.init_images:
-                for i, im in enumerate(list(p.init_images)):
-                    pil_im = self._ensure_pil_image(im)
-                    if pil_im is not None:
-                        p.init_images[i] = pil_im
-        except Exception:
-            pass
-
     def _load_cn_external_code(self):
         return rb_controlnet_integration.load_external_code(EXTENSION_ROOT)
 
@@ -1740,14 +1964,11 @@ class Script(scripts.Script):
         )
 
     def get_files(self, path):
-        files = []
         try:
-            for file in os.listdir(path):
-                if file.endswith(".txt"):
-                    files.append(file)
+            return [f for f in os.listdir(path) if f.endswith(".txt")]
         except FileNotFoundError:
             print(f"[R] Warn: Dir not found: {path}")
-        return files
+            return []
 
     def title(self):
         return "RanbooruX"
@@ -1789,23 +2010,28 @@ class Script(scripts.Script):
         with gr.Group(
             visible=bool(self._use_tag_catalog and self._catalog_source == "custom")
         ) as custom_catalog_group:
-            catalog_upload = gr.File(label="Upload CSV", file_types=[".csv"], file_count="single")
+            catalog_upload = gr.File(
+                label="Upload CSV, then click Import",
+                file_types=[".csv"],
+                file_count="single",
+            )
             catalog_path = gr.Textbox(
-                label="Custom CSV Path",
+                label="Custom catalog path",
                 value=self._custom_catalog_path,
-                placeholder="/path/to/custom_catalog.csv",
+                placeholder="user/catalogs/my_tags.csv",
+                info="Selects a CSV already inside user/catalogs/ or data/catalogs/. Other files must be uploaded.",
             )
             with gr.Row():
                 catalog_import_btn = gr.Button("Import Custom Catalog")
                 catalog_validate_btn = gr.Button("Validate CSV")
 
         reload_catalog = gr.Button("Reload Catalog", visible=bool(self._use_tag_catalog))
-        catalog_status = gr.Markdown(self._tag_catalog_status_text or "Catalog mode: OFF")
+        catalog_status = gr.Markdown(
+            self._tag_catalog_status_text or "**OK:** Bundled default catalog"
+        )
 
         self._catalog_status_md = catalog_status
         self._tag_diag_md = None
-
-        # --- inner event handlers ---------------------------------------------------
 
         def _ui_toggle_catalog(enabled: bool):
             self._use_tag_catalog = bool(enabled)
@@ -1875,7 +2101,7 @@ class Script(scripts.Script):
                         self._tag_catalog_status_text = self._format_catalog_status()
                 else:
                     self._catalog = NoopCatalog()
-                    self._tag_catalog_status_text = "Catalog mode: ON - No path set"
+                    self._tag_catalog_status_text = "**Failed:** No path set"
             else:
                 self._tag_catalog_status_text = self._format_catalog_status()
             self._save_tag_catalog_preferences()
@@ -1909,7 +2135,7 @@ class Script(scripts.Script):
                 self._custom_catalog_path = guessed_path
                 self._tag_catalog_path = guessed_path
                 self._save_tag_catalog_preferences()
-                msg = f"Selected custom catalog file: {os.path.basename(guessed_path)}"
+                msg = f"**OK:** Selected custom catalog file: {os.path.basename(guessed_path)}"
             else:
                 msg = self._tag_catalog_status_text
             return (
@@ -1922,14 +2148,25 @@ class Script(scripts.Script):
             )
 
         def _ui_validate_catalog(path_value, uploaded):
-            candidate = (path_value or "").strip() or self._catalog_path_from_upload(uploaded)
+            candidate, from_hint = self._resolve_catalog_source(uploaded, path_value)
+            if from_hint and not candidate:
+                basename = os.path.basename((path_value or "").strip()) or "file"
+                status = f"**Failed:** Refused path outside allowed roots: {basename}"
+                return _gr_component_update(gr.Markdown, value=status)
+            if not candidate:
+                return _gr_component_update(
+                    gr.Markdown, value="**Failed:** No catalog file provided"
+                )
             ok, message = self._validate_csv_format(candidate)
-            status = f"Validation passed: {message}" if ok else f"Validation failed: {message}"
+            sanitized_msg = rb_http_client.sanitize_exception_text(message)
+            status = f"**OK:** {sanitized_msg}" if ok else f"**Failed:** {sanitized_msg}"
             return _gr_component_update(gr.Markdown, value=status)
 
         def _ui_import_custom_catalog(uploaded, path_value):
             ok, message = self._import_custom_catalog(uploaded, path_hint=path_value)
             if not ok:
+                err_msg = rb_http_client.sanitize_exception_text(message)
+                status = err_msg if err_msg.startswith("**Failed:**") else f"**Failed:** {err_msg}"
                 return (
                     _gr_component_update(
                         gr.Radio,
@@ -1944,7 +2181,7 @@ class Script(scripts.Script):
                         value=self._custom_catalog_path,
                         visible=bool(self._use_tag_catalog and self._catalog_source == "custom"),
                     ),
-                    _gr_component_update(gr.Markdown, value=message),
+                    _gr_component_update(gr.Markdown, value=status),
                 )
             self._tag_catalog_status_text = self._format_catalog_status()
             self._update_tag_diag()
@@ -1954,8 +2191,6 @@ class Script(scripts.Script):
                 _gr_component_update(gr.Textbox, value=self._custom_catalog_path, visible=True),
                 _gr_component_update(gr.Markdown, value=self._tag_catalog_status_text),
             )
-
-        # --- event wiring -----------------------------------------------------------
 
         use_tag_catalog.change(
             fn=_ui_toggle_catalog,
@@ -1975,7 +2210,13 @@ class Script(scripts.Script):
             outputs=[custom_catalog_group, catalog_path, catalog_status],
             queue=False,
         )
-        catalog_path.change(
+        catalog_path.blur(
+            fn=_ui_set_catalog_path,
+            inputs=[catalog_path],
+            outputs=[catalog_path, catalog_status],
+            queue=False,
+        )
+        catalog_path.submit(
             fn=_ui_set_catalog_path,
             inputs=[catalog_path],
             outputs=[catalog_path, catalog_status],
@@ -2005,8 +2246,6 @@ class Script(scripts.Script):
             outputs=[catalog_status],
             queue=False,
         )
-
-        # --- Platform Diagnostics ---------------------------------------------------
 
         diagnostics_visible_state = gr.State(False)
         diagnostics_toggle_btn = gr.Button("Show Platform Diagnostics")
@@ -2086,9 +2325,13 @@ class Script(scripts.Script):
                 )
                 lora_detect_status = gr.Markdown(initial_lora_status)
 
-        # --- LoRA event wiring ----------------------------------------------------
-
-        lora_folder.change(
+        lora_folder.blur(
+            fn=self._ui_refresh_loranado_controls,
+            inputs=[lora_folder, lora_auto_detect_pony, lora_detected_loras, lora_blacklist],
+            outputs=[lora_detected_loras, lora_blacklist, lora_detect_status],
+            queue=False,
+        )
+        lora_folder.submit(
             fn=self._ui_refresh_loranado_controls,
             inputs=[lora_folder, lora_auto_detect_pony, lora_detected_loras, lora_blacklist],
             outputs=[lora_detected_loras, lora_blacklist, lora_detect_status],
@@ -2140,11 +2383,12 @@ class Script(scripts.Script):
 
         with gr.Row():
             preset_strip_series = gr.Button("Strip Series/Character")
-            preset_remove_text = gr.Button("Remove Text-like Tags")
             preset_preserve_colors = gr.Button("Preserve Base Colors")
             preset_quick_strip = gr.Button("Quick Strip")
+            preset_reset_defaults = gr.Button("Reset to defaults")
+        preset_status = gr.Markdown("", visible=True)
         with gr.Group():
-            gr.Markdown("**Text & Metadata**")
+            gr.Markdown("**Metadata**")
             remove_bad_tags = gr.Checkbox(
                 label="Remove common 'bad' tags",
                 value=True,
@@ -2155,13 +2399,13 @@ class Script(scripts.Script):
                 value=True,
                 info="Strip speech bubbles, watermark text, and similar metadata from fetched prompts.",
             )
-        with gr.Group():
-            gr.Markdown("**Characters & Series**")
             remove_artist_tags = gr.Checkbox(
                 label="Remove artist tags",
                 value=False,
                 info="Drop artist credits drawn from the source post.",
             )
+        with gr.Group():
+            gr.Markdown("**Content**")
             remove_character_tags = gr.Checkbox(
                 label="Remove character tags",
                 value=False,
@@ -2172,15 +2416,11 @@ class Script(scripts.Script):
                 value=False,
                 info="Ignore franchise/game/anime tags to keep prompts generic.",
             )
-        with gr.Group():
-            gr.Markdown("**Clothing & Accessories**")
             remove_clothing_tags = gr.Checkbox(
                 label="Remove clothing tags",
                 value=False,
                 info="Omit apparel/accessory tags introduced by the booru.",
             )
-        with gr.Group():
-            gr.Markdown("**Furry & Headwear**")
             remove_furry_tags = gr.Checkbox(
                 label="Filter furry/pokemon tags",
                 value=False,
@@ -2191,72 +2431,65 @@ class Script(scripts.Script):
                 value=False,
                 info="Strip hats, halos, and similar head accessories.",
             )
-        with gr.Group():
-            gr.Markdown("**Girl Suffix**")
             remove_girl_suffix_tags = gr.Checkbox(
                 label="Filter _girl suffix tags",
                 value=False,
                 info="Remove demon_girl, cat_girl, angel_girl and similar *_girl tags (keeps 1girl, 2girls, etc.).",
             )
         with gr.Group():
-
-            gr.Markdown("**Colors & Traits**")
-            preserve_hair_eye_colors = gr.Checkbox(
-                label="Preserve base hair & eye colors",
-                value=False,
-                info="Keep your prompt's hair/eye colors while removing conflicting imports.",
-            )
-        with gr.Group():
-            gr.Markdown("**Subject Constraints**")
+            gr.Markdown("**Subject & Colors**")
             restrict_subject_tags = gr.Checkbox(
                 label="Keep only subject counts",
                 value=False,
                 info="Maintain your subject count (e.g., solo/1girl) by removing mismatched tags.",
             )
+            preserve_hair_eye_colors = gr.Checkbox(
+                label="Preserve base hair & eye colors",
+                value=False,
+                info="Keep your prompt's hair/eye colors while removing conflicting imports.",
+            )
 
-        # --- preset wiring ---------------------------------------------------------
+        filter_checkboxes = [
+            remove_bad_tags,
+            remove_text_tags,
+            remove_artist_tags,
+            remove_character_tags,
+            remove_series_tags,
+            remove_clothing_tags,
+            remove_furry_tags,
+            remove_headwear_tags,
+            remove_girl_suffix_tags,
+            preserve_hair_eye_colors,
+            restrict_subject_tags,
+        ]
+
+        def _apply_preset(name: str):
+            values, status_text = rb_ui_helpers.get_filter_preset_values(name)
+            updates = tuple(_gr_component_update(gr.Checkbox, value=v) for v in values)
+            return (*updates, _gr_component_update(gr.Markdown, value=status_text))
 
         preset_strip_series.click(
-            fn=lambda: (
-                _gr_component_update(gr.Checkbox, value=True),
-                _gr_component_update(gr.Checkbox, value=True),
-                _gr_component_update(gr.Checkbox, value=True),
-            ),
+            fn=lambda: _apply_preset("Strip Series/Character"),
             inputs=[],
-            outputs=[remove_series_tags, remove_character_tags, remove_artist_tags],
-            queue=False,
-        )
-        preset_remove_text.click(
-            fn=lambda: (
-                _gr_component_update(gr.Checkbox, value=True),
-                _gr_component_update(gr.Checkbox, value=True),
-            ),
-            inputs=[],
-            outputs=[remove_text_tags, remove_bad_tags],
+            outputs=[*filter_checkboxes, preset_status],
             queue=False,
         )
         preset_preserve_colors.click(
-            fn=lambda: _gr_component_update(gr.Checkbox, value=True),
+            fn=lambda: _apply_preset("Preserve Base Colors"),
             inputs=[],
-            outputs=[preserve_hair_eye_colors],
+            outputs=[*filter_checkboxes, preset_status],
             queue=False,
         )
         preset_quick_strip.click(
-            fn=lambda: tuple(_gr_component_update(gr.Checkbox, value=True) for _ in range(11)),
+            fn=lambda: _apply_preset("Quick Strip"),
             inputs=[],
-            outputs=[
-                remove_bad_tags,
-                remove_text_tags,
-                remove_artist_tags,
-                remove_character_tags,
-                remove_series_tags,
-                remove_clothing_tags,
-                remove_furry_tags,
-                remove_headwear_tags,
-                remove_girl_suffix_tags,
-                preserve_hair_eye_colors,
-                restrict_subject_tags,
-            ],
+            outputs=[*filter_checkboxes, preset_status],
+            queue=False,
+        )
+        preset_reset_defaults.click(
+            fn=lambda: _apply_preset("Reset to defaults"),
+            inputs=[],
+            outputs=[*filter_checkboxes, preset_status],
             queue=False,
         )
 
@@ -2289,7 +2522,7 @@ class Script(scripts.Script):
                 value="",
                 info=f"in '{USER_SEARCH_DIR}'",
             )
-            search_refresh_btn = gr.Button("Refresh")
+            search_refresh_btn = gr.Button("Refresh search files")
             use_remove_txt = gr.Checkbox(label="Add tags from Remove File", value=False)
             choose_remove_txt = gr.Dropdown(
                 self.get_files(USER_REMOVE_DIR),
@@ -2297,7 +2530,7 @@ class Script(scripts.Script):
                 value="",
                 info=f"in '{USER_REMOVE_DIR}'",
             )
-            remove_refresh_btn = gr.Button("Refresh")
+            remove_refresh_btn = gr.Button("Refresh remove files")
 
         search_refresh_btn.click(fn=self.refresh_ser, inputs=[], outputs=[choose_search_txt])
         remove_refresh_btn.click(fn=self.refresh_rem, inputs=[], outputs=[choose_remove_txt])
@@ -2313,6 +2546,7 @@ class Script(scripts.Script):
 
     def ui(self, is_img2img):
         with InputAccordion(False, label="RanbooruX", elem_id=self.elem_id("ra_enable")) as enabled:
+            gr.Markdown("**Source**")
             booru_list = [
                 "danbooru",
                 "gelbooru",
@@ -2344,23 +2578,62 @@ class Script(scripts.Script):
                     placeholder="https://realbooru.com",
                     value=self._gelbooru_compat_base_url,
                 )
-            max_pages = gr.Slider(
-                label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1
+            fringe_benefits = gr.Checkbox(
+                label="Gelbooru: Fringe Benefits",
+                value=True,
+                visible=False,
+                info="Currently has no effect. Kept so saved settings and script arguments stay compatible.",
             )
-            gr.Markdown("""## Post""")
-            post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
-            gr.Markdown("""## Tags""")
-            tags = gr.Textbox(lines=1, label="Tags to Search (Pre)")
-            remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
             mature_rating = gr.Radio(
                 list(RATINGS.get("gelbooru", RATING_TYPES["none"])),
                 label="Mature Rating",
                 value="All",
             )
-            with gr.Accordion("Removal Filters", open=False):
-                with gr.Group():
-                    use_tag_catalog, catalog_path = self._build_catalog_ui_section()
 
+            gr.Markdown("**Search**")
+            tags = gr.Textbox(lines=1, label="Search tags")
+            post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
+            max_pages = gr.Slider(
+                label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1
+            )
+            sorting_order = gr.Radio(
+                ["Random", "Score Descending", "Score Ascending"],
+                label="Sort Order (tag search)",
+                value="Random",
+            )
+
+            gr.Markdown("**Prompt**")
+            shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
+            change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
+            limit_tags = gr.Slider(
+                value=1.0,
+                label="Limit tags by %",
+                minimum=0.05,
+                maximum=1.0,
+                step=0.05,
+                info="Reduces tags by percentage first before Max tags is applied.",
+            )
+            max_tags = gr.Slider(
+                value=0,
+                label="Max tags (0=disabled)",
+                minimum=0,
+                maximum=300,
+                step=1,
+                info="Hard cap on total tags; applied after Limit %.",
+            )
+            change_background = gr.Radio(
+                ["Don't Change", "Add Detail", "Force Simple", "Force Transparent/White"],
+                label="Change Background",
+                value="Don't Change",
+            )
+            change_color = gr.Radio(
+                ["Don't Change", "Force Color", "Force Monochrome"],
+                label="Change Color",
+                value="Don't Change",
+            )
+            same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
+
+            with gr.Accordion("Tag Filtering", open=False):
                 (
                     remove_bad_tags,
                     remove_text_tags,
@@ -2374,90 +2647,184 @@ class Script(scripts.Script):
                     preserve_hair_eye_colors,
                     restrict_subject_tags,
                 ) = self._build_filter_ui_section()
-            personal_choices = self._read_list_file(PERSONAL_REMOVE_FILE)
-            favorite_choices = self._read_list_file(FAVORITES_FILE)
-            with gr.Accordion("Personal Lists", open=False):
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("**Personal Removal List**")
-                        personal_remove_dropdown = gr.Dropdown(
-                            choices=personal_choices,
-                            value=personal_choices,
-                            multiselect=True,
-                            label="Removal Tags",
-                            allow_custom_value=False,
-                        )
-                        personal_remove_input = gr.Textbox(
-                            label="Add tags", placeholder="comma or newline separated"
-                        )
-                        with gr.Row():
-                            personal_add_btn = gr.Button("Add", variant="primary")
-                            personal_remove_btn = gr.Button("Remove Selected")
-                            personal_dedupe_btn = gr.Button("De-duplicate")
-                        with gr.Row():
-                            personal_import_file = gr.File(
-                                label="Import CSV/TXT", file_types=[".txt", ".csv"], visible=True
+                remove_tags = gr.Textbox(lines=1, label="Always remove tags")
+                if not os.path.exists(PERSONAL_REMOVE_FILE):
+                    self._write_list_file(PERSONAL_REMOVE_FILE, [])
+                if not os.path.exists(FAVORITES_FILE):
+                    self._write_list_file(FAVORITES_FILE, [])
+                personal_choices = self._read_list_file(PERSONAL_REMOVE_FILE)
+                favorite_choices = self._read_list_file(FAVORITES_FILE)
+                with gr.Accordion("Personal Lists", open=False):
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown("**Personal Removal List**")
+                            personal_remove_dropdown = gr.Dropdown(
+                                choices=personal_choices,
+                                value=[],
+                                multiselect=True,
+                                label="Select tags to remove",
+                                allow_custom_value=False,
                             )
-                            personal_export_btn = gr.DownloadButton("Export")
-                    with gr.Column():
-                        gr.Markdown("**Favorites List**")
-                        favorites_dropdown = gr.Dropdown(
-                            choices=favorite_choices,
-                            value=favorite_choices,
-                            multiselect=True,
-                            label="Favorite Tags",
-                            allow_custom_value=False,
-                        )
-                        favorites_input = gr.Textbox(
-                            label="Add favorites", placeholder="comma or newline separated"
-                        )
-                        with gr.Row():
-                            favorites_add_btn = gr.Button("Add", variant="primary")
-                            favorites_remove_btn = gr.Button("Remove Selected")
-                            favorites_dedupe_btn = gr.Button("De-duplicate")
-                        with gr.Row():
-                            favorites_import_file = gr.File(
-                                label="Import CSV/TXT", file_types=[".txt", ".csv"], visible=True
+                            personal_remove_display = gr.Textbox(
+                                label=f"Personal removal list ({len(personal_choices)})",
+                                value=", ".join(personal_choices),
+                                interactive=False,
+                                lines=3,
                             )
-                            favorites_export_btn = gr.DownloadButton("Export")
-            shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
-            change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
-            anima_auto_detect = gr.Checkbox(
-                label="Auto-detect Anima model",
-                value=True,
-                info="Automatically enable space-separated tags when an Anima model is loaded",
-            )
-            anima_tune_img2img = gr.Checkbox(
-                label="Auto-tune Img2Img parameters for Anima",
-                value=True,
-                info="Automatically optimize steps, CFG scale, and denoising for Anima flow-matching",
-            )
-            same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
-            fringe_benefits = gr.Checkbox(
-                label="Gelbooru: Fringe Benefits", value=True, visible=False
-            )
-            limit_tags = gr.Slider(
-                value=1.0, label="Limit tags by %", minimum=0.05, maximum=1.0, step=0.05
-            )
-            max_tags = gr.Slider(
-                value=0, label="Max tags (0=disabled)", minimum=0, maximum=300, step=1
-            )
-            change_background = gr.Radio(
-                ["Don't Change", "Add Detail", "Force Simple", "Force Transparent/White"],
-                label="Change Background",
-                value="Don't Change",
-            )
-            change_color = gr.Radio(
-                ["Don't Change", "Force Color", "Force Monochrome"],
-                label="Change Color",
-                value="Don't Change",
-            )
-            sorting_order = gr.Radio(
-                ["Random", "Score Descending", "Score Ascending"],
-                label="Sort Order (tag search)",
-                value="Random",
-            )
-            booru.change(get_available_ratings, booru, mature_rating)
+                            # Forge keys ui-config.json by label and would restore a stale copy
+                            # of the list over the real contents on the next launch.
+                            personal_remove_display.do_not_save_to_config = True
+                            personal_remove_input = gr.Textbox(
+                                label="Add tags", placeholder="comma or newline separated"
+                            )
+                            with gr.Row():
+                                personal_add_btn = gr.Button(
+                                    "Add to removal list", variant="primary"
+                                )
+                                personal_remove_btn = gr.Button("Remove selected (removal)")
+                                personal_dedupe_btn = gr.Button("De-duplicate removal list")
+                            with gr.Row():
+                                personal_import_file = gr.File(
+                                    label="Import removal list (CSV/TXT)",
+                                    file_types=[".txt", ".csv"],
+                                    visible=True,
+                                )
+                                personal_export_btn = gr.Button("Export removal list")
+                                personal_export_file = gr.File(
+                                    label="Exported removal list",
+                                    interactive=False,
+                                    visible=False,
+                                )
+                            personal_status = gr.Markdown("", visible=True)
+                        with gr.Column():
+                            gr.Markdown("**Favorites List**")
+                            favorites_dropdown = gr.Dropdown(
+                                choices=favorite_choices,
+                                value=[],
+                                multiselect=True,
+                                label="Select favorites to remove",
+                                allow_custom_value=False,
+                            )
+                            favorites_display = gr.Textbox(
+                                label=f"Favorites list ({len(favorite_choices)})",
+                                value=", ".join(favorite_choices),
+                                interactive=False,
+                                lines=3,
+                            )
+                            favorites_display.do_not_save_to_config = True
+                            favorites_input = gr.Textbox(
+                                label="Add favorites", placeholder="comma or newline separated"
+                            )
+                            with gr.Row():
+                                favorites_add_btn = gr.Button("Add to favorites", variant="primary")
+                                favorites_remove_btn = gr.Button("Remove selected (favorites)")
+                                favorites_dedupe_btn = gr.Button("De-duplicate favorites")
+                            with gr.Row():
+                                favorites_import_file = gr.File(
+                                    label="Import favorites (CSV/TXT)",
+                                    file_types=[".txt", ".csv"],
+                                    visible=True,
+                                )
+                                favorites_export_btn = gr.Button("Export favorites")
+                                favorites_export_file = gr.File(
+                                    label="Exported favorites",
+                                    interactive=False,
+                                    visible=False,
+                                )
+                            favorites_status = gr.Markdown("", visible=True)
+                self._ui_personal_dropdown = personal_remove_dropdown
+                self._ui_favorites_dropdown = favorites_dropdown
+
+                (
+                    use_search_txt,
+                    use_remove_txt,
+                    choose_search_txt,
+                    choose_remove_txt,
+                    search_refresh_btn,
+                    remove_refresh_btn,
+                ) = self._build_personal_lists_ui_section()
+
+                with gr.Accordion("Tag Catalog", open=False):
+                    use_tag_catalog, catalog_path = self._build_catalog_ui_section()
+
+            with gr.Accordion("Img2Img / ControlNet", open=False):
+                use_img2img = gr.Checkbox(label="Use Image for Img2Img", value=False)
+                use_ip = gr.Checkbox(label="Use Image for ControlNet (Unit 0)", value=False)
+                denoising = gr.Slider(
+                    value=0.75,
+                    label="Img2Img denoising",
+                    minimum=0.0,
+                    maximum=1.0,
+                    step=0.05,
+                    info="How far Img2Img may move away from the booru image.",
+                )
+                controlnet_weight = gr.Slider(
+                    value=1.0,
+                    label="ControlNet weight",
+                    minimum=0.0,
+                    maximum=2.0,
+                    step=0.05,
+                    info="Strength of ControlNet Unit 0. Replaces the weight set in the ControlNet panel.",
+                )
+                use_last_img = gr.Checkbox(label="Use same image for batch", value=False)
+                crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
+                enable_adetailer_support = gr.Checkbox(
+                    label="Enable RanbooruX ADetailer support",
+                    value=False,
+                    info="Run RanbooruX's manual ADetailer integration after img2img when enabled.",
+                )
+
+            with gr.Accordion("Extra Prompt Modes", open=False):
+                with gr.Box():
+                    mix_prompt = gr.Checkbox(label="Mix tags from multiple posts", value=False)
+                    mix_amount = gr.Slider(
+                        value=2,
+                        label="Posts to mix",
+                        minimum=2,
+                        maximum=10,
+                        step=1,
+                        info="Only used when 'Mix tags from multiple posts' is on.",
+                    )
+                with gr.Box():
+                    chaos_mode = gr.Radio(
+                        ["None", "Shuffle All", "Shuffle Negative"],
+                        label="Shuffle tags (chaos)",
+                        value="None",
+                    )
+                    chaos_amount = gr.Slider(
+                        value=0.5,
+                        label="Chaos Amount %",
+                        minimum=0.1,
+                        maximum=1.0,
+                        step=0.05,
+                        info="Only used when 'Shuffle tags (chaos)' is not None.",
+                    )
+
+            with gr.Accordion("Run Options", open=False):
+                use_same_seed = gr.Checkbox(label="Use same seed for batch", value=False)
+                reuse_cached_posts = gr.Checkbox(
+                    label="Reuse cached booru posts",
+                    value=False,
+                    info="Leave disabled to fetch fresh images every generation. Enable when you want RanbooruX to reuse the previously cached posts.",
+                )
+                use_cache = gr.Checkbox(label="Cache Booru API requests", value=True)
+                log_prompt_sources = gr.Checkbox(
+                    label="Log image sources/prompts to txt",
+                    value=False,
+                    info="When enabled, RanbooruX appends a log entry mapping seeds and prompts to the source posts.",
+                )
+                anima_auto_detect = gr.Checkbox(
+                    label="Auto-detect Anima model",
+                    value=True,
+                    info="Automatically enable space-separated tags when an Anima model is loaded",
+                )
+                anima_tune_img2img = gr.Checkbox(
+                    label="Auto-tune Img2Img parameters for Anima",
+                    value=True,
+                    info="Automatically optimize steps, CFG scale, and denoising for Anima flow-matching",
+                )
+
+            booru.change(get_available_ratings, [booru, mature_rating], mature_rating)
             booru.change(show_fringe_benefits, booru, fringe_benefits)
             booru.change(
                 self._update_gelbooru_ui_visibility,
@@ -2477,7 +2844,13 @@ class Script(scripts.Script):
                 outputs=[gelbooru_compat_group, gelbooru_compat_base_url],
                 queue=False,
             )
-            gelbooru_compat_base_url.change(
+            gelbooru_compat_base_url.blur(
+                fn=self._ui_set_gelbooru_compat_base_url,
+                inputs=[gelbooru_compat_base_url],
+                outputs=[gelbooru_compat_base_url],
+                queue=False,
+            )
+            gelbooru_compat_base_url.submit(
                 fn=self._ui_set_gelbooru_compat_base_url,
                 inputs=[gelbooru_compat_base_url],
                 outputs=[gelbooru_compat_base_url],
@@ -2507,64 +2880,23 @@ class Script(scripts.Script):
                 ],
                 queue=False,
             )
-
-            gr.Markdown("""\n---\n""")
-            with gr.Group():
-                with gr.Accordion("Img2Img / ControlNet", open=False):
-                    use_img2img = gr.Checkbox(label="Use Image for Img2Img", value=False)
-                    use_ip = gr.Checkbox(label="Use Image for ControlNet (Unit 0)", value=False)
-                    denoising = gr.Slider(
-                        value=0.75,
-                        label="Img2Img Denoising / CN Weight",
-                        minimum=0.0,
-                        maximum=1.0,
-                        step=0.05,
-                    )
-                    use_last_img = gr.Checkbox(label="Use same image for batch", value=False)
-                    crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
-                    enable_adetailer_support = gr.Checkbox(
-                        label="Enable RanbooruX ADetailer support",
-                        value=False,
-                        info="Run RanbooruX's manual ADetailer integration after img2img when enabled.",
-                    )
-                    reuse_cached_posts = gr.Checkbox(
-                        label="Reuse cached booru posts",
-                        value=False,
-                        info="Leave disabled to fetch fresh images every generation. Enable when you want RanbooruX to reuse the previously cached posts.",
-                    )
-            with gr.Group():
-                (
-                    use_search_txt,
-                    use_remove_txt,
-                    choose_search_txt,
-                    choose_remove_txt,
-                    search_refresh_btn,
-                    remove_refresh_btn,
-                ) = self._build_personal_lists_ui_section()
-            with gr.Group():
-                with gr.Accordion("Extra Prompt Modes", open=False):
-                    with gr.Box():
-                        mix_prompt = gr.Checkbox(label="Mix tags from multiple posts", value=False)
-                        mix_amount = gr.Slider(
-                            value=2, label="Posts to mix", minimum=2, maximum=10, step=1
-                        )
-                    with gr.Box():
-                        chaos_mode = gr.Radio(
-                            ["None", "Shuffle All", "Shuffle Negative"],
-                            label="Tag Shuffling (Chaos)",
-                            value="None",
-                        )
-                        chaos_amount = gr.Slider(
-                            value=0.5, label="Chaos Amount %", minimum=0.1, maximum=1.0, step=0.05
-                        )
-                    with gr.Box():
-                        use_same_seed = gr.Checkbox(label="Use same seed for batch", value=False)
-                        use_cache = gr.Checkbox(label="Cache Booru API requests", value=True)
-                        log_prompt_sources = gr.Checkbox(
-                            label="Log image sources/prompts to txt",
-                            value=False,
-                            info="When enabled, RanbooruX appends a log entry mapping seeds and prompts to the source posts.",
-                        )
+            post_id.blur(
+                fn=self._ui_update_post_id_dependencies,
+                inputs=[post_id],
+                outputs=[tags, max_pages, sorting_order],
+                queue=False,
+            )
+            post_id.submit(
+                fn=self._ui_update_post_id_dependencies,
+                inputs=[post_id],
+                outputs=[tags, max_pages, sorting_order],
+                queue=False,
+            )
+            _register_page_load(
+                self._ui_update_post_id_dependencies,
+                inputs=[post_id],
+                outputs=[tags, max_pages, sorting_order],
+            )
         (
             lora_enabled,
             lora_folder,
@@ -2579,55 +2911,100 @@ class Script(scripts.Script):
         ) = self._build_lora_ui_section()
         personal_add_btn.click(
             fn=self._ui_add_personal_tags,
-            inputs=[personal_remove_input, personal_remove_dropdown],
-            outputs=[personal_remove_dropdown, personal_remove_input],
+            inputs=[personal_remove_input],
+            outputs=[
+                personal_remove_dropdown,
+                personal_remove_input,
+                personal_remove_display,
+                personal_status,
+            ],
             queue=False,
         )
         personal_remove_btn.click(
             fn=self._ui_remove_personal_tags,
             inputs=[personal_remove_dropdown],
-            outputs=[personal_remove_dropdown],
+            outputs=[
+                personal_remove_dropdown,
+                personal_remove_display,
+                personal_status,
+            ],
             queue=False,
         )
         personal_dedupe_btn.click(
             fn=self._ui_dedupe_personal_list,
             inputs=[],
-            outputs=[personal_remove_dropdown],
+            outputs=[
+                personal_remove_dropdown,
+                personal_remove_display,
+                personal_status,
+            ],
             queue=False,
         )
         personal_import_file.upload(
             fn=self._ui_import_personal_list,
             inputs=[personal_import_file],
-            outputs=[personal_remove_dropdown, personal_import_file],
+            outputs=[
+                personal_remove_dropdown,
+                personal_import_file,
+                personal_remove_display,
+                personal_status,
+            ],
             queue=False,
         )
         personal_export_btn.click(
-            fn=self._ui_export_personal_list, inputs=[], outputs=None, queue=False
+            fn=self._ui_export_personal_list,
+            inputs=[],
+            outputs=[personal_export_file],
+            queue=False,
         )
 
         favorites_add_btn.click(
             fn=self._ui_add_favorite_tags,
-            inputs=[favorites_input, favorites_dropdown],
-            outputs=[favorites_dropdown, favorites_input],
+            inputs=[favorites_input],
+            outputs=[
+                favorites_dropdown,
+                favorites_input,
+                favorites_display,
+                favorites_status,
+            ],
             queue=False,
         )
         favorites_remove_btn.click(
             fn=self._ui_remove_favorite_tags,
             inputs=[favorites_dropdown],
-            outputs=[favorites_dropdown],
+            outputs=[
+                favorites_dropdown,
+                favorites_display,
+                favorites_status,
+            ],
             queue=False,
         )
         favorites_dedupe_btn.click(
-            fn=self._ui_dedupe_favorite_list, inputs=[], outputs=[favorites_dropdown], queue=False
+            fn=self._ui_dedupe_favorite_list,
+            inputs=[],
+            outputs=[
+                favorites_dropdown,
+                favorites_display,
+                favorites_status,
+            ],
+            queue=False,
         )
         favorites_import_file.upload(
             fn=self._ui_import_favorite_list,
             inputs=[favorites_import_file],
-            outputs=[favorites_dropdown, favorites_import_file],
+            outputs=[
+                favorites_dropdown,
+                favorites_import_file,
+                favorites_display,
+                favorites_status,
+            ],
             queue=False,
         )
         favorites_export_btn.click(
-            fn=self._ui_export_favorite_list, inputs=[], outputs=None, queue=False
+            fn=self._ui_export_favorite_list,
+            inputs=[],
+            outputs=[favorites_export_file],
+            queue=False,
         )
 
         components = [
@@ -2695,11 +3072,9 @@ class Script(scripts.Script):
             lora_blacklist,
             anima_auto_detect,
             anima_tune_img2img,
+            controlnet_weight,
         ]
         return rb_run_options.RunComponents.from_sequence(components).script_args()
-
-    def _normalize_lora_name(self, value: object) -> str:
-        return rb_loranado.normalize_lora_name(value)
 
     def _get_lora_base_dir(self) -> str:
         cmd_opts = getattr(shared, "cmd_opts", None)
@@ -2710,8 +3085,43 @@ class Script(scripts.Script):
 
     def _resolve_lora_target_folder(self, lora_folder: Optional[str]) -> str:
         lora_dir = self._get_lora_base_dir()
+        if not lora_dir:
+            return ""
         folder = (lora_folder or "").strip()
-        return os.path.join(lora_dir, folder) if folder else lora_dir
+        if not folder:
+            return lora_dir
+        try:
+            # Lexical containment: LoRA subfolders are often symlinks/junctions to
+            # another drive, which realpath-based containment would reject.
+            return str(safe_join(lora_dir, folder, follow_symlinks=False))
+        except ValueError:
+            clean_name = os.path.basename(folder)
+            print(f"[Ranbooru] Warn: Refused uncontained LoRA folder: {clean_name}")
+            return ""
+
+    def _read_remove_file(self, remove_file: str) -> List[str]:
+        if not remove_file:
+            return []
+        try:
+            clean_name = os.path.basename(str(remove_file).strip())
+            filepath = safe_join(USER_REMOVE_DIR, clean_name)
+            with open(filepath, "r", encoding="utf-8") as f:
+                return [t.strip() for t in f.read().split(",") if t.strip()]
+        except Exception as e:
+            print(f"[R] Warn: Read remove file failed {os.path.basename(str(remove_file))}: {e}")
+            return []
+
+    def _read_search_file(self, search_file: str) -> List[str]:
+        if not search_file:
+            return []
+        try:
+            clean_name = os.path.basename(str(search_file).strip())
+            filepath = safe_join(USER_SEARCH_DIR, clean_name)
+            with open(filepath, "r", encoding="utf-8") as f:
+                return [line.strip() for line in f.readlines() if line.strip()]
+        except Exception as e:
+            print(f"[R] Warn: Read search file failed {os.path.basename(str(search_file))}: {e}")
+            return []
 
     def _read_safetensors_metadata(self, file_path: str) -> Dict[str, object]:
         try:
@@ -2797,7 +3207,7 @@ class Script(scripts.Script):
                 "all_names": [],
                 "detected_files": [],
                 "detected_names": [],
-                "message": f"LoRA folder not found: {target_folder}",
+                "message": f"LoRA folder not found: {os.path.basename(target_folder)}",
             }
         try:
             all_files = sorted(
@@ -2822,7 +3232,7 @@ class Script(scripts.Script):
                 "all_names": [],
                 "detected_files": [],
                 "detected_names": [],
-                "message": f"No .safetensors files found in {target_folder}",
+                "message": f"No .safetensors files found in {os.path.basename(target_folder)}",
             }
 
         snapshot: List[Tuple[str, float, int]] = []
@@ -2853,7 +3263,7 @@ class Script(scripts.Script):
             "all_names": [os.path.splitext(file_name)[0] for file_name in all_files],
             "detected_files": detected_files,
             "detected_names": [os.path.splitext(file_name)[0] for file_name in detected_files],
-            "message": f"Scanned {len(all_files)} LoRA(s) in {target_folder}",
+            "message": f"Scanned {len(all_files)} LoRA(s) in {os.path.basename(target_folder)}",
         }
         self._loranado_scan_cache[target_folder] = {
             "snapshot": snapshot_key,
@@ -2871,13 +3281,16 @@ class Script(scripts.Script):
         scan = self._scan_loranado_candidates(lora_folder)
         all_names = list(scan.get("all_names") or [])
         detected_names = list(scan.get("detected_names") or [])
+        folder_display = os.path.basename(scan.get("target_folder", "") or "") or "root"
         if auto_detect_pony:
             choice_names = detected_names or all_names
             if detected_names:
-                status = f"Detected {len(detected_names)} PonyXL-compatible LoRAs in `{scan.get('target_folder', '')}`."
+                status = (
+                    f"Detected {len(detected_names)} PonyXL-compatible LoRAs in `{folder_display}`."
+                )
             elif all_names:
                 status = (
-                    f"No PonyXL markers detected in `{scan.get('target_folder', '')}`. "
+                    f"No PonyXL markers detected in `{folder_display}`. "
                     f"Falling back to all {len(all_names)} LoRAs."
                 )
             else:
@@ -2885,7 +3298,9 @@ class Script(scripts.Script):
         else:
             choice_names = all_names
             if all_names:
-                status = f"Auto-detect disabled. {len(all_names)} LoRAs available in `{scan.get('target_folder', '')}`."
+                status = (
+                    f"Auto-detect disabled. {len(all_names)} LoRAs available in `{folder_display}`."
+                )
             else:
                 status = scan.get("message") or "No LoRAs found."
 
@@ -3094,15 +3509,9 @@ class Script(scripts.Script):
         if ui_remove_tags:
             bad_tags.update([t.strip() for t in ui_remove_tags.split(",") if t.strip()])
         if use_remove_file and remove_file:
-            try:
-                filepath = os.path.join(USER_REMOVE_DIR, remove_file)
-                print(f"[R] Reading remove tags: {filepath}")
-                with open(filepath, "r", encoding="utf-8") as f:
-                    read_tags = [t.strip() for t in f.read().split(",") if t.strip()]
-                    print(f"[R] Tags read: {read_tags}")
-                    bad_tags.update(read_tags)
-            except Exception as e:
-                print(f"[R] Warn: Read remove file failed {remove_file}: {e}")
+            read_tags = self._read_remove_file(remove_file)
+            if read_tags:
+                bad_tags.update(read_tags)
         initial_additions = []
         bg_remove = set()
         color_remove = set()
@@ -3131,23 +3540,16 @@ class Script(scripts.Script):
         initial_additions_str = ",".join(initial_additions)
         search_tags = ui_tags
         if use_search_file and search_file:
-            try:
-                filepath = os.path.join(USER_SEARCH_DIR, search_file)
-                print(f"[R] Reading search tags: {filepath}")
-                with open(filepath, "r", encoding="utf-8") as f:
-                    search_lines = [line.strip() for line in f.readlines() if line.strip()]
-                    if search_lines:
-                        selected_file_tags = random.choice(search_lines)
-                        search_tags = (
-                            f"{search_tags},{selected_file_tags}"
-                            if search_tags
-                            else selected_file_tags
-                        )
-                        print(f"[R] Added file tags: {selected_file_tags}")
-                    else:
-                        print(f"[R] Warn: Search file empty: '{search_file}'")
-            except Exception as e:
-                print(f"[R] Warn: Read search file failed {search_file}: {e}")
+            search_lines = self._read_search_file(search_file)
+            if search_lines:
+                selected_file_tags = random.choice(search_lines)
+                search_tags = (
+                    f"{search_tags},{selected_file_tags}" if search_tags else selected_file_tags
+                )
+                print(f"[R] Added file tags: {selected_file_tags}")
+            else:
+                clean_name = os.path.basename(str(search_file).strip())
+                print(f"[R] Warn: Search file empty: '{clean_name}'")
         return search_tags, bad_tags, initial_additions_str
 
     def _get_booru_api(
@@ -3179,20 +3581,20 @@ class Script(scripts.Script):
             api.http = self._http_client
             return api
 
-        booru_apis = {
-            "gelbooru": Gelbooru(fringe_benefits, gelbooru_credentials),
-            "danbooru": Danbooru(),
-            "xbooru": XBooru(),
-            "rule34": Rule34(),
-            "safebooru": Safebooru(),
-            "konachan": Konachan(),
-            "yande.re": Yandere(),
-            "aibooru": AIBooru(),
-            "e621": e621(),
+        booru_factories = {
+            "gelbooru": lambda: Gelbooru(fringe_benefits, gelbooru_credentials),
+            "danbooru": Danbooru,
+            "xbooru": XBooru,
+            "rule34": Rule34,
+            "safebooru": Safebooru,
+            "konachan": Konachan,
+            "yande.re": Yandere,
+            "aibooru": AIBooru,
+            "e621": e621,
         }
-        if booru_name not in booru_apis:
+        if booru_name not in booru_factories:
             raise ValueError(f"Booru '{booru_name}' not implemented.")
-        api = booru_apis.get(booru_name)
+        api = booru_factories[booru_name]()
         if api is not None:
             api.http = self._http_client
         return api
@@ -3228,11 +3630,13 @@ class Script(scripts.Script):
                 raise ValueError("No valid posts found matching criteria after fetching.")
             return all_posts, tags_query
         except BooruError as e:
-            print(f"[R] Error fetching from {api.booru_name}: {e}")
+            sanitized = rb_http_client.sanitize_exception_text(str(e))
+            print(f"[R] Error fetching from {api.booru_name}: {sanitized}")
             raise
         except Exception as e:
-            print(f"[R] Unexpected error during fetch: {e}")
-            raise BooruError(f"Unexpected fetch error: {e}") from e
+            sanitized = rb_http_client.sanitize_exception_text(str(e))
+            print(f"[R] Unexpected error during fetch: {sanitized}")
+            raise BooruError(f"Unexpected fetch error: {sanitized}") from e
 
     def _select_posts(self, all_posts, sorting_order, num_images_needed, post_id, same_prompt):
         if not all_posts:
@@ -3365,27 +3769,28 @@ class Script(scripts.Script):
         return base
 
     def _process_single_prompt(
-        self, index, raw_prompt, base_positive, base_negative, initial_additions, settings
+        self,
+        index: int,
+        raw_prompt: str,
+        base_positive: str,
+        base_negative: str,
+        initial_additions: str,
+        settings: rb_tag_pipeline.PromptRules,
     ):
-        (
-            shuffle_tags,
-            chaos_mode,
-            chaos_amount,
-            limit_tags_pct,
-            max_tags_count,
-            change_dash,
-            remove_artist_tags,
-            remove_character_tags,
-            remove_clothing_tags,
-            remove_text_tags,
-            restrict_subject_tags,
-            remove_furry_tags,
-            remove_headwear_tags,
-            preserve_hair_eye_colors,
-            remove_series_tags,
-        ) = settings
+        shuffle_tags = settings.shuffle_tags
+        chaos_mode = settings.chaos_mode
+        chaos_amount = settings.chaos_amount
+        limit_tags_pct = settings.limit_tags_pct
+        max_tags_count = settings.max_tags_count
+        change_dash = settings.change_dash
+        filters = settings.filters
+        remove_artist_tags = filters.remove_artist
+        remove_character_tags = filters.remove_character
+        restrict_subject_tags = filters.restrict_subject
         current_prompt = f"{initial_additions},{raw_prompt}" if initial_additions else raw_prompt
-        prompt_tags = [tag.strip() for tag in re.split(r"[\,\t\s]+", current_prompt) if tag.strip()]
+        prompt_tags = [
+            tag.strip().lower() for tag in re.split(r"[\,\t\s]+", current_prompt) if tag.strip()
+        ]
         base_hair_colors = set(getattr(self, "_base_hair_color_tags", set()) or [])
         base_eye_colors = set(getattr(self, "_base_eye_color_tags", set()) or [])
         # If removal flags are set, remove tags coming from selected post's artist/character lists
@@ -3401,7 +3806,7 @@ class Script(scripts.Script):
             character_tags_meta = (
                 post_meta.get("character_tags", []) if isinstance(post_meta, dict) else []
             )
-            norm = self._normalize_tag
+            norm = rb_tag_pipeline.normalize_tag
             artist_norm = {norm(t) for t in artist_tags_meta if isinstance(t, str)}
             char_norm = {norm(t) for t in character_tags_meta if isinstance(t, str)}
             if isinstance(post_meta, dict):
@@ -3449,10 +3854,10 @@ class Script(scripts.Script):
                         artist_norm.add(tag.strip().lower())
             allowed_subjects = set()
             if restrict_subject_tags:
-                allowed_subjects.update(self._extract_subject_tags(base_positive))
-                allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                allowed_subjects.update(rb_tag_pipeline.extract_subject_tags(base_positive))
+                allowed_subjects.update(rb_tag_pipeline.extract_subject_tags(initial_additions))
                 allowed_subjects.update(
-                    self._extract_subject_tags(getattr(self, "original_prompt", ""))
+                    rb_tag_pipeline.extract_subject_tags(getattr(self, "original_prompt", ""))
                 )
             filter_ctx = getattr(self, "_removal_context", None)
             favorites_guard: Set[str] = set()
@@ -3467,95 +3872,48 @@ class Script(scripts.Script):
             primary_subject = None
             for t in prompt_tags:
                 t_norm = self._normalize_cached(t, norm_cache)
-                canonical_tag = t_norm or self._canonicalize_raw_tag(t)
-                t_orig = (t or "").strip().lower()
+                canonical_tag = t_norm or rb_tag_pipeline.canonicalize_raw_tag(t)
                 is_favorite = bool(t_norm and t_norm in favorites_guard)
                 if is_favorite:
-                    filtered_prompt_tags.append(t)
+                    filtered_prompt_tags.append(self._strip_disambiguator(t))
                     continue
-                should_remove = False
-                if remove_artist_tags and (
-                    t_norm in artist_norm
-                    or t_orig in artist_norm
-                    or (t_norm and t_norm.endswith(" artist"))
-                ):
-                    should_remove = True
-                elif remove_character_tags and (
-                    t_norm in char_norm
-                    or t_orig in char_norm
-                    or ("(" in t and ")" in t and not t.strip().startswith("("))
-                    or (t_norm and (t_norm.endswith(" series") or t_norm.endswith(" franchise")))
-                ):
-                    should_remove = True
-                if (
-                    not should_remove
-                    and remove_clothing_tags
-                    and rb_tag_pipeline.is_clothing_tag(t)
-                ):
-                    should_remove = True
-                if (
-                    not should_remove
-                    and remove_text_tags
-                    and rb_tag_pipeline.is_textual_tag(t, catalog.is_textual if catalog else None)
-                ):
-                    should_remove = True
-                if not should_remove and remove_furry_tags and rb_tag_pipeline.is_furry_tag(t):
-                    should_remove = True
-                if (
-                    not should_remove
-                    and remove_headwear_tags
-                    and rb_tag_pipeline.is_headwear_tag(t)
-                ):
-                    should_remove = True
-                if (
-                    not should_remove
-                    and remove_series_tags
-                    and rb_tag_pipeline.is_series_tag(t, catalog.category if catalog else None)
-                ):
-                    should_remove = True
-                if not should_remove and preserve_hair_eye_colors:
-                    if base_hair_colors and canonical_tag in base_hair_colors:
-                        pass
-                    elif base_eye_colors and canonical_tag in base_eye_colors:
-                        pass
-                    elif (
-                        base_hair_colors
-                        and rb_tag_pipeline.is_hair_color_tag(
-                            t, catalog.is_hair if catalog else None
-                        )
-                        and canonical_tag not in base_hair_colors
-                    ):
-                        should_remove = True
-                    elif (
-                        base_eye_colors
-                        and rb_tag_pipeline.is_eye_color_tag(t, catalog.is_eye if catalog else None)
-                        and canonical_tag not in base_eye_colors
-                    ):
-                        should_remove = True
-                if (
-                    not should_remove
-                    and restrict_subject_tags
-                    and rb_tag_pipeline.is_subject_tag(t)
-                ):
-                    subject_norm = t_norm
-                    if allowed_subjects:
-                        if subject_norm not in allowed_subjects:
-                            should_remove = True
-                    else:
-                        if primary_subject is None:
-                            primary_subject = subject_norm
-                        elif subject_norm != primary_subject:
-                            should_remove = True
-                if not should_remove and filter_ctx and t_norm:
-                    should_remove = self._tag_matches_removal(t_norm, filter_ctx)
+                should_remove, _ = rb_tag_pipeline.should_remove_tag(
+                    t,
+                    filters,
+                    filter_ctx=filter_ctx,
+                    favorites_guard=favorites_guard,
+                    base_hair=base_hair_colors,
+                    base_eye=base_eye_colors,
+                    allowed_subjects=allowed_subjects,
+                    primary_subject=primary_subject,
+                    artist_norm=artist_norm,
+                    char_norm=char_norm,
+                    normalized_tag=t_norm,
+                    canonical_tag=canonical_tag,
+                    catalog_is_textual_fn=catalog.is_textual if catalog else None,
+                    catalog_is_hair_fn=catalog.is_hair if catalog else None,
+                    catalog_is_eye_fn=catalog.is_eye if catalog else None,
+                    catalog_category_fn=catalog.category if catalog else None,
+                )
                 if not should_remove:
-                    filtered_prompt_tags.append(t)
+                    if (
+                        filters.restrict_subject
+                        and not allowed_subjects
+                        and rb_tag_pipeline.is_subject_tag(t)
+                        and primary_subject is None
+                    ):
+                        primary_subject = t_norm or canonical_tag
+                    filtered_prompt_tags.append(self._strip_disambiguator(t))
+            tags_removed_in_prompt = max(0, len(prompt_tags) - len(filtered_prompt_tags))
+            self._run_tags_removed_count = (
+                getattr(self, "_run_tags_removed_count", 0) + tags_removed_in_prompt
+            )
             prompt_tags = filtered_prompt_tags
         except Exception:
             # fallback: ignore removal if anything goes wrong
             pass
-        current_prompt = ",".join(prompt_tags)
-        if shuffle_tags:
+        current_prompt = ",".join(self._strip_disambiguator(t) for t in prompt_tags)
+        if shuffle_tags and not getattr(self, "_is_anima_model", False):
             tags_list = [t.strip() for t in current_prompt.split(",") if t.strip()]
             random.shuffle(tags_list)
             current_prompt = ",".join(tags_list)
@@ -3575,8 +3933,8 @@ class Script(scripts.Script):
                 current_prompt, max_tags_count, "Max"
             )
         if change_dash:
-            current_prompt = current_prompt.replace("_", " ")
-            current_negative = current_negative.replace("_", " ")
+            current_prompt = self._transform_dash_preserve_score(current_prompt)
+            current_negative = self._transform_dash_preserve_score(current_negative)
         if base_positive:
             current_prompt = (
                 f"{base_positive}, {current_prompt}" if current_prompt else base_positive
@@ -3690,11 +4048,13 @@ class Script(scripts.Script):
     def _prepare_img2img_pass(self, p, use_img2img, use_ip):
         self.run_img2img_pass = False
         if use_img2img:
-            initial_steps = max(5, min(10, p.steps // 3))  # Use 1/3 of total steps, min 5
+            # The host always runs its own generation first and Img2Img starts from the booru
+            # image, so that output is never used: one step keeps it as cheap as possible.
+            initial_steps = 1
             print(
-                f"[R] Prep Img2Img pass (steps={initial_steps}) - ControlNet {'enabled' if use_ip else 'disabled'}."
+                f"[R] Prep Img2Img pass (placeholder first pass: {initial_steps} step) - "
+                f"ControlNet {'enabled' if use_ip else 'disabled'}."
             )
-            print("[R] Using higher quality initial pass to prevent distortion")
             self.real_steps = p.steps
 
             # Preserve the user's prompt for the initial pass. ADetailer is explicitly blocked
@@ -3726,12 +4086,17 @@ class Script(scripts.Script):
                 options, "anima_tune_img2img", getattr(options, "anima_auto_detect", True)
             ):
                 self.img2img_denoising = min(0.5, self.img2img_denoising)
-                initial_steps = max(8, min(15, p.steps // 3))
-                self._host_scope.set_attr(p, "steps", initial_steps)
-                p.cfg_scale = max(3.0, min(p.cfg_scale, 6.0))
+                # Note: cfg_range declared in ModelCapabilities is divergent from these
+                # runtime clamp values pinned by test_lock_prepare_img2img_cfg_clamps.
+                variant = getattr(self, "_anima_model_variant", "base")
+                if variant == "turbo":
+                    tuned_cfg = max(1.0, min(self.original_cfg, 6.0))
+                else:
+                    tuned_cfg = max(3.0, min(self.original_cfg, 6.0))
+                self._host_scope.set_attr(p, "cfg_scale", tuned_cfg)
                 print(
                     f"[R] Anima: using flow-matching optimized parameters "
-                    f"(denoise={self.img2img_denoising}, steps={initial_steps}, cfg={p.cfg_scale})"
+                    f"(denoise={self.img2img_denoising}, cfg={tuned_cfg})"
                 )
 
             self.run_img2img_pass = True
@@ -3755,7 +4120,7 @@ class Script(scripts.Script):
             self._host_scope.set_attr(p, "batch_size", 1)
 
             # LIGHTER APPROACH: Just mark that we're in initial pass - don't completely disable ADetailer
-            self._mark_initial_pass(p)
+            self._adetailer_orch._mark_initial_pass(p)
 
             # Hide intermediary previews from pass 1 / img2img so UI only reflects final results.
             try:
@@ -3766,7 +4131,7 @@ class Script(scripts.Script):
 
             print("[R] AGGRESSIVE: Disabled all saving, minimized batch for initial pass")
             print(
-                f"[R] Optimized settings: steps={initial_steps}, cfg={p.cfg_scale}, denoising={self.img2img_denoising}"
+                f"[R] Img2Img settings: steps={self.real_steps}, cfg={p.cfg_scale}, denoising={self.img2img_denoising}"
             )
 
     def _cleanup_after_run(self, use_cache):
@@ -3789,6 +4154,7 @@ class Script(scripts.Script):
             delattr(self, "original_full_prompt")
         if hasattr(self, "_adetailer_script_args_snapshot"):
             delattr(self, "_adetailer_script_args_snapshot")
+        self._cn_img2img_handoff = None
         if hasattr(self, "_current_processing_object"):
             delattr(self, "_current_processing_object")
         if hasattr(self, "original_cfg"):
@@ -3820,7 +4186,9 @@ class Script(scripts.Script):
         # Clean up early protection state
         if hasattr(self, "_temp_disabled_adetailer"):
             # Force restore if cleanup is called early
-            self._restore_early_adetailer_protection(getattr(self, "_initial_pass_p", None))
+            self._adetailer_orch._restore_early_adetailer_protection(
+                getattr(self, "_initial_pass_p", None)
+            )
 
         # Ensure any manual patches are removed once we're finished.
         self._unpatch_manual_adetailer_overrides()
@@ -3897,7 +4265,7 @@ class Script(scripts.Script):
 
         # Ensure ADetailer hooks are restored so future generations run normally
         try:
-            self._restore_early_adetailer_protection(processing_obj)
+            self._adetailer_orch._restore_early_adetailer_protection(processing_obj)
         except Exception as exc:
             print(f"[R Guard] Failed restoring ADetailer protection: {exc}")
             released = False
@@ -3989,18 +4357,74 @@ class Script(scripts.Script):
             )
 
     @staticmethod
-    def _anima_quality_prefix() -> str:
+    def _transform_dash_preserve_score(text: str) -> str:
+        """Replace underscores with spaces except for score_* tags (e.g. score_7, score_1)."""
+        if not text:
+            return ""
+        return re.sub(
+            r"(?<![a-zA-Z0-9])score_\d+(?![a-zA-Z0-9])|_",
+            lambda m: m.group(0) if m.group(0).lower().startswith("score_") else " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+    @staticmethod
+    def _strip_disambiguator(tag: str) -> str:
+        """Strip booru disambiguator like _(vocaloid) from tag to prevent unintended attention syntax."""
+        if not tag:
+            return ""
+        if "(" in tag and ")" in tag and not tag.strip().startswith("("):
+            return re.sub(r"[_ ]*\([^)]+\)$", "", tag).strip()
+        return tag
+
+    def _detect_anima(self, sd_model=None, p=None) -> dict[str, Any]:
+        """Run the single Anima detection ladder, updating self attributes and returning info dict.
+        Ladder:
+        1. pending_ckpt from p.override_settings or shared.opts
+        2. sd_model (explicit or shared.sd_model)
+        3. Script._last_loaded_model_info
+        """
+        pending_ckpt = None
+        if hasattr(p, "override_settings") and isinstance(p.override_settings, dict):
+            pending_ckpt = p.override_settings.get("sd_model_checkpoint")
+        if not pending_ckpt and hasattr(shared, "opts"):
+            pending_ckpt = getattr(shared.opts, "sd_model_checkpoint", None)
+
+        info = None
+        if pending_ckpt:
+            info = get_anima_model_info(pending_ckpt)
+        if not info or not info.get("detected"):
+            model = sd_model if sd_model is not None else getattr(shared, "sd_model", None)
+            info = get_anima_model_info(model)
+        if not info or not info.get("detected"):
+            info = getattr(Script, "_last_loaded_model_info", None)
+        if not info:
+            info = {"detected": False, "method": "none", "model_name": "", "variant": "base"}
+
+        self._is_anima_model = bool(info.get("detected", False))
+        if self._is_anima_model:
+            self._anima_model_variant = info.get("variant") or resolve_anima_variant(
+                info.get("model_name", "")
+            )
+            self._anima_capabilities = info.get("capabilities")
+        else:
+            self._anima_model_variant = "base"
+            self._anima_capabilities = None
+        return info
+
+    def _anima_quality_prefix(self=None, variant: Optional[str] = None) -> str:
         """Return Anima's recommended positive quality prefix."""
-        return "masterpiece, best quality, score_7, safe, "
+        var = variant or getattr(self, "_anima_model_variant", "base")
+        return get_capabilities("anima", var).quality_prefix
 
     @staticmethod
     def _anima_negative_default() -> str:
         """Return Anima's recommended negative prompt."""
-        return "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration"
+        return get_capabilities("anima", "base").negative_default
 
     @staticmethod
     def _has_quality_prefix(prompt: str) -> bool:
-        """Check if prompt already has quality tokens (case-insensitive)."""
+        """Check if prompt already has quality tokens (case-insensitive exact token match)."""
         if not prompt:
             return False
         quality_tokens = {
@@ -4010,33 +4434,61 @@ class Script(scripts.Script):
             "score_7",
             "score_8",
             "score_9",
+            "score 7",
+            "score 8",
+            "score 9",
             "safe",
         }
-        first_10 = [t.strip().lower() for t in prompt.split(",")[:10]]
-        return any(token in tag for token in quality_tokens for tag in first_10)
+        tags = [t.strip().lower() for t in prompt.split(",") if t.strip()]
+        return any(tag in quality_tokens for tag in tags)
+
+    @staticmethod
+    def _initialize_seeds(
+        p: Any,
+        *,
+        overwrite: bool = True,
+        mirror_aliases: Union[bool, str] = False,
+    ) -> Tuple[int, int]:
+        base_seed = getattr(p, "seed", -1)
+        if base_seed == -1 or not hasattr(p, "seed"):
+            base_seed = random.randint(0, 2**32 - 1)
+            p.seed = base_seed
+
+        batch_count = max(1, getattr(p, "n_iter", 1))
+        batch_size = max(1, getattr(p, "batch_size", 1))
+        total_images = batch_count * batch_size
+
+        if overwrite or not getattr(p, "all_seeds", None):
+            p.all_seeds = [base_seed + i for i in range(total_images)]
+
+        base_subseed = getattr(p, "subseed", -1)
+        if base_subseed == -1 or not hasattr(p, "subseed"):
+            base_subseed = random.randint(0, 2**32 - 1)
+            p.subseed = base_subseed
+
+        if overwrite or not getattr(p, "all_subseeds", None):
+            p.all_subseeds = [base_subseed + i for i in range(total_images)]
+
+        if mirror_aliases is True:
+            p.seeds = list(p.all_seeds)
+            p.subseeds = list(p.all_subseeds)
+        elif mirror_aliases == "if_missing":
+            if not hasattr(p, "seeds"):
+                p.seeds = list(p.all_seeds)
+            if not hasattr(p, "subseeds"):
+                p.subseeds = list(p.all_subseeds)
+
+        return base_seed, base_subseed
 
     def before_process(self, p: StableDiffusionProcessing, *args):
+        prompts_applied = False
         try:
             # Fast-path for our own internal img2img calls: initialize seeds and exit
             if getattr(p, "_ranbooru_internal_img2img", False):
                 try:
-                    # Minimal seeds init to satisfy WebUI expectations
-                    base_seed = getattr(p, "seed", -1)
-                    if base_seed == -1:
-                        base_seed = random.randint(0, 2**32 - 1)
-                        p.seed = base_seed
-                    batch_count = max(1, getattr(p, "n_iter", 1))
-                    batch_size = max(1, getattr(p, "batch_size", 1))
-                    total_images = batch_count * batch_size
-                    p.all_seeds = [base_seed + i for i in range(total_images)]
-                    base_subseed = getattr(p, "subseed", -1)
-                    if base_subseed == -1:
-                        base_subseed = random.randint(0, 2**32 - 1)
-                        p.subseed = base_subseed
-                    p.all_subseeds = [base_subseed + i for i in range(total_images)]
-                    # Mirror common aliases expected by some codepaths
-                    p.seeds = list(p.all_seeds)
-                    p.subseeds = list(p.all_subseeds)
+                    base_seed, base_subseed = self._initialize_seeds(
+                        p, overwrite=True, mirror_aliases=True
+                    )
                     print(
                         f"[R Before] Internal img2img fast-path: seeds={len(p.all_seeds)} from {base_seed}, subseeds from {base_subseed}"
                     )
@@ -4059,21 +4511,7 @@ class Script(scripts.Script):
                 print("[R Before] RanbooruX already processing - BLOCKING duplicate run")
                 # Ensure seeds exist to prevent IndexError in core pipeline
                 try:
-                    base_seed = getattr(p, "seed", -1)
-                    if base_seed == -1:
-                        base_seed = random.randint(0, 2**32 - 1)
-                        p.seed = base_seed
-                    batch_count = max(1, getattr(p, "n_iter", 1))
-                    batch_size = max(1, getattr(p, "batch_size", 1))
-                    total_images = batch_count * batch_size
-                    if not getattr(p, "all_seeds", None):
-                        p.all_seeds = [base_seed + i for i in range(total_images)]
-                    base_subseed = getattr(p, "subseed", -1)
-                    if base_subseed == -1:
-                        base_subseed = random.randint(0, 2**32 - 1)
-                        p.subseed = base_subseed
-                    if not getattr(p, "all_subseeds", None):
-                        p.all_subseeds = [base_subseed + i for i in range(total_images)]
+                    self._initialize_seeds(p, overwrite=False, mirror_aliases=False)
                 except Exception as _e:
                     print(f"[R Before] WARN: Seed safety init failed on duplicate: {_e}")
                 return
@@ -4159,9 +4597,9 @@ class Script(scripts.Script):
             lora_auto_detect_pony_ui = options.lora_auto_detect_pony
             lora_detected_loras_ui = options.lora_detected_loras
             lora_blacklist_ui = options.lora_blacklist
+            controlnet_weight_ui = options.controlnet_weight
         except Exception as e:
-            print(f"[R Before] CRITICAL Error unpack args: {e}. Aborting.")
-            traceback.print_exc()
+            _report_exception("[R Before] CRITICAL Error unpack args (aborting)", e)
             self._abort_before_process_run("script argument parsing failed", p)
             return
 
@@ -4174,6 +4612,11 @@ class Script(scripts.Script):
             print(
                 f"[R Before] Warn: invalid denoising value '{denoising}', falling back to {self.img2img_denoising}"
             )
+
+        try:
+            self.controlnet_weight = float(controlnet_weight_ui)  # type: ignore[arg-type]
+        except Exception:
+            self.controlnet_weight = 1.0
 
         # Persist values needed for postprocess to avoid fragile unpacking there
         self._post_enabled = bool(enabled)
@@ -4192,17 +4635,19 @@ class Script(scripts.Script):
 
         # Anima model detection
         try:
-            info = get_anima_model_info(shared.sd_model)
-            self._is_anima_model = info["detected"]
+            info = self._detect_anima(p=p)
             if self._is_anima_model:
                 anima_auto_detect = getattr(options, "anima_auto_detect", True)
                 if anima_auto_detect:
                     change_dash = True
+                    shuffle_tags = False
                     print(
-                        f"[R] Anima model detected ({info['model_name']}) - auto-enabling space-separated tags"
+                        f"[R] Anima model detected ({info['model_name']}, variant={self._anima_model_variant}, method={info.get('method')}) - auto-enabling space-separated tags and disabling tag shuffling"
                     )
         except Exception:
             self._is_anima_model = False
+            self._anima_model_variant = "base"
+            self._anima_capabilities = None
 
         self._current_booru_name = booru
         if booru == "gelbooru":
@@ -4241,38 +4686,15 @@ class Script(scripts.Script):
             )
 
         # CRITICAL: Ensure seeds are properly initialized to prevent IndexError
-        # This must happen EVERY time, not just when they're empty
-        if hasattr(p, "seed"):
-            base_seed = p.seed if p.seed != -1 else random.randint(0, 2**32 - 1)
-        else:
-            base_seed = random.randint(0, 2**32 - 1)
-            p.seed = base_seed
-
-        # Calculate batch size - be more defensive about this
-        batch_count = max(1, getattr(p, "n_iter", 1))
-        batch_size = max(1, getattr(p, "batch_size", 1))
-        total_images = batch_count * batch_size
-
-        # ALWAYS reinitialize seeds to prevent index errors
-        p.all_seeds = [base_seed + i for i in range(total_images)]
+        base_seed, base_subseed = self._initialize_seeds(
+            p, overwrite=True, mirror_aliases="if_missing"
+        )
         print(
             f"[R Before] Initialized p.all_seeds with {len(p.all_seeds)} seeds starting from {base_seed}"
         )
-
-        # Also reinitialize all_subseeds
-        base_subseed = getattr(p, "subseed", -1)
-        if base_subseed == -1:
-            base_subseed = random.randint(0, 2**32 - 1)
-        p.all_subseeds = [base_subseed + i for i in range(total_images)]
         print(
             f"[R Before] Initialized p.all_subseeds with {len(p.all_subseeds)} subseeds starting from {base_subseed}"
         )
-
-        # ADDITIONAL: Ensure other seed-related attributes exist
-        if not hasattr(p, "seeds"):
-            p.seeds = p.all_seeds.copy()
-        if not hasattr(p, "subseeds"):
-            p.subseeds = p.all_subseeds.copy()
 
         self._reset_adetailer_state_for_run(p)
 
@@ -4284,7 +4706,7 @@ class Script(scripts.Script):
             return
 
         self._reset_script_runner_guards()
-        if self._is_adetailer_enabled():
+        if self._adetailer_orch.is_adetailer_enabled():
             print("[R Before] Resetting ADetailer blocking flags for new generation")
         else:
             print(
@@ -4385,7 +4807,9 @@ class Script(scripts.Script):
         self._strict_img2img_relaxed = False
         self._strict_img2img_rejections = []
         self._strict_initial_additions = ""
-        self._strict_allowed_subjects = set(self._extract_subject_tags(self.original_prompt))
+        self._strict_allowed_subjects = set(
+            rb_tag_pipeline.extract_subject_tags(self.original_prompt)
+        )
         base_subjects = set(self._strict_allowed_subjects)
 
         if not should_fetch_new:
@@ -4420,7 +4844,7 @@ class Script(scripts.Script):
                 allowed_subjects = set()
                 if bool(restrict_subject_tags_ui):
                     allowed_subjects = set(base_subjects)
-                    allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                    allowed_subjects.update(rb_tag_pipeline.extract_subject_tags(initial_additions))
                     self._strict_allowed_subjects = set(allowed_subjects)
                 else:
                     self._strict_allowed_subjects = set()
@@ -4428,17 +4852,17 @@ class Script(scripts.Script):
                 filter_ctx = self._build_removal_context(bad_tags, favorites_tags)
                 self._removal_context = filter_ctx
 
-                toggles_tuple = (
-                    bool(remove_artist_tags_ui),
-                    bool(remove_character_tags_ui),
-                    bool(remove_clothing_tags_ui),
-                    bool(remove_text_tags_ui),
-                    bool(restrict_subject_tags_ui),
-                    bool(remove_furry_tags_ui),
-                    bool(remove_headwear_tags_ui),
-                    bool(remove_girl_suffix_tags_ui),
-                    bool(preserve_hair_eye_colors_ui),
-                    bool(remove_series_tags_ui),
+                toggles = rb_tag_pipeline.FilterToggles(
+                    remove_artist=bool(remove_artist_tags_ui),
+                    remove_character=bool(remove_character_tags_ui),
+                    remove_clothing=bool(remove_clothing_tags_ui),
+                    remove_text=bool(remove_text_tags_ui),
+                    restrict_subject=bool(restrict_subject_tags_ui),
+                    remove_furry=bool(remove_furry_tags_ui),
+                    remove_headwear=bool(remove_headwear_tags_ui),
+                    remove_girl_suffix=bool(remove_girl_suffix_tags_ui),
+                    preserve_hair_eye=bool(preserve_hair_eye_colors_ui),
+                    remove_series=bool(remove_series_tags_ui),
                 )
                 self._remove_series_tags = bool(remove_series_tags_ui)
                 self._remove_character_tags = bool(remove_character_tags_ui)
@@ -4470,7 +4894,7 @@ class Script(scripts.Script):
                             num_images_needed=num_images_needed,
                             max_pages=max_pages,
                             filter_ctx=filter_ctx,
-                            toggles=toggles_tuple,
+                            toggles=toggles,
                             base_colors=base_colors_tuple,
                             allowed_subjects=allowed_subjects,
                         )
@@ -4501,6 +4925,17 @@ class Script(scripts.Script):
                     self._strict_img2img_relaxed = False
                     self._strict_img2img_rejections = []
                     self._last_rejections = []
+
+                if (use_img2img or use_ip) and not post_id:
+                    # Some posts carry no file URL (e.g. restricted on Danbooru); picking one
+                    # would leave Img2Img/ControlNet without a source image.
+                    downloadable = [post for post in filtered_posts if _post_has_image_url(post)]
+                    if downloadable and len(downloadable) < len(filtered_posts):
+                        print(
+                            f"[R] Ignoring {len(filtered_posts) - len(downloadable)} post(s) "
+                            "with no downloadable image."
+                        )
+                        filtered_posts = downloadable
 
                 all_posts = filtered_posts
                 selected_posts = self._select_posts(
@@ -4544,7 +4979,7 @@ class Script(scripts.Script):
 
                 if bool(restrict_subject_tags_ui):
                     allowed_subjects = set(base_subjects)
-                    allowed_subjects.update(self._extract_subject_tags(initial_additions))
+                    allowed_subjects.update(rb_tag_pipeline.extract_subject_tags(initial_additions))
                     self._strict_allowed_subjects = set(allowed_subjects)
                 else:
                     self._strict_allowed_subjects = set()
@@ -4574,6 +5009,7 @@ class Script(scripts.Script):
             self._restrict_subject_tags = bool(restrict_subject_tags_ui)
             self._remove_furry_tags = bool(remove_furry_tags_ui)
             self._remove_headwear_tags = bool(remove_headwear_tags_ui)
+            self._remove_girl_suffix_tags = bool(remove_girl_suffix_tags_ui)
             self._preserve_hair_eye_colors = bool(preserve_hair_eye_colors_ui)
             self._remove_series_tags = bool(remove_series_tags_ui)
 
@@ -4582,22 +5018,25 @@ class Script(scripts.Script):
             base_negative = getattr(p, "negative_prompt", "") or ""
             final_prompts = []
             final_negative_prompts = [base_negative] * num_images_needed
-            prompt_processing_settings = (
-                shuffle_tags,
-                chaos_mode,
-                chaos_amount,
-                limit_tags_pct,
-                max_tags_count,
-                change_dash,
-                self._remove_artist_tags,
-                self._remove_character_tags,
-                self._remove_clothing_tags,
-                self._remove_text_tags,
-                self._restrict_subject_tags,
-                self._remove_furry_tags,
-                self._remove_headwear_tags,
-                self._preserve_hair_eye_colors,
-                self._remove_series_tags,
+            prompt_processing_settings = rb_tag_pipeline.PromptRules(
+                shuffle_tags=shuffle_tags,
+                chaos_mode=chaos_mode,
+                chaos_amount=chaos_amount,
+                limit_tags_pct=limit_tags_pct,
+                max_tags_count=max_tags_count,
+                change_dash=change_dash,
+                filters=rb_tag_pipeline.FilterToggles(
+                    remove_artist=self._remove_artist_tags,
+                    remove_character=self._remove_character_tags,
+                    remove_clothing=self._remove_clothing_tags,
+                    remove_text=self._remove_text_tags,
+                    restrict_subject=self._restrict_subject_tags,
+                    remove_furry=self._remove_furry_tags,
+                    remove_headwear=self._remove_headwear_tags,
+                    remove_girl_suffix=self._remove_girl_suffix_tags,
+                    preserve_hair_eye=self._preserve_hair_eye_colors,
+                    remove_series=self._remove_series_tags,
+                ),
             )
 
             # Ensure we only use the number of posts that match the current generation request
@@ -4632,11 +5071,11 @@ class Script(scripts.Script):
             if mix_prompt and not post_id and not same_prompt:
                 print(f"[R] Mixing tags from {mix_amount} posts...")
                 mixed_prompts = []
-                original_indices_map = {i: post for i in range(len(all_posts))}
+                original_indices = list(range(len(all_posts)))
                 for _ in range(num_images_needed):
                     mix_indices = random.sample(
-                        list(original_indices_map.keys()),
-                        min(mix_amount, len(original_indices_map)),
+                        original_indices,
+                        min(mix_amount, len(original_indices)),
                     )
                     combined_tags = set()
                     for mix_idx in mix_indices:
@@ -4654,6 +5093,7 @@ class Script(scripts.Script):
                     mixed_prompts.append(",".join(final_mix_tags))
                 raw_prompts = mixed_prompts
 
+            self._run_tags_removed_count = 0
             for i, rp in enumerate(raw_prompts):
                 processed_prompt, processed_negative = self._process_single_prompt(
                     i,
@@ -4667,6 +5107,7 @@ class Script(scripts.Script):
                 final_negative_prompts[i] = processed_negative
 
             valid_final_prompts = [s for s in final_prompts if s and not s.isspace()]
+            prompts_applied = True
             if not valid_final_prompts:
                 p.prompt = " "
                 p.negative_prompt = "" if num_images_needed == 1 else [""] * num_images_needed
@@ -4685,8 +5126,10 @@ class Script(scripts.Script):
                 p.seed = p.seed if p.seed != -1 else random.randint(0, 2**32 - 1)
                 print(f"[R] Using same seed: {p.seed}")
 
+            self._cn_img2img_handoff = None
             if use_ip and self.last_img and self.last_img[0] is not None:
                 cn_configured = False
+                cn_skipped = False
                 # Forge Neo direct: find ControlNet script in alwayson_scripts
                 try:
                     scripts_runner = getattr(p, "scripts", None)
@@ -4708,7 +5151,33 @@ class Script(scripts.Script):
                                 if isinstance(p.script_args, tuple)
                                 else list(p.script_args or [])
                             )
-                            if end <= len(full_args):
+                            if end <= len(full_args) and not _controlnet_unit_has_model(
+                                full_args[start]
+                            ):
+                                # Enabling a unit without a model makes Forge's ControlNet
+                                # assert in process() and then KeyError in later hooks.
+                                cn_skipped = True
+                                print(
+                                    "[R Before] ControlNet skipped: Unit 0 has no model selected."
+                                )
+                                _record_processing_comment(p, CONTROLNET_NO_MODEL_NOTE)
+                            elif end <= len(full_args) and use_img2img:
+                                # The first pass is thrown away when Img2Img is on, so
+                                # ControlNet is attached to the Img2Img pass instead.
+                                self._cn_img2img_handoff = (cn_script, start, list(full_args))
+                                # Units left on for the placeholder pass would cost time or,
+                                # with no image of their own, raise inside ControlNet.
+                                for index in range(start, end):
+                                    if _controlnet_unit_enabled(full_args[index]):
+                                        full_args[index] = _controlnet_unit_copy(
+                                            full_args[index], enabled=False
+                                        )
+                                self._host_scope.set_attr(p, "script_args", tuple(full_args))
+                                cn_configured = True
+                                print(
+                                    "[R Before] ControlNet Unit 0 will be applied to the Img2Img pass."
+                                )
+                            elif end <= len(full_args):
                                 unit = full_args[start]
                                 img_for_cn = (
                                     self.last_img[0].convert("RGB")
@@ -4719,11 +5188,11 @@ class Script(scripts.Script):
 
                                 if isinstance(unit, dict):
                                     unit["enabled"] = True
-                                    unit["weight"] = float(self.img2img_denoising)
+                                    unit["weight"] = self.controlnet_weight
                                     unit["image"] = cn_image
                                 elif hasattr(unit, "enabled"):
                                     unit.enabled = True
-                                    unit.weight = float(self.img2img_denoising)
+                                    unit.weight = self.controlnet_weight
                                     unit.image = cn_image
 
                                 setattr(p, "resize_mode", 1)
@@ -4735,16 +5204,37 @@ class Script(scripts.Script):
                 except Exception as e:
                     print(f"[R Before] ControlNet config error: {e}")
 
-                if not cn_configured and use_ip:
+                if not cn_configured and not cn_skipped and use_ip:
                     if not hasattr(p, "resize_mode"):
                         setattr(p, "resize_mode", 1)
                     print("[R Before] ControlNet script not found; p.resize_mode safeguard set.")
 
-            self._prepare_img2img_pass(p, use_img2img, use_ip)
+            has_source_image = any(img is not None for img in (self.last_img or []))
+            if use_img2img and not has_source_image:
+                # Without a source image the placeholder pass would be the only output.
+                print("[R Before] Img2Img skipped: no source image; running a normal generation.")
+                _record_processing_comment(p, IMG2IMG_NO_SOURCE_NOTE)
+            self._prepare_img2img_pass(p, use_img2img and has_source_image, use_ip)
+
+            # The bundled catalog still classifies tags when the custom-catalog toggle is off.
+            uses_custom_catalog = bool(
+                getattr(self, "_use_tag_catalog", False)
+                and getattr(self, "_catalog_source", "bundled") == "custom"
+            )
+            n_posts = len(getattr(self, "_posts_used_for_generation", []))
+            tags_removed = int(getattr(self, "_run_tags_removed_count", 0))
+            _note_run_success(
+                p, booru, n_posts, tags_removed, "custom" if uses_custom_catalog else "bundled"
+            )
 
         except Exception as e:
-            print(f"[Ranbooru BeforeProcess] UNEXPECTED ERROR: {e}")
-            traceback.print_exc()
+            _report_exception("[Ranbooru BeforeProcess] UNEXPECTED ERROR", e)
+            outcome = (
+                "The booru prompt was already applied; the remaining RanbooruX steps were skipped."
+                if prompts_applied
+                else "Generated with your prompt unchanged."
+            )
+            _note_run_failure(p, str(e), outcome)
             self._abort_before_process_run("before_process failed", p)
             return
 
@@ -4788,25 +5278,14 @@ class Script(scripts.Script):
         )
         if restore_needed:
             try:
-                self._restore_early_adetailer_protection(p)
+                self._adetailer_orch._restore_early_adetailer_protection(p)
             except Exception as exc:
                 print(f"[R Before] Warn: Failed to restore ADetailer pipeline state: {exc}")
         if not getattr(self, "_adetailer_support_enabled", False):
             try:
-                self._restore_native_adetailer_scripts(p)
+                self._adetailer_orch._restore_native_adetailer_scripts(p)
             except Exception as exc:
                 print(f"[R Before] Warn: Failed to restore native ADetailer state: {exc}")
-
-    def _restore_native_adetailer_scripts(self, p):
-        """Ensure native ADetailer scripts resume running when manual support is disabled."""
-        self._adetailer_orch._restore_native_adetailer_scripts(p)
-
-    def _force_enable_adetailer_scripts(self, processing_obj=None):
-        """Return the count of ADetailer scripts restored to their original behaviour."""
-        return self._adetailer_orch._force_enable_adetailer_scripts(processing_obj)
-
-    def _ensure_native_adetailer_enable_flags(self, processing_obj):
-        self._adetailer_orch._ensure_native_adetailer_enable_flags(processing_obj)
 
     def _force_native_adetailer_execution(self, p, processed):
         if getattr(self, "_adetailer_support_enabled", False):
@@ -4915,47 +5394,53 @@ class Script(scripts.Script):
     def _handle_adetailer_toggle_change(self, previous_enabled, current_enabled, p):
         if previous_enabled and not current_enabled:
             try:
-                self._restore_native_adetailer_scripts(p)
+                self._adetailer_orch._restore_native_adetailer_scripts(p)
             except Exception as exc:
                 print(f"[R Before] Warn: Failed handling ADetailer toggle change: {exc}")
 
-    def postprocess(self, p: StableDiffusionProcessing, processed, *args):
-        try:
-            # If this generation already finalized, avoid looping
-            if getattr(p, "_ranbooru_finalized", False):
-                print("[R Post] Already finalized this generation; skipping repeat postprocess")
-                return
-            # If this call is re-entered during our manual ADetailer run, skip to avoid loops
-            if getattr(self.__class__, "_ranbooru_manual_adetailer_active", False):
-                print("[R Post] Skipping RanbooruX postprocess during manual ADetailer run")
-                return
-            # Prevent duplicate img2img runs within the same generation
-            if getattr(p, "_ranbooru_img2img_started", False):
-                print(
-                    "[R Post] Img2Img already started for this generation; skipping duplicate postprocess entry"
-                )
-                return
-            enabled = getattr(self, "_post_enabled", False)
-            use_img2img = getattr(self, "_post_use_img2img", False)
-            getattr(self, "_post_use_last_img", False)
-            crop_center = getattr(self, "_post_crop_center", False)
-            use_cache = getattr(self, "_post_use_cache", True)
-            use_adetailer = (
-                getattr(self, "_post_adetailer_enabled", False) and self._is_adetailer_enabled()
-            )
+    def _bail(self, p: Any, use_cache: bool, reason: str = "", processed: Any = None) -> None:
+        if reason:
+            print(f"[R Post] {reason}")
+            if processed is not None:
+                _note_postprocess_failure(processed, reason)
+        self._cleanup_after_run(use_cache)
+        self._clear_processing_guards(p)
 
-            # Validate essential objects
+    def _validate_postconditions(
+        self, p: StableDiffusionProcessing, processed: Any
+    ) -> Optional[Tuple[bool, bool, bool]]:
+        # If this generation already finalized, avoid looping
+        if getattr(p, "_ranbooru_finalized", False):
+            print("[R Post] Already finalized this generation; skipping repeat postprocess")
+            return None
+        # If this call is re-entered during our manual ADetailer run, skip to avoid loops
+        if getattr(self.__class__, "_ranbooru_manual_adetailer_active", False):
+            print("[R Post] Skipping RanbooruX postprocess during manual ADetailer run")
+            return None
+        # Prevent duplicate img2img runs within the same generation
+        if getattr(p, "_ranbooru_img2img_started", False):
+            print(
+                "[R Post] Img2Img already started for this generation; skipping duplicate postprocess entry"
+            )
+            return None
+
+        use_cache = getattr(self, "_post_use_cache", True)
+        crop_center = getattr(self, "_post_crop_center", False)
+        enabled = getattr(self, "_post_enabled", False)
+        use_img2img = getattr(self, "_post_use_img2img", False)
+
+        try:
+            use_adetailer = (
+                getattr(self, "_post_adetailer_enabled", False)
+                and self._adetailer_orch.is_adetailer_enabled()
+            )
             if not processed or not hasattr(processed, "images"):
-                print("[R Post] Error: Invalid processed object, skipping img2img")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
-                return
+                self._bail(p, use_cache, "Error: Invalid processed object, skipping img2img")
+                return None
 
             if not enabled:
-                print("[R Post] RanbooruX disabled, skipping img2img")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
-                return
+                self._bail(p, use_cache, "RanbooruX disabled, skipping img2img")
+                return None
 
             if not (
                 getattr(self, "run_img2img_pass", False)
@@ -4967,21 +5452,264 @@ class Script(scripts.Script):
                 if not use_adetailer and not getattr(self, "_adetailer_support_enabled", False):
                     fallback_ran = self._force_native_adetailer_execution(p, processed)
                 if fallback_ran:
-                    self._cleanup_after_run(use_cache)
-                    self._clear_processing_guards(p)
-                    return
-                print("[R Post] Img2Img conditions not met, skipping")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
-                return
+                    self._bail(p, use_cache)
+                    return None
+                self._bail(p, use_cache, "Img2Img conditions not met, skipping")
+                return None
 
+            return use_cache, crop_center, use_adetailer
         except Exception as e:
-            print(f"[R Post] Error in postprocess validation: {e}")
-            self._cleanup_after_run(getattr(self, "_post_use_cache", True))
-            self._clear_processing_guards(p)
-            return
+            self._bail(p, use_cache, f"Error in postprocess validation: {e}")
+            return None
 
-        # Main img2img processing block
+    def _attach_controlnet_to_img2img(self, p, p_img2img, control_img) -> bool:
+        """Give the internal Img2Img pass a runner holding only ControlNet, with Unit 0 on."""
+        handoff = getattr(self, "_cn_img2img_handoff", None)
+        if not handoff:
+            return False
+        cn_script, start, original_args = handoff
+        try:
+            full_args = list(original_args)
+            # Use the prepared init image so the control map lines up with it exactly.
+            cn_image = {"image": np.array(control_img.convert("RGB")), "mask": None}
+            full_args[start] = _controlnet_unit_copy(
+                full_args[start],
+                enabled=True,
+                weight=float(getattr(self, "controlnet_weight", 1.0)),
+                image=cn_image,
+            )
+
+            runner = scripts.ScriptRunner()
+            runner.alwayson_scripts = [cn_script]
+            runner.scripts = [cn_script]
+            p_img2img.scripts = runner
+            p_img2img.script_args = tuple(full_args)
+            return True
+        except Exception as e:
+            print(f"[R Post] ControlNet could not be attached to Img2Img: {e}")
+            _record_processing_comment(p, CONTROLNET_IMG2IMG_FAILED_NOTE)
+            return False
+
+    def _run_img2img_batch(
+        self,
+        p: StableDiffusionProcessing,
+        processed: Any,
+        crop_center: bool,
+        use_cache: bool,
+    ) -> Optional[List[Any]]:
+        print("[R Post] Starting separate Img2Img run...")
+        # The placeholder pass is over; ADetailer reads p.steps, so give it the real count.
+        if getattr(self, "real_steps", 0):
+            p.steps = self.real_steps
+        valid_images = [img for img in self.last_img if img is not None]
+        if not valid_images:
+            self._bail(p, use_cache, "No valid images for Img2Img.", processed=processed)
+            return None
+        if len(valid_images) < len(self.last_img):
+            print(
+                f"[R Post] Warn: Only {len(valid_images)}/{len(self.last_img)} valid. Filling gaps."
+            )
+            if valid_images:
+                self.last_img = [
+                    (img if img is not None else valid_images[0]) for img in self.last_img
+                ]
+            else:
+                self._bail(p, use_cache, "No valid images left.", processed=processed)
+                return None
+        target_w, target_h = (
+            (p.width, p.height) if crop_center else self.check_orientation(self.last_img[0])
+        )
+        print(
+            f"[R Post] Preparing {len(self.last_img)} images ({'Crop' if crop_center else 'Resize'}) to {target_w}x{target_h} for Img2Img."
+        )
+        prepared_images = [
+            rb_image_ops.resize_image(img, target_w, target_h, cropping=crop_center)
+            for img in self.last_img
+            if img is not None
+        ]
+        if not prepared_images:
+            self._bail(p, use_cache, "No images left after resize.", processed=processed)
+            return None
+
+        # Use the original RanbooruX-generated prompts, not the simplified initial prompts
+        if hasattr(self, "original_full_prompt") and self.original_full_prompt:
+            print(
+                "[R Post] Using original RanbooruX prompts for img2img (not simplified initial prompts)"
+            )
+            final_prompts = self.original_full_prompt
+        else:
+            final_prompts = processed.prompt
+        final_negative_prompts = processed.negative_prompt
+        num_imgs = len(prepared_images)
+        final_prompts = rb_img2img_lifecycle.repeat_to_length(final_prompts, num_imgs)
+        final_negative_prompts = rb_img2img_lifecycle.repeat_to_length(
+            final_negative_prompts,
+            num_imgs,
+        )
+        img2img_width, img2img_height = prepared_images[0].size
+
+        print(f"[R] Processing {len(prepared_images)} images individually to ensure compatibility")
+        print(
+            f"[R] Running Img2Img ({len(prepared_images)} images) steps={self.real_steps}, Denoise={self.img2img_denoising}"
+        )
+
+        all_img2img_results = []
+        all_infotexts = []
+        last_seed = processed.seed
+        last_subseed = processed.subseed
+
+        for i, img in enumerate(prepared_images):
+            current_prompt = final_prompts[i] if i < len(final_prompts) else final_prompts[0]
+            current_negative = (
+                final_negative_prompts[i]
+                if i < len(final_negative_prompts)
+                else final_negative_prompts[0]
+            )
+
+            p_img2img = StableDiffusionProcessingImg2Img(
+                sd_model=shared.sd_model,
+                outpath_samples=shared.opts.outdir_samples or shared.opts.outdir_img2img_samples,
+                outpath_grids=shared.opts.outdir_grids or shared.opts.outdir_img2img_grids,
+                prompt=current_prompt,
+                negative_prompt=current_negative,
+                seed=processed.seed + i,
+                subseed=processed.subseed + i,
+                sampler_name=p.sampler_name,
+                scheduler=getattr(p, "scheduler", None),
+                batch_size=1,
+                n_iter=1,
+                steps=self.real_steps,
+                cfg_scale=p.cfg_scale,
+                width=img2img_width,
+                height=img2img_height,
+                init_images=[img],
+                denoising_strength=self.img2img_denoising,
+            )
+            try:
+                setattr(p_img2img, "_ranbooru_internal_img2img", True)
+            except Exception:
+                pass
+
+            p_img2img.do_not_save_samples = False
+            p_img2img.do_not_save_grid = False
+
+            final_outpath = getattr(self, "_img2img_final_outpath_samples", None)
+            if final_outpath:
+                p_img2img.outpath_samples = final_outpath
+                print(f"[R Save] Saving img2img result {i+1} to: {final_outpath}")
+            else:
+                p_img2img.outpath_samples = (
+                    shared.opts.outdir_img2img_samples or shared.opts.outdir_samples
+                )
+                print(
+                    f"[R Save] Saving img2img result {i+1} to default: {p_img2img.outpath_samples}"
+                )
+
+            final_batch_size = getattr(self, "_img2img_final_batch_size", None)
+            if final_batch_size:
+                p_img2img.batch_size = final_batch_size
+
+            if self._attach_controlnet_to_img2img(p, p_img2img, img):
+                print(f"[R Post] ControlNet Unit 0 attached to Img2Img image {i+1}.")
+
+            print(f"[R] Processing image {i+1}/{len(prepared_images)} individually")
+            single_result = process_images(p_img2img)
+            all_img2img_results.extend(single_result.images)
+            all_infotexts.extend(single_result.infotexts)
+            last_seed = single_result.seed
+            last_subseed = single_result.subseed
+
+        print(
+            "[R Post] Performing COMPLETE processed object replacement for extension compatibility"
+        )
+        rb_img2img_lifecycle.replace_processed_results(
+            processed,
+            images=all_img2img_results,
+            prompts=final_prompts,
+            negative_prompts=final_negative_prompts,
+            infotexts=all_infotexts,
+            seed=last_seed,
+            subseed=last_subseed,
+            width=img2img_width,
+            height=img2img_height,
+        )
+
+        if hasattr(p, "processed_result"):
+            p.processed_result = processed
+        if hasattr(p, "_processed"):
+            p._processed = processed
+
+        return all_img2img_results
+
+    def _run_manual_adetailer(
+        self,
+        p: StableDiffusionProcessing,
+        processed: Any,
+        all_img2img_results: List[Any],
+        use_adetailer: bool,
+    ) -> List[Any]:
+        if not use_adetailer:
+            print("[R Post] Manual ADetailer support disabled; skipping manual ADetailer execution")
+            return all_img2img_results
+
+        print("[R Post] Attempting manual ADetailer run on img2img results...")
+        self._prepare_processing_for_manual_adetailer(p, processed, all_img2img_results)
+        try:
+            self._set_adetailer_block(False)
+            setattr(self.__class__, "_ranbooru_block_all_adetailer", False)
+            setattr(p, "_ranbooru_skip_initial_adetailer", False)
+            print("[R Post] Unblocked ADetailer guard for manual run")
+        except Exception:
+            pass
+        try:
+            final_dims = (
+                all_img2img_results[0].size
+                if all_img2img_results and hasattr(all_img2img_results[0], "size")
+                else None
+            )
+            self._install_preview_guard()
+            self._set_preview_guard(True, final_dims, block_all=True)
+        except Exception:
+            pass
+        adetailer_ran_successfully = self._execute_manual_adetailer(
+            p, processed, all_img2img_results
+        )
+        if adetailer_ran_successfully:
+            print("[R Post] SUCCESS: ADetailer processed img2img results")
+            all_img2img_results = processed.images.copy()
+            try:
+                setattr(p, "_ranbooru_manual_adetailer_complete", True)
+            except Exception:
+                pass
+        else:
+            print(
+                "[R Post] WARN: ADetailer manual run failed - img2img results will be unprocessed by ADetailer"
+            )
+        return all_img2img_results
+
+    def _finalize_results(
+        self,
+        p: StableDiffusionProcessing,
+        processed: Any,
+        all_img2img_results: List[Any],
+    ) -> None:
+        setattr(self, "_ranbooru_processing_complete", True)
+        if hasattr(self, "_ranbooru_intermediate_results"):
+            delattr(self, "_ranbooru_intermediate_results")
+
+        print("[R Post] Img2Img finished.")
+        print(f"[R Post] Updated processed object with {len(all_img2img_results)} img2img results")
+        self._force_ui_update(p, processed, all_img2img_results)
+        print(
+            "[R Post] RanbooruX processing complete - final results ready for UI and other extensions"
+        )
+
+    def postprocess(self, p: StableDiffusionProcessing, processed, *args):
+        valid = self._validate_postconditions(p, processed)
+        if valid is None:
+            return
+        use_cache, crop_center, use_adetailer = valid
+
         try:
             # Mark as started to avoid re-entrant img2img runs
             try:
@@ -4991,7 +5719,7 @@ class Script(scripts.Script):
 
             if use_adetailer:
                 # EARLY PROTECTION: Restore ADetailer scripts that were temporarily disabled during initial pass
-                self._restore_early_adetailer_protection(p)
+                self._adetailer_orch._restore_early_adetailer_protection(p)
                 # CRITICAL: Prepare ADetailer for img2img so it can process the final results
                 self._prepare_adetailer_for_img2img(p)
             else:
@@ -4999,258 +5727,17 @@ class Script(scripts.Script):
                     "[R Post] Manual ADetailer support disabled; skipping ADetailer preparation steps"
                 )
 
-            print("[R Post] Starting separate Img2Img run...")
-            valid_images = [img for img in self.last_img if img is not None]
-            if not valid_images:
-                print("[R Post] No valid images for Img2Img.")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
+            all_img2img_results = self._run_img2img_batch(p, processed, crop_center, use_cache)
+            if all_img2img_results is None:
                 return
-            if len(valid_images) < len(self.last_img):
-                print(
-                    f"[R Post] Warn: Only {len(valid_images)}/{len(self.last_img)} valid. Filling gaps."
-                )
-                if valid_images:
-                    self.last_img = [
-                        (img if img is not None else valid_images[0]) for img in self.last_img
-                    ]
-                else:
-                    print("[R Post] No valid images left.")
-                    self._cleanup_after_run(use_cache)
-                    self._clear_processing_guards(p)
-                    return
-            target_w, target_h = (
-                (p.width, p.height) if crop_center else self.check_orientation(self.last_img[0])
+
+            all_img2img_results = self._run_manual_adetailer(
+                p, processed, all_img2img_results, use_adetailer
             )
-            print(
-                f"[R Post] Preparing {len(self.last_img)} images ({'Crop' if crop_center else 'Resize'}) to {target_w}x{target_h} for Img2Img."
-            )
-            prepared_images = [
-                rb_image_ops.resize_image(img, target_w, target_h, cropping=crop_center)
-                for img in self.last_img
-                if img is not None
-            ]
-            if not prepared_images:
-                print("[R Post] No images left after resize.")
-                self._cleanup_after_run(use_cache)
-                self._clear_processing_guards(p)
-                return
-            # Use the original RanbooruX-generated prompts, not the simplified initial prompts
-            if hasattr(self, "original_full_prompt") and self.original_full_prompt:
-                print(
-                    "[R Post] Using original RanbooruX prompts for img2img (not simplified initial prompts)"
-                )
-                final_prompts = self.original_full_prompt
-            else:
-                final_prompts = processed.prompt
-            final_negative_prompts = processed.negative_prompt
-            num_imgs = len(prepared_images)
-            final_prompts = rb_img2img_lifecycle.repeat_to_length(final_prompts, num_imgs)
-            final_negative_prompts = rb_img2img_lifecycle.repeat_to_length(
-                final_negative_prompts,
-                num_imgs,
-            )
-            img2img_width, img2img_height = prepared_images[0].size
-            # Process images in batches that match WebUI expectations
-            # Use batch_size=1 to ensure compatibility with all configurations
-            print(
-                f"[R] Processing {len(prepared_images)} images individually to ensure compatibility"
-            )
-
-            # Process all prepared images (do not limit by original txt2img batch size)
-
-            print(
-                f"[R] Running Img2Img ({len(prepared_images)} images) steps={self.real_steps}, Denoise={self.img2img_denoising}"
-            )
-
-            # Process images individually to avoid batch size issues
-            all_img2img_results = []
-            all_infotexts = []
-            last_seed = processed.seed
-            last_subseed = processed.subseed
-
-            for i, img in enumerate(prepared_images):
-                current_prompt = final_prompts[i] if i < len(final_prompts) else final_prompts[0]
-                current_negative = (
-                    final_negative_prompts[i]
-                    if i < len(final_negative_prompts)
-                    else final_negative_prompts[0]
-                )
-
-                p_img2img = StableDiffusionProcessingImg2Img(
-                    sd_model=shared.sd_model,
-                    outpath_samples=shared.opts.outdir_samples
-                    or shared.opts.outdir_img2img_samples,
-                    outpath_grids=shared.opts.outdir_grids or shared.opts.outdir_img2img_grids,
-                    prompt=current_prompt,
-                    negative_prompt=current_negative,
-                    seed=processed.seed + i,
-                    subseed=processed.subseed + i,
-                    sampler_name=p.sampler_name,
-                    scheduler=getattr(p, "scheduler", None),
-                    batch_size=1,
-                    n_iter=1,
-                    steps=self.real_steps,
-                    cfg_scale=p.cfg_scale,
-                    width=img2img_width,
-                    height=img2img_height,
-                    init_images=[img],
-                    denoising_strength=self.img2img_denoising,
-                )
-                # Mark as internal so our before_process performs a minimal seed init instead of blocking
-                try:
-                    setattr(p_img2img, "_ranbooru_internal_img2img", True)
-                except Exception:
-                    pass
-
-                # CRITICAL: Explicitly enable saving for img2img pass (was disabled for initial pass)
-                p_img2img.do_not_save_samples = False  # Always enable saving for final results
-                p_img2img.do_not_save_grid = False  # Always enable grid saving for final results
-
-                # Ensure correct output path for img2img results
-                final_outpath = getattr(self, "_img2img_final_outpath_samples", None)
-                if final_outpath:
-                    p_img2img.outpath_samples = final_outpath
-                    print(f"[R Save] Saving img2img result {i+1} to: {final_outpath}")
-                else:
-                    # Fallback to default img2img output directory
-                    p_img2img.outpath_samples = (
-                        shared.opts.outdir_img2img_samples or shared.opts.outdir_samples
-                    )
-                    print(
-                        f"[R Save] Saving img2img result {i+1} to default: {p_img2img.outpath_samples}"
-                    )
-
-                # Restore original batch size
-                final_batch_size = getattr(self, "_img2img_final_batch_size", None)
-                if final_batch_size:
-                    p_img2img.batch_size = final_batch_size
-
-                print(f"[R] Processing image {i+1}/{len(prepared_images)} individually")
-                single_result = process_images(p_img2img)
-                all_img2img_results.extend(single_result.images)
-                all_infotexts.extend(single_result.infotexts)
-                last_seed = single_result.seed
-                last_subseed = single_result.subseed
-
-            # CRITICAL: Complete replacement of processed object to force all extensions to see new results
-            print(
-                "[R Post] Performing COMPLETE processed object replacement for extension compatibility"
-            )
-
-            rb_img2img_lifecycle.replace_processed_results(
-                processed,
-                images=all_img2img_results,
-                prompts=final_prompts,
-                negative_prompts=final_negative_prompts,
-                infotexts=all_infotexts,
-                seed=last_seed,
-                subseed=last_subseed,
-                width=img2img_width,
-                height=img2img_height,
-            )
-
-            # Force update the main processing result references
-            if hasattr(p, "processed_result"):
-                p.processed_result = processed
-            if hasattr(p, "_processed"):
-                p._processed = processed
-
-            adetailer_ran_successfully = False
-            if use_adetailer:
-                print("[R Post] Attempting manual ADetailer run on img2img results...")
-                # Ensure processing object is aligned to our img2img result for ADetailer
-                self._prepare_processing_for_manual_adetailer(p, processed, all_img2img_results)
-                try:
-                    self._set_adetailer_block(False)
-                    setattr(self.__class__, "_ranbooru_block_all_adetailer", False)
-                    setattr(p, "_ranbooru_skip_initial_adetailer", False)
-                    print("[R Post] Unblocked ADetailer guard for manual run")
-                except Exception:
-                    pass
-                try:
-                    final_dims = (
-                        all_img2img_results[0].size
-                        if all_img2img_results and hasattr(all_img2img_results[0], "size")
-                        else None
-                    )
-                    self._install_preview_guard()
-                    self._set_preview_guard(True, final_dims, block_all=True)
-                except Exception:
-                    pass
-                adetailer_ran_successfully = self._execute_manual_adetailer(
-                    p, processed, all_img2img_results
-                )
-                if adetailer_ran_successfully:
-                    print("[R Post] SUCCESS: ADetailer processed img2img results")
-                    all_img2img_results = processed.images.copy()
-                    try:
-                        setattr(p, "_ranbooru_manual_adetailer_complete", True)
-                    except Exception:
-                        pass
-                else:
-                    print(
-                        "[R Post] WARN: ADetailer manual run failed - img2img results will be unprocessed by ADetailer"
-                    )
-            else:
-                adetailer_ran_successfully = False
-                print(
-                    "[R Post] Manual ADetailer support disabled; skipping manual ADetailer execution"
-                )
-
-            # Mark processing as complete for other extensions and UI
-            setattr(self, "_ranbooru_processing_complete", True)
-            if hasattr(self, "_ranbooru_intermediate_results"):
-                delattr(self, "_ranbooru_intermediate_results")
-
-            print("[R Post] Img2Img finished.")
-            print(
-                f"[R Post] Updated processed object with {len(all_img2img_results)} img2img results"
-            )
-            # DEBUG: Add comprehensive logging to trace what ADetailer will see
-            # CRITICAL: Force UI to display our final results
-            self._force_ui_update(p, processed, all_img2img_results)
-
-            print(
-                "[R Post] RanbooruX processing complete - final results ready for UI and other extensions"
-            )
-            print(
-                f"[R Post DEBUG] Final processed.images count: {len(processed.images) if hasattr(processed, 'images') else 'NO IMAGES ATTR'}"
-            )
-            if hasattr(processed, "images") and processed.images:
-                for i, img in enumerate(processed.images[:3]):  # Show first 3 images
-                    if img:
-                        print(
-                            f"[R Post DEBUG] Image {i}: {type(img)} size={getattr(img, 'size', 'unknown')}"
-                        )
-                    else:
-                        print(f"[R Post DEBUG] Image {i}: None")
-            else:
-                print("[R Post DEBUG] WARNING: No images in processed.images!")
-
-            # DEBUG: Check all image attributes
-            debug_attrs = [
-                "images",
-                "images_list",
-                "output_images",
-                "_cached_images",
-                "cached_images",
-            ]
-            for attr in debug_attrs:
-                if hasattr(processed, attr):
-                    val = getattr(processed, attr)
-                    if isinstance(val, list):
-                        print(f"[R Post DEBUG] {attr}: list with {len(val)} items")
-                    else:
-                        print(f"[R Post DEBUG] {attr}: {type(val)}")
-                else:
-                    print(f"[R Post DEBUG] {attr}: not present")
+            self._finalize_results(p, processed, all_img2img_results)
 
         except Exception as e:
-            print(f"[R Post] Critical error during img2img processing: {e}")
-            import traceback
-
-            traceback.print_exc()
+            _report_exception("[R Post] Critical error during img2img processing", e)
             try:
                 # Attempt to preserve original images if img2img fails
                 if hasattr(self, "last_img") and self.last_img:
@@ -5269,9 +5756,6 @@ class Script(scripts.Script):
             # Always cleanup regardless of success or failure
             self._cleanup_after_run(use_cache)
             self._clear_processing_guards(p)
-
-    def _is_adetailer_enabled(self):
-        return self._adetailer_orch.is_adetailer_enabled()
 
     def _set_adetailer_block(self, should_block: bool):
         """Toggle the global guard on patched ADetailer classes"""
@@ -5425,32 +5909,6 @@ class Script(scripts.Script):
             pass
         return False
 
-    def _images_visibly_different(self, original_image, processed_image):
-        """Return True only when pixel content or dimensions actually changed."""
-        try:
-            if original_image is None or processed_image is None:
-                return False
-
-            original_size = getattr(original_image, "size", None)
-            processed_size = getattr(processed_image, "size", None)
-            if original_size and processed_size and original_size != processed_size:
-                return True
-
-            original_compare = original_image
-            processed_compare = processed_image
-
-            if hasattr(original_compare, "mode") and original_compare.mode != "RGB":
-                original_compare = original_compare.convert("RGB")
-            if hasattr(processed_compare, "mode") and processed_compare.mode != "RGB":
-                processed_compare = processed_compare.convert("RGB")
-
-            if hasattr(original_compare, "tobytes") and hasattr(processed_compare, "tobytes"):
-                return original_compare.tobytes() != processed_compare.tobytes()
-        except Exception as compare_exc:
-            print(f"[R Post] WARN: Could not compare image pixels: {compare_exc}")
-
-        return False
-
     def _execute_manual_adetailer(self, p, processed, img2img_results):
         """Run manual ADetailer on img2img results via the deterministic runtime executor."""
         return self._adetailer_orch._execute_manual_adetailer(p, processed, img2img_results)
@@ -5540,16 +5998,6 @@ class Script(scripts.Script):
         except Exception:
             return False
 
-    @staticmethod
-    def _clear_runner_callback_cache(runner):
-        """Invalidate ScriptRunner callback cache after script list mutations."""
-        try:
-            callback_map = getattr(runner, "callback_map", None)
-            if isinstance(callback_map, dict):
-                callback_map.clear()
-        except Exception:
-            pass
-
     @contextmanager
     def _manual_adetailer_script_isolation(
         self, processing_obj, adetailer_script, keep_controlnet: bool = False
@@ -5598,14 +6046,6 @@ class Script(scripts.Script):
                     )
                 )
             yield
-
-    def _mark_initial_pass(self, p):
-        """Mark that we're in initial pass so ADetailer can be intercepted later"""
-        self._adetailer_orch._mark_initial_pass(p)
-
-    def _reenable_adetailer_from_previous_generation(self):
-        """Re-enable ALL ADetailer scripts that were disabled in the previous generation"""
-        self._adetailer_orch._reenable_adetailer_from_previous_generation()
 
     def _prevent_all_image_saving(self, p, temp_dir):
         """Prevent all possible image saving during initial pass"""
@@ -5772,6 +6212,18 @@ class Script(scripts.Script):
     def process(self, p, *args):
         """Process method - runs during main processing, can intercept results early"""
         try:
+            # Anima late-detection check: runs after model load (processing.py:917)
+            # Catches first generation after cold-load / checkpoint switch
+            if not getattr(self, "_is_anima_model", False):
+                try:
+                    late_info = self._detect_anima(p=p, sd_model=getattr(shared, "sd_model", None))
+                    if late_info and late_info.get("detected"):
+                        print(
+                            f"[R Process] Anima model detected on engine load ({late_info['model_name']}, variant={self._anima_model_variant}, method={late_info.get('method')})"
+                        )
+                except Exception:
+                    pass
+
             # This method runs during the main processing phase
             # We can use it to prepare for result interception
             if getattr(self, "run_img2img_pass", False):
@@ -5779,7 +6231,7 @@ class Script(scripts.Script):
                 # Mark that we need to intercept results
                 setattr(self, "_intercept_results", True)
 
-                if self._is_adetailer_enabled():
+                if self._adetailer_orch.is_adetailer_enabled():
                     # EARLY PROTECTION: Disable ADetailer during initial pass
                     self._early_adetailer_protection(p)
 
@@ -5794,14 +6246,6 @@ class Script(scripts.Script):
     def _early_adetailer_protection(self, p):
         """Complete ADetailer blocking during initial pass - remove scripts entirely"""
         self._adetailer_orch._early_adetailer_protection(p)
-
-    def _remove_adetailer_from_runner(self, p):
-        """Temporarily remove ADetailer scripts from the script runner during initial pass"""
-        self._adetailer_orch._remove_adetailer_from_runner(p)
-
-    def _restore_early_adetailer_protection(self, processing_obj=None):
-        """Restore ADetailer scripts and flags after an interrupted or completed run."""
-        self._adetailer_orch._restore_early_adetailer_protection(processing_obj)
 
     def process_batch_pre(self, p, *args, **kwargs):
         """Pre-batch processing to set up result interception"""
@@ -5841,16 +6285,13 @@ class Script(scripts.Script):
             random_indices = random.choices(range(max_index), k=size)
         return random_indices.tolist() if isinstance(random_indices, np.ndarray) else random_indices
 
-    def use_autotagger(self, model):
-        return None
-
     def _install_scriptrunner_guard(self, p):
         """Wrap p.scripts postprocess and postprocess_image to skip ADetailer when our block flag is active"""
         self._adetailer_orch._install_scriptrunner_guard(p)
 
     def _prepare_processing_for_manual_adetailer(self, p, processed, img2img_results):
         """Ensure p has correct images, sizes, prompts, and save paths before running ADetailer manually"""
-        if not self._is_adetailer_enabled():
+        if not self._adetailer_orch.is_adetailer_enabled():
             return
         try:
             if not img2img_results:
@@ -5949,3 +6390,18 @@ class Script(scripts.Script):
             )
         except Exception as e:
             print(f"[R UI] Error setting preview guard: {e}")
+
+
+try:
+    from modules import script_callbacks
+
+    def _ranbooru_on_model_loaded(sd_model):
+        try:
+            info = get_anima_model_info(sd_model)
+            Script._last_loaded_model_info = info
+        except Exception:
+            pass
+
+    script_callbacks.on_model_loaded(_ranbooru_on_model_loaded)
+except Exception:
+    pass

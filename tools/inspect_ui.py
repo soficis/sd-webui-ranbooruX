@@ -45,7 +45,6 @@ class DummyAccordion:
         self.elem_id = kwargs.get("elem_id", "")
 
     def __enter__(self):
-        # We need this to return a component representation
         c = ComponentInfo("InputAccordion", label=self.label, default=False)
         components.append(c)
         return c
@@ -57,7 +56,6 @@ class DummyAccordion:
 ui_components_mod.InputAccordion = DummyAccordion
 sys.modules["modules.ui_components"] = ui_components_mod
 
-# Intercept Gradio Component Creations
 components = []
 
 
@@ -70,7 +68,6 @@ class ComponentInfo:
 
 class InterceptComponent:
     def __init__(self, *args, **kwargs):
-        # Determine label and default value
         label = kwargs.get("label", "")
         if not label and args:
             # Maybe label is positional
@@ -80,7 +77,6 @@ class InterceptComponent:
         self.label = label
         self.default = default
 
-        # Infer type name from class being instantiated
         type_name = self.__class__.__name__
         c = ComponentInfo(type_name, label=label, default=default)
         components.append(c)
@@ -139,7 +135,6 @@ for name in ("Group", "Row", "Column", "Accordion", "Box"):
 
 sys.modules["gradio"] = gradio_mod
 
-# Stub requests/cache/numpy/PIL
 sys.modules["requests_cache"] = types.ModuleType("requests_cache")
 requests_mod = types.ModuleType("requests")
 requests_mod.get = lambda *a, **kw: None
@@ -153,12 +148,9 @@ script = ranbooru.Script()
 # We intercept the returned components directly to preserve their names in scripts/ranbooru.py
 returned_components = script.ui(is_img2img=False)
 
-# Write contract to docs/handoff/UI_ARGUMENT_CONTRACT.md
 output_path = "docs/handoff/UI_ARGUMENT_CONTRACT.md"
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-# We map components back to their indices and variable names
-# The return statement from scripts/ranbooru.py has 64 items:
 variable_names = [
     "enabled",
     "tags",
@@ -233,13 +225,9 @@ with open(output_path, "w", encoding="utf-8") as f:
     f.write("| Index | Variable Name | Component Type | Label | Default Value |\n")
     f.write("|---|---|---|---|---|\n")
 
-    # We match each returned component to get its details.
-    # Note: returned_components lists the objects in order. We can query their intercepted properties.
     for idx, (var_name, comp) in enumerate(zip(variable_names, returned_components)):
-        # Inspect properties from the comp object
         # Since it could be a SimpleNamespace (for InputAccordion) or an InterceptComponent
         label = getattr(comp, "label", "")
-        # Get class name of the mock component
         comp_type = comp.__class__.__name__
         if comp_type == "SimpleNamespace" and var_name == "enabled":
             comp_type = "InputAccordion"

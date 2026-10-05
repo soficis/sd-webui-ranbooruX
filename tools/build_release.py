@@ -15,7 +15,7 @@ ALLOWLIST_PATTERNS = [
     "pyproject.toml",
     "README.md",
     "requirements.txt",
-    # "adetailer/**/*",  # local nested extension dir (ignored by .gitignore); do not package
+    # Local nested extension dir (ignored by .gitignore); do not package.
     "data/**/*",
     "docs/CHANGELOG.md",
     "docs/CONFIG.md",
@@ -27,7 +27,6 @@ ALLOWLIST_PATTERNS = [
     "tools/**/*",
 ]
 
-# Files/dirs that must NEVER end up in the zip archive
 FORBIDDEN_PATTERNS = [
     "*/.git/*",
     "*/.venv/*",
@@ -116,9 +115,7 @@ def check_archive_hygiene(zip_path):
 def copy_by_allowlist(src_dir, dest_dir):
     os.makedirs(dest_dir, exist_ok=True)
 
-    # We walk the source directory
     for root, dirs, files in os.walk(src_dir):
-        # Calculate relative path
         rel_root = os.path.relpath(root, src_dir)
         if rel_root == ".":
             rel_root = ""
@@ -126,7 +123,6 @@ def copy_by_allowlist(src_dir, dest_dir):
         for file in files:
             rel_file = os.path.join(rel_root, file).replace("\\", "/")
 
-            # Check if it matches ALLOWLIST_PATTERNS
             matched = False
             for pat in ALLOWLIST_PATTERNS:
                 if "**" in pat:
@@ -140,7 +136,6 @@ def copy_by_allowlist(src_dir, dest_dir):
                         break
 
             if matched:
-                # Still check if it matches forbidden patterns just in case
                 if matches_any(rel_file, FORBIDDEN_PATTERNS):
                     continue
                 src_path = os.path.join(root, file)
@@ -183,11 +178,9 @@ def run_self_tests():
     print("Running build release self-tests...")
     temp_dir = tempfile.mkdtemp()
     try:
-        # Create a mock source directory
         src = os.path.join(temp_dir, "src")
         os.makedirs(src)
 
-        # Add allowed files
         allowed = [
             "README.md",
             "install.py",
@@ -222,7 +215,6 @@ def run_self_tests():
         zip_clean = os.path.join(temp_dir, "release_clean.zip")
         build_zip(stage, zip_clean)
 
-        # Should pass
         check_archive_hygiene(zip_clean)
         print("Clean archive verification: PASS")
 
@@ -316,7 +308,6 @@ def main():
     try:
         check_archive_hygiene(zip_path)
         print(f"Release built and verified successfully: {zip_path}")
-        # Clean up staging dir
         remove_tree_best_effort(staging_dir)
     except ValueError as e:
         print(f"Release verification FAILED: {e}")

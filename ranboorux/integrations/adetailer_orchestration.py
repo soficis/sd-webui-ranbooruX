@@ -39,6 +39,16 @@ class AdetailerState(Enum):
 
 _logger = logging.getLogger("ranboorux.adetailer_orch")
 
+# Method names patched/unpatched by the manual-ADetailer isolation protocol
+# (shared by force-enable and re-enable paths).
+_ADETAILER_PATCHED_METHODS = (
+    "postprocess",
+    "process",
+    "process_batch",
+    "before_process",
+    "after_process",
+)
+
 
 class AdetailerOrchestrator:
     """Encapsulates ADetailer lifecycle management for RanbooruX.
@@ -50,10 +60,6 @@ class AdetailerOrchestrator:
     def __init__(self, script_instance: Any) -> None:
         self._script: Any = script_instance
         self._state: AdetailerState = AdetailerState.IDLE
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _is_adetailer_script(script: object) -> bool:
@@ -79,21 +85,9 @@ class AdetailerOrchestrator:
             )
             return False
 
-    # ------------------------------------------------------------------
-    # Queries
-    # ------------------------------------------------------------------
-
     def is_adetailer_enabled(self) -> bool:
         """Return whether the Script-level ADetailer support toggle is on."""
         return bool(getattr(self._script, "_adetailer_support_enabled", False))
-
-    def _is_adetailer_enabled(self) -> bool:
-        """Alias kept for internal callers during extraction."""
-        return self.is_adetailer_enabled()
-
-    # ------------------------------------------------------------------
-    # Initial-pass lifecycle
-    # ------------------------------------------------------------------
 
     def _mark_initial_pass(self, p: object) -> None:
         """Mark that we are in the initial pass so ADetailer can be intercepted later."""
@@ -121,7 +115,6 @@ class AdetailerOrchestrator:
             # CRITICAL: Re-enable any ADetailer scripts from previous generation
             self._reenable_adetailer_from_previous_generation()
 
-            # Just set a flag that we are in initial pass
             self._script._ranbooru_initial_pass = True
 
             # Store reference to processing object for later use
@@ -137,7 +130,6 @@ class AdetailerOrchestrator:
         try:
             print("[R Process] Early ADetailer protection activated")
 
-            # Check if we are in the initial pass
             if getattr(self._script, "_ranbooru_initial_pass", False):
                 print("[R Process] Detected initial pass - COMPLETELY BLOCKING ADetailer")
 
@@ -176,30 +168,21 @@ class AdetailerOrchestrator:
             if not hasattr(self._script, "_stored_adetailer_scripts"):
                 self._script._stored_adetailer_scripts = {"alwayson": [], "regular": []}
 
-            # Remove ADetailer from alwayson_scripts
-            if hasattr(p.scripts, "alwayson_scripts") and p.scripts.alwayson_scripts:
-                original_alwayson = list(p.scripts.alwayson_scripts)
-                filtered_alwayson = [
-                    s for s in original_alwayson if not self._is_adetailer_script(s)
-                ]
-                removed_alwayson = [s for s in original_alwayson if self._is_adetailer_script(s)]
+            # Remove ADetailer from alwayson_scripts and regular scripts
+            for list_attr, store_key in (
+                ("alwayson_scripts", "alwayson"),
+                ("scripts", "regular"),
+            ):
+                script_list = getattr(p.scripts, list_attr, None)
+                if not script_list:
+                    continue
+                original = list(script_list)
+                filtered = [s for s in original if not self._is_adetailer_script(s)]
+                removed = [s for s in original if self._is_adetailer_script(s)]
 
-                p.scripts.alwayson_scripts = filtered_alwayson
-                self._script._stored_adetailer_scripts["alwayson"] = removed_alwayson
-                print(
-                    f"[R Process] Removed {len(removed_alwayson)} ADetailer scripts "
-                    "from alwayson_scripts"
-                )
-
-            # Remove ADetailer from regular scripts
-            if hasattr(p.scripts, "scripts") and p.scripts.scripts:
-                original_scripts = list(p.scripts.scripts)
-                filtered_scripts = [s for s in original_scripts if not self._is_adetailer_script(s)]
-                removed_scripts = [s for s in original_scripts if self._is_adetailer_script(s)]
-
-                p.scripts.scripts = filtered_scripts
-                self._script._stored_adetailer_scripts["regular"] = removed_scripts
-                print(f"[R Process] Removed {len(removed_scripts)} ADetailer scripts from scripts")
+                setattr(p.scripts, list_attr, filtered)
+                self._script._stored_adetailer_scripts[store_key] = removed
+                print(f"[R Process] Removed {len(removed)} ADetailer scripts from {list_attr}")
 
             # Also check global script lists (ADetailer-Neo on Forge Neo)
             try:
@@ -223,8 +206,6 @@ class AdetailerOrchestrator:
                             )
             except Exception:
                 pass
-
-        # Also check global script lists (ADetailer-Neo on Forge Neo)
         except Exception as e:
             print(f"[R Process] Error removing ADetailer from runner: {e}")
 
@@ -251,22 +232,19 @@ class AdetailerOrchestrator:
             stored = getattr(self._script, "_stored_adetailer_scripts", None)
             if stored and runner:
                 try:
-                    if hasattr(runner, "alwayson_scripts") and stored.get("alwayson"):
-                        for script in stored["alwayson"]:
-                            if script not in runner.alwayson_scripts:
-                                runner.alwayson_scripts.append(script)
-                        print(
-                            f"[R Process] Reattached {len(stored['alwayson'])} "
-                            "ADetailer always-on script(s)"
-                        )
-                    if hasattr(runner, "scripts") and stored.get("regular"):
-                        for script in stored["regular"]:
-                            if script not in runner.scripts:
-                                runner.scripts.append(script)
-                        print(
-                            f"[R Process] Reattached {len(stored['regular'])} "
-                            "ADetailer on-demand script(s)"
-                        )
+                    for list_attr, store_key, kind in (
+                        ("alwayson_scripts", "alwayson", "always-on"),
+                        ("scripts", "regular", "on-demand"),
+                    ):
+                        if hasattr(runner, list_attr) and stored.get(store_key):
+                            target = getattr(runner, list_attr)
+                            for script in stored[store_key]:
+                                if script not in target:
+                                    target.append(script)
+                            print(
+                                f"[R Process] Reattached {len(stored[store_key])} "
+                                f"ADetailer {kind} script(s)"
+                            )
                 finally:
                     # Clear stored references so we don't duplicate reinsertion
                     delattr(self._script, "_stored_adetailer_scripts")
@@ -296,10 +274,6 @@ class AdetailerOrchestrator:
 
         except Exception as e:
             print(f"[R] Error preparing ADetailer: {e}")
-
-    # ------------------------------------------------------------------
-    # Full restore / native ADetailer re-enablement
-    # ------------------------------------------------------------------
 
     def _restore_native_adetailer_scripts(self, p: object) -> None:
         """Ensure native ADetailer scripts resume running when manual support is disabled."""
@@ -404,13 +378,7 @@ class AdetailerOrchestrator:
                     if hasattr(script, "enabled") and script.enabled is False:
                         script.enabled = True
                         restored = True
-                    for method_name in (
-                        "postprocess",
-                        "process",
-                        "process_batch",
-                        "before_process",
-                        "after_process",
-                    ):
+                    for method_name in _ADETAILER_PATCHED_METHODS:
                         backup_name = f"_ranbooru_original_{method_name}"
                         if hasattr(script, backup_name):
                             try:
@@ -563,10 +531,6 @@ class AdetailerOrchestrator:
         else:
             print("[R Before] Native ADetailer flags already enabled; no changes made")
 
-    # ------------------------------------------------------------------
-    # Re-enable from previous generation
-    # ------------------------------------------------------------------
-
     def _reenable_adetailer_from_previous_generation(self) -> None:
         """Re-enable ALL ADetailer scripts that were disabled in the previous generation."""
         try:
@@ -589,14 +553,7 @@ class AdetailerOrchestrator:
                         script.enabled = original_enabled
 
                     # Restore ALL original methods that were disabled
-                    methods_to_restore = [
-                        "postprocess",
-                        "process",
-                        "process_batch",
-                        "before_process",
-                        "after_process",
-                    ]
-                    for method_name in methods_to_restore:
+                    for method_name in _ADETAILER_PATCHED_METHODS:
                         original_method_attr = f"_ranbooru_original_{method_name}"
                         if hasattr(script, original_method_attr):
                             original_method = getattr(script, original_method_attr)
@@ -619,10 +576,6 @@ class AdetailerOrchestrator:
 
         except Exception as e:
             print(f"[R] Error in comprehensive ADetailer re-enable: {e}")
-
-    # ------------------------------------------------------------------
-    # Manual ADetailer execution
-    # ------------------------------------------------------------------
 
     def _execute_manual_adetailer(self, p: Any, processed: Any, img2img_results: List[Any]) -> bool:
         """Run manual ADetailer on img2img results via the deterministic runtime executor."""
@@ -688,10 +641,6 @@ class AdetailerOrchestrator:
             p.processed.images.extend(result.images)
         return result.successful_processes > 0
 
-    # ------------------------------------------------------------------
-    # ScriptRunner guard
-    # ------------------------------------------------------------------
-
     def _install_scriptrunner_guard(self, p: object) -> None:
         """Wrap p.scripts postprocess/postprocess_image to skip ADetailer when blocked."""
         try:
@@ -717,10 +666,6 @@ class AdetailerOrchestrator:
         except Exception as e:
             self._script._log_patch_event("warning", f"Failed to install ScriptRunner guard: {e}")
             print(f"[R] Error installing ScriptRunner guard: {e}")
-
-    # ------------------------------------------------------------------
-    # Preview guard (shared.state)
-    # ------------------------------------------------------------------
 
     def _install_preview_guard(self) -> None:
         """Install a guard around shared.state.assign_current_image to block wrong previews."""

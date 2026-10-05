@@ -754,3 +754,13 @@ def test_logger_handler_includes_no_secrets(monkeypatch):
                 assert "secret123" not in arg_str
     finally:
         logger.removeHandler(handler)
+
+
+def test_requesting_shim_reexports():
+    """Verify that requesting.py shim re-exports canonical symbols from http_client."""
+    import ranboorux.requesting as req
+
+    assert hasattr(req, "BooruSession")
+    assert hasattr(req, "validate_outbound_url")
+    assert hasattr(req, "UnsafeUrlError")
+    assert req.BooruSession is http_client.BooruSession

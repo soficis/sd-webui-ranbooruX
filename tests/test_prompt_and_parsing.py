@@ -213,17 +213,17 @@ def test_post_rejected_by_filter_does_not_reject_unrelated_tags():
     rejected, reason = script._post_rejected_by_filter(
         post,
         filter_ctx=None,
-        toggles=(
-            True,  # remove_artist
-            True,  # remove_character
-            True,  # remove_clothing
-            True,  # remove_text
-            True,  # restrict_subject
-            True,  # remove_furry
-            True,  # remove_headwear
-            True,  # remove_girl_suffix
-            True,  # preserve_hair_eye
-            True,  # remove_series
+        toggles=ranbooru.rb_tag_pipeline.FilterToggles(
+            remove_artist=True,
+            remove_character=True,
+            remove_clothing=True,
+            remove_text=True,
+            restrict_subject=True,
+            remove_furry=True,
+            remove_headwear=True,
+            remove_girl_suffix=True,
+            preserve_hair_eye=True,
+            remove_series=True,
         ),
         base_colors=(set(), set()),
         allowed_subjects=set(),

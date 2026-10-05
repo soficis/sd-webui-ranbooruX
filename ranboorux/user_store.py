@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -9,6 +10,8 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Union
 
 PathLike = Union[str, Path]
 NormalizeFn = Optional[Callable[[str], str]]
+
+logger = logging.getLogger("ranboorux.user_store")
 
 
 class UserStoreError(RuntimeError):
@@ -52,6 +55,14 @@ def atomic_write_text(file_path: PathLike, content: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
         temp_path.replace(target)
+        # Enforce owner-only permissions (0600) — os.replace() preserves
+        # the destination's existing ACL/mode if it already exists, so the
+        # 0600 from mkstemp would be lost on second write. Best-effort;
+        # Windows maps 0600 to read-only flag, POSIX enforces strictly.
+        try:
+            os.chmod(target, 0o600)
+        except OSError as chmod_exc:
+            logger.warning("Could not set file permissions (0600) on %s: %s", target, chmod_exc)
     except Exception as exc:
         try:
             temp_path.unlink(missing_ok=True)

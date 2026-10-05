@@ -262,6 +262,36 @@ def test_runner_guard_restores_owned_callback_map():
     assert runner.callback_map == {"original": (1, [adetailer_script])}
 
 
+def test_runner_guard_keeps_adetailer_reattached_during_postprocess():
+    class AfterDetailerScript:
+        pass
+
+    class OtherScript:
+        pass
+
+    adetailer_script = AfterDetailerScript()
+    other_script = OtherScript()
+
+    class Runner:
+        def __init__(self):
+            # State after the initial-pass safeguard removed ADetailer from the runner.
+            self.alwayson_scripts = [other_script]
+            self.scripts = [other_script]
+
+        def postprocess(self, *_args, **_kwargs):
+            # RanbooruX reattaches ADetailer from inside the host's postprocess call.
+            self.alwayson_scripts.append(adetailer_script)
+            self.scripts.append(adetailer_script)
+
+    runner = Runner()
+    adetailer_runtime.install_runner_guard(runner, lambda: True, adetailer_runtime.PatchRegistry())
+
+    runner.postprocess()
+
+    assert runner.alwayson_scripts == [other_script, adetailer_script]
+    assert runner.scripts == [other_script, adetailer_script]
+
+
 def test_execute_manual_adetailer_counts_changed_image():
     class AfterDetailerScript:
         def postprocess_image(self, _p, temp_processed, *_args):

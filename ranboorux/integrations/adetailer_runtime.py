@@ -74,10 +74,6 @@ class PatchRegistry:
         setattr(target, method_name, replacement)
 
     def uninstall_all(self) -> List[str]:
-        if not self._patches:
-            errors = list(self.restore_errors)
-            self.restore_errors.clear()
-            return errors
         for patch in reversed(self._patches):
             try:
                 if getattr(patch.target, patch.method_name, None) is patch.installed_method:
@@ -117,21 +113,17 @@ class RunnerSnapshot:
         expected_scripts: Optional[List[Any]] = None,
         expected_callback_map: Optional[Dict[Any, Any]] = None,
     ) -> None:
-        current_alwayson = list(getattr(runner, "alwayson_scripts", []) or [])
-        if expected_alwayson_scripts is None or current_alwayson == expected_alwayson_scripts:
-            setattr(runner, "alwayson_scripts", list(self.alwayson_scripts))
-
-        current_scripts = list(getattr(runner, "scripts", []) or [])
-        if expected_scripts is None or current_scripts == expected_scripts:
-            setattr(runner, "scripts", list(self.scripts))
+        for list_attr, expected in (
+            ("alwayson_scripts", expected_alwayson_scripts),
+            ("scripts", expected_scripts),
+        ):
+            current = list(getattr(runner, list_attr, []) or [])
+            if expected is None or current == expected:
+                setattr(runner, list_attr, list(getattr(self, list_attr)))
 
         if expected_callback_map is not None:
-            current_callback_map = getattr(runner, "callback_map", None)
-            if (
-                not isinstance(current_callback_map, dict)
-                or current_callback_map != expected_callback_map
-            ):
-                return
+            _restore_runner_callback_map(runner, self.callback_map, expected_callback_map)
+            return
         if self.callback_map is None:
             if hasattr(runner, "callback_map"):
                 try:
@@ -194,6 +186,23 @@ def _restore_runner_callback_map(
     setattr(runner, "callback_map", dict(original_callback_map))
 
 
+def _restore_guarded_script_list(runner: object, list_attr: str, saved: List[Any]) -> None:
+    """Put back the pre-call script list, keeping ADetailer scripts reattached during the call.
+
+    RanbooruX reattaches ADetailer from inside the guarded postprocess; restoring the
+    saved list verbatim would drop it from the runner for every later generation.
+    """
+    if not hasattr(runner, list_attr):
+        return
+    current = list(getattr(runner, list_attr, []) or [])
+    reattached = [
+        item
+        for item in current
+        if _is_adetailer_script(item) and not any(item is kept for kept in saved)
+    ]
+    setattr(runner, list_attr, list(saved) + reattached)
+
+
 def install_runner_guard(
     runner: object,
     block_flag_fn: Callable[[], bool],
@@ -231,10 +240,8 @@ def install_runner_guard(
                     expected_callback_map = {}
                 return postprocess(*args, **kwargs)
             finally:
-                if hasattr(runner, "alwayson_scripts"):
-                    setattr(runner, "alwayson_scripts", saved_alwayson)
-                if hasattr(runner, "scripts"):
-                    setattr(runner, "scripts", saved_scripts)
+                _restore_guarded_script_list(runner, "alwayson_scripts", saved_alwayson)
+                _restore_guarded_script_list(runner, "scripts", saved_scripts)
                 if expected_callback_map is not None:
                     _restore_runner_callback_map(
                         runner,
@@ -275,10 +282,8 @@ def install_runner_guard(
                     expected_callback_map = {}
                 return postprocess_image(*args, **kwargs)
             finally:
-                if hasattr(runner, "alwayson_scripts"):
-                    setattr(runner, "alwayson_scripts", saved_alwayson)
-                if hasattr(runner, "scripts"):
-                    setattr(runner, "scripts", saved_scripts)
+                _restore_guarded_script_list(runner, "alwayson_scripts", saved_alwayson)
+                _restore_guarded_script_list(runner, "scripts", saved_scripts)
                 if expected_callback_map is not None:
                     _restore_runner_callback_map(
                         runner,
@@ -359,43 +364,24 @@ def runner_isolation(
         )
 
 
-def _images_differ(original: object, updated: object, _debug: bool = False) -> bool:
+def _images_differ(original: object, updated: object) -> bool:
     if updated is None:
-        if _debug:
-            print("[R] _images_differ: updated is None → False")
         return False
     if original is None:
-        if _debug:
-            print("[R] _images_differ: original is None → True")
         return True
     if original is updated:
-        if _debug:
-            print("[R] _images_differ: same object → False")
         return False
     original_size = getattr(original, "size", None)
     updated_size = getattr(updated, "size", None)
     if original_size is not None and updated_size is not None and original_size != updated_size:
-        if _debug:
-            print(f"[R] _images_differ: size {original_size} vs {updated_size} → True")
         return True
     try:
         original_bytes = original.tobytes() if hasattr(original, "tobytes") else None
         updated_bytes = updated.tobytes() if hasattr(updated, "tobytes") else None
         if original_bytes is not None and updated_bytes is not None:
-            differ = bool(original_bytes != updated_bytes)
-            if _debug:
-                o_token = getattr(original, "token", "?")
-                u_token = getattr(updated, "token", "?")
-                print(
-                    f"[R] _images_differ: tobytes {o_token} vs {u_token} len={len(original_bytes)}/{len(updated_bytes)} → {differ}"
-                )
-            return differ
+            return bool(original_bytes != updated_bytes)
     except Exception:
-        if _debug:
-            print("[R] _images_differ: tobytes exception → identity check")
         return True
-    if _debug:
-        print("[R] _images_differ: no tobytes → identity check → True")
     return True
 
 

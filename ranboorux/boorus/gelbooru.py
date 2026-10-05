@@ -1,5 +1,3 @@
-"""Gelbooru and GelbooruCompatible booru classes."""
-
 import random
 import time
 import xml.etree.ElementTree as ET
@@ -8,6 +6,18 @@ from urllib.parse import quote_plus
 
 from ranboorux import http_client as rb_http_client
 from ranboorux.boorus import Booru
+
+
+def _log(message: object) -> None:
+    try:
+        from scripts.ranbooru import _log as rb_log
+
+        rb_log(message)
+    except (ImportError, AttributeError):
+        msg_str = str(message)
+        if not msg_str.startswith("[R]"):
+            msg_str = f"[R] {msg_str}"
+        print(msg_str)
 
 
 class Gelbooru(Booru):
@@ -50,7 +60,7 @@ class Gelbooru(Booru):
             if fetched_data and "post" in fetched_data and isinstance(fetched_data["post"], list):
                 all_fetched_posts = fetched_data["post"]
             _r.COUNT = len(all_fetched_posts)
-            print(f"[R] Found {_r.COUNT} post(s) for ID: {post_id}")
+            _log(f"[R] Found {_r.COUNT} post(s) for ID: {post_id}")
         else:
             page = random.randint(0, max_pages - 1)
             query_url = f"{self.base_api_url}{credentials_query}&pid={page}{tags_query}"
@@ -68,7 +78,7 @@ class Gelbooru(Booru):
                     _r.COUNT = len(all_fetched_posts)
             else:
                 _r.COUNT = len(all_fetched_posts)
-            print(
+            _log(
                 f"[R] Fetched {len(all_fetched_posts)} posts from page {page}. Reported total (approx): {_r.COUNT}"
             )
         return [self._standardize_post(post) for post in all_fetched_posts]
@@ -128,7 +138,7 @@ class GelbooruCompatible(Booru):
         if last_error is None:
             error_summary = "unknown error"
         elif isinstance(last_error, BooruError):
-            error_summary = str(last_error)
+            error_summary = rb_http_client.sanitize_exception_text(str(last_error))
         else:
             error_summary = last_error.__class__.__name__
         raise BooruError(
@@ -180,7 +190,9 @@ class GelbooruCompatible(Booru):
         try:
             root = ET.fromstring(text_payload)
         except ET.ParseError as exc:
-            raise BooruError(f"Failed to parse XML from {self.booru_name}: {exc}") from exc
+            raise BooruError(
+                f"Failed to parse XML from {self.booru_name}: {rb_http_client.sanitize_exception_text(str(exc))}"
+            ) from exc
         entries = [element.attrib for element in root.findall(entity_key)]
         if not entries and root.tag == entity_key:
             entries = [root.attrib]
@@ -245,13 +257,13 @@ class GelbooruCompatible(Booru):
             query_base = f"{self._post_endpoint}&limit={POST_AMOUNT}&id={post_id}{tags_query}"
             posts, approx = self._request_dapi(query_base, "post")
             _r.COUNT = approx
-            print(f"[R] Gelbooru-compatible: found {len(posts)} post(s) for ID: {post_id}")
+            _log(f"[R] Gelbooru-compatible: found {len(posts)} post(s) for ID: {post_id}")
         else:
             page = random.randint(0, max_pages - 1) if max_pages > 0 else 0
             query_base = f"{self._post_endpoint}&limit={POST_AMOUNT}&pid={page}{tags_query}"
             posts, approx = self._request_dapi(query_base, "post")
             _r.COUNT = approx
-            print(
+            _log(
                 f"[R] Gelbooru-compatible: fetched {len(posts)} posts from page {page}. Reported count={approx}"
             )
         standardized = []
@@ -260,17 +272,3 @@ class GelbooruCompatible(Booru):
             normalized["source_base_url"] = self.base_url
             standardized.append(normalized)
         return standardized
-
-    def get_tags(self, name_pattern: Optional[str] = None, limit: int = 100) -> List[dict]:
-        query = f"{self._tag_endpoint}&limit={limit}"
-        if name_pattern:
-            query += f"&name_pattern={quote_plus(name_pattern)}"
-        tags, _ = self._request_dapi(query, "tag")
-        return tags
-
-    def get_tag_aliases(self, name_pattern: Optional[str] = None, limit: int = 100) -> List[dict]:
-        query = f"{self._alias_endpoint}&limit={limit}"
-        if name_pattern:
-            query += f"&name_pattern={quote_plus(name_pattern)}"
-        aliases, _ = self._request_dapi(query, "tag_alias")
-        return aliases

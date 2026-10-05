@@ -1,5 +1,3 @@
-"""Booru base class and factory function."""
-
 import time
 
 from ranboorux import http_client as rb_http_client
@@ -25,41 +23,30 @@ class Booru:
             except Exception as e:
                 from requests.exceptions import HTTPError, RequestException
 
+                message = rb_http_client.safe_exception_message(
+                    f"fetching data from {self.booru_name}", query_url, e
+                )
                 if isinstance(e, HTTPError):
                     status = getattr(e.response, "status_code", 0) if hasattr(e, "response") else 0
                     if status and 400 <= status < 500:
-                        message = rb_http_client.safe_exception_message(
-                            f"fetching data from {self.booru_name}", query_url, e
-                        )
                         _log(f"Error {message}")
                         raise BooruError(f"HTTP Error {message}") from e
                 elif not isinstance(e, RequestException):
-                    message = rb_http_client.safe_exception_message(
-                        f"fetching data from {self.booru_name}", query_url, e
-                    )
                     _log(f"Error {message}")
                     raise BooruError(f"HTTP Error {message}") from e
 
                 if attempt < max_retries - 1:
                     sleep_time = 2**attempt
-                    message = rb_http_client.safe_exception_message(
-                        f"fetching data from {self.booru_name}", query_url, e
-                    )
                     _log(f"[R] Retry {attempt + 1}/{max_retries} after {sleep_time}s: {message}")
                     time.sleep(sleep_time)
                 else:
-                    message = rb_http_client.safe_exception_message(
-                        f"fetching data from {self.booru_name}", query_url, e
-                    )
                     _log(f"Error {message}")
                     raise BooruError(f"HTTP Error {message}") from e
 
     def _is_direct_image_url(self, url):
-        """Check if URL is a direct image URL (not from external sites like Pixiv/Twitter)"""
         if not url or not isinstance(url, str):
             return False
 
-        # Skip external sites that don't provide direct image access
         external_sites = [
             "pixiv.net",
             "pximg.net",
@@ -75,16 +62,13 @@ class Booru:
         ]
 
         url_lower = url.lower()
-        for site in external_sites:
-            if site in url_lower:
-                return False
+        if any(site in url_lower for site in external_sites):
+            return False
 
-        # Check if URL ends with common image extensions
         image_extensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"]
         if any(url_lower.endswith(ext) for ext in image_extensions):
             return True
 
-        # Check if URL contains image-serving patterns
         if any(pattern in url_lower for pattern in ["/images/", "/img/", "/media/", "/files/"]):
             return True
 
@@ -96,7 +80,6 @@ class Booru:
         post = {}
         # extract tags in a robust way; some APIs return categorized tags as dicts
         raw_tags = post_data.get("tags", post_data.get("tag_string", ""))
-        # store categorized lists when possible
         artist_tags = []
         character_tags = []
         copyright_tags = []
@@ -127,14 +110,12 @@ class Booru:
         if not character_tags and isinstance(raw_tags, str):
             all_tags = _split_tag_string(raw_tags)
             for tag in all_tags:
-                # Common patterns for character tags: contains parentheses (series name) or ends with specific patterns
                 if (
                     ("(" in tag and ")" in tag)
                     or tag.endswith("_(series)")
                     or tag.endswith("_(character)")
                 ):
                     character_tags.append(tag)
-                # Also catch some common character name patterns (this is heuristic but should catch most)
                 elif any(
                     series in tag.lower()
                     for series in [
@@ -157,12 +138,9 @@ class Booru:
         if post["file_url"] is None:
             post["file_url"] = post_data.get("large_file_url")
         if post["file_url"] is None:
-            # Check if source is a direct image URL before using it
             source_url = post_data.get("source")
             if source_url and self._is_direct_image_url(source_url):
                 post["file_url"] = source_url
-            else:
-                post["file_url"] = None
         post["id"] = post_data.get("id")
         post["rating"] = post_data.get("rating")
         post["booru_name"] = self.booru_name

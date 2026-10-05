@@ -26,10 +26,6 @@ def parse_custom_weights(weights_str: Optional[str]) -> List[float]:
 def filter_candidates(
     candidates: Iterable[str], enabled_loras: Iterable[str], blacklist_loras: Iterable[str]
 ) -> List[str]:
-    """
-    Filters candidates based on enabled selections and blacklists.
-    All inputs and filters are normalized prior to matching.
-    """
     enabled_selection = {
         normalize_lora_name(name) for name in enabled_loras if normalize_lora_name(name)
     }
@@ -55,10 +51,7 @@ def select_loras(
     custom_weights: Optional[List[float]] = None,
     random_source=None,
 ) -> List[Tuple[str, float]]:
-    """
-    Selects the requested amount of LoRAs and assigns weights.
-    Uses the provided random_source (e.g. random.Random(seed)) for deterministic results.
-    """
+    """Pass random.Random(seed) as random_source for deterministic results."""
     if not candidates:
         return []
 
