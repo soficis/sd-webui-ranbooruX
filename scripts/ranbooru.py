@@ -2347,7 +2347,7 @@ class Script(scripts.Script):
             preset_preserve_colors = gr.Button("Preserve Base Colors")
             preset_quick_strip = gr.Button("Quick Strip")
         with gr.Group():
-            gr.Markdown("**Text & Metadata**")
+            gr.Markdown("**Metadata**")
             remove_bad_tags = gr.Checkbox(
                 label="Remove common 'bad' tags",
                 value=True,
@@ -2358,13 +2358,13 @@ class Script(scripts.Script):
                 value=True,
                 info="Strip speech bubbles, watermark text, and similar metadata from fetched prompts.",
             )
-        with gr.Group():
-            gr.Markdown("**Characters & Series**")
             remove_artist_tags = gr.Checkbox(
                 label="Remove artist tags",
                 value=False,
                 info="Drop artist credits drawn from the source post.",
             )
+        with gr.Group():
+            gr.Markdown("**Content**")
             remove_character_tags = gr.Checkbox(
                 label="Remove character tags",
                 value=False,
@@ -2375,15 +2375,11 @@ class Script(scripts.Script):
                 value=False,
                 info="Ignore franchise/game/anime tags to keep prompts generic.",
             )
-        with gr.Group():
-            gr.Markdown("**Clothing & Accessories**")
             remove_clothing_tags = gr.Checkbox(
                 label="Remove clothing tags",
                 value=False,
                 info="Omit apparel/accessory tags introduced by the booru.",
             )
-        with gr.Group():
-            gr.Markdown("**Furry & Headwear**")
             remove_furry_tags = gr.Checkbox(
                 label="Filter furry/pokemon tags",
                 value=False,
@@ -2394,27 +2390,22 @@ class Script(scripts.Script):
                 value=False,
                 info="Strip hats, halos, and similar head accessories.",
             )
-        with gr.Group():
-            gr.Markdown("**Girl Suffix**")
             remove_girl_suffix_tags = gr.Checkbox(
                 label="Filter _girl suffix tags",
                 value=False,
                 info="Remove demon_girl, cat_girl, angel_girl and similar *_girl tags (keeps 1girl, 2girls, etc.).",
             )
         with gr.Group():
-
-            gr.Markdown("**Colors & Traits**")
-            preserve_hair_eye_colors = gr.Checkbox(
-                label="Preserve base hair & eye colors",
-                value=False,
-                info="Keep your prompt's hair/eye colors while removing conflicting imports.",
-            )
-        with gr.Group():
-            gr.Markdown("**Subject Constraints**")
+            gr.Markdown("**Subject & Colors**")
             restrict_subject_tags = gr.Checkbox(
                 label="Keep only subject counts",
                 value=False,
                 info="Maintain your subject count (e.g., solo/1girl) by removing mismatched tags.",
+            )
+            preserve_hair_eye_colors = gr.Checkbox(
+                label="Preserve base hair & eye colors",
+                value=False,
+                info="Keep your prompt's hair/eye colors while removing conflicting imports.",
             )
 
         preset_strip_series.click(
@@ -2514,6 +2505,7 @@ class Script(scripts.Script):
 
     def ui(self, is_img2img):
         with InputAccordion(False, label="RanbooruX", elem_id=self.elem_id("ra_enable")) as enabled:
+            gr.Markdown("**Source**")
             booru_list = [
                 "danbooru",
                 "gelbooru",
@@ -2545,120 +2537,30 @@ class Script(scripts.Script):
                     placeholder="https://realbooru.com",
                     value=self._gelbooru_compat_base_url,
                 )
-            max_pages = gr.Slider(
-                label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1
+            fringe_benefits = gr.Checkbox(
+                label="Gelbooru: Fringe Benefits", value=True, visible=False
             )
-            gr.Markdown("""## Post""")
-            post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
-            gr.Markdown("""## Tags""")
-            tags = gr.Textbox(lines=1, label="Tags to Search (Pre)")
-            remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
             mature_rating = gr.Radio(
                 list(RATINGS.get("gelbooru", RATING_TYPES["none"])),
                 label="Mature Rating",
                 value="All",
             )
-            with gr.Accordion("Removal Filters", open=False):
-                with gr.Group():
-                    use_tag_catalog, catalog_path = self._build_catalog_ui_section()
 
-                (
-                    remove_bad_tags,
-                    remove_text_tags,
-                    remove_artist_tags,
-                    remove_character_tags,
-                    remove_series_tags,
-                    remove_clothing_tags,
-                    remove_furry_tags,
-                    remove_headwear_tags,
-                    remove_girl_suffix_tags,
-                    preserve_hair_eye_colors,
-                    restrict_subject_tags,
-                ) = self._build_filter_ui_section()
-            if not os.path.exists(PERSONAL_REMOVE_FILE):
-                self._write_list_file(PERSONAL_REMOVE_FILE, [])
-            if not os.path.exists(FAVORITES_FILE):
-                self._write_list_file(FAVORITES_FILE, [])
-            personal_choices = self._read_list_file(PERSONAL_REMOVE_FILE)
-            favorite_choices = self._read_list_file(FAVORITES_FILE)
-            with gr.Accordion("Personal Lists", open=False):
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("**Personal Removal List**")
-                        personal_remove_dropdown = gr.Dropdown(
-                            choices=personal_choices,
-                            value=[],
-                            multiselect=True,
-                            label="Select tags to remove",
-                            allow_custom_value=False,
-                        )
-                        personal_remove_display = gr.Textbox(
-                            label=f"Personal removal list ({len(personal_choices)})",
-                            value=", ".join(personal_choices),
-                            interactive=False,
-                            lines=3,
-                        )
-                        personal_remove_input = gr.Textbox(
-                            label="Add tags", placeholder="comma or newline separated"
-                        )
-                        with gr.Row():
-                            personal_add_btn = gr.Button("Add", variant="primary")
-                            personal_remove_btn = gr.Button("Remove Selected")
-                            personal_dedupe_btn = gr.Button("De-duplicate")
-                        with gr.Row():
-                            personal_import_file = gr.File(
-                                label="Import CSV/TXT", file_types=[".txt", ".csv"], visible=True
-                            )
-                            personal_export_btn = gr.DownloadButton(
-                                "Export", value=PERSONAL_REMOVE_FILE
-                            )
-                        personal_status = gr.Markdown("", visible=True)
-                    with gr.Column():
-                        gr.Markdown("**Favorites List**")
-                        favorites_dropdown = gr.Dropdown(
-                            choices=favorite_choices,
-                            value=[],
-                            multiselect=True,
-                            label="Select favorites to remove",
-                            allow_custom_value=False,
-                        )
-                        favorites_display = gr.Textbox(
-                            label=f"Favorites list ({len(favorite_choices)})",
-                            value=", ".join(favorite_choices),
-                            interactive=False,
-                            lines=3,
-                        )
-                        favorites_input = gr.Textbox(
-                            label="Add favorites", placeholder="comma or newline separated"
-                        )
-                        with gr.Row():
-                            favorites_add_btn = gr.Button("Add", variant="primary")
-                            favorites_remove_btn = gr.Button("Remove Selected")
-                            favorites_dedupe_btn = gr.Button("De-duplicate")
-                        with gr.Row():
-                            favorites_import_file = gr.File(
-                                label="Import CSV/TXT", file_types=[".txt", ".csv"], visible=True
-                            )
-                            favorites_export_btn = gr.DownloadButton("Export", value=FAVORITES_FILE)
-                        favorites_status = gr.Markdown("", visible=True)
-            self._ui_personal_dropdown = personal_remove_dropdown
-            self._ui_favorites_dropdown = favorites_dropdown
+            gr.Markdown("**Search**")
+            tags = gr.Textbox(lines=1, label="Tags to Search (Pre)")
+            post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
+            max_pages = gr.Slider(
+                label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1
+            )
+            sorting_order = gr.Radio(
+                ["Random", "Score Descending", "Score Ascending"],
+                label="Sort Order (tag search)",
+                value="Random",
+            )
+
+            gr.Markdown("**Prompt**")
             shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
             change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
-            anima_auto_detect = gr.Checkbox(
-                label="Auto-detect Anima model",
-                value=True,
-                info="Automatically enable space-separated tags when an Anima model is loaded",
-            )
-            anima_tune_img2img = gr.Checkbox(
-                label="Auto-tune Img2Img parameters for Anima",
-                value=True,
-                info="Automatically optimize steps, CFG scale, and denoising for Anima flow-matching",
-            )
-            same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
-            fringe_benefits = gr.Checkbox(
-                label="Gelbooru: Fringe Benefits", value=True, visible=False
-            )
             limit_tags = gr.Slider(
                 value=1.0, label="Limit tags by %", minimum=0.05, maximum=1.0, step=0.05
             )
@@ -2675,11 +2577,168 @@ class Script(scripts.Script):
                 label="Change Color",
                 value="Don't Change",
             )
-            sorting_order = gr.Radio(
-                ["Random", "Score Descending", "Score Ascending"],
-                label="Sort Order (tag search)",
-                value="Random",
-            )
+            same_prompt = gr.Checkbox(label="Use same prompt for batch", value=False)
+
+            with gr.Accordion("Tag Filtering", open=False):
+                (
+                    remove_bad_tags,
+                    remove_text_tags,
+                    remove_artist_tags,
+                    remove_character_tags,
+                    remove_series_tags,
+                    remove_clothing_tags,
+                    remove_furry_tags,
+                    remove_headwear_tags,
+                    remove_girl_suffix_tags,
+                    preserve_hair_eye_colors,
+                    restrict_subject_tags,
+                ) = self._build_filter_ui_section()
+                remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
+                if not os.path.exists(PERSONAL_REMOVE_FILE):
+                    self._write_list_file(PERSONAL_REMOVE_FILE, [])
+                if not os.path.exists(FAVORITES_FILE):
+                    self._write_list_file(FAVORITES_FILE, [])
+                personal_choices = self._read_list_file(PERSONAL_REMOVE_FILE)
+                favorite_choices = self._read_list_file(FAVORITES_FILE)
+                with gr.Accordion("Personal Lists", open=False):
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown("**Personal Removal List**")
+                            personal_remove_dropdown = gr.Dropdown(
+                                choices=personal_choices,
+                                value=[],
+                                multiselect=True,
+                                label="Select tags to remove",
+                                allow_custom_value=False,
+                            )
+                            personal_remove_display = gr.Textbox(
+                                label=f"Personal removal list ({len(personal_choices)})",
+                                value=", ".join(personal_choices),
+                                interactive=False,
+                                lines=3,
+                            )
+                            personal_remove_input = gr.Textbox(
+                                label="Add tags", placeholder="comma or newline separated"
+                            )
+                            with gr.Row():
+                                personal_add_btn = gr.Button("Add", variant="primary")
+                                personal_remove_btn = gr.Button("Remove Selected")
+                                personal_dedupe_btn = gr.Button("De-duplicate")
+                            with gr.Row():
+                                personal_import_file = gr.File(
+                                    label="Import CSV/TXT",
+                                    file_types=[".txt", ".csv"],
+                                    visible=True,
+                                )
+                                personal_export_btn = gr.DownloadButton(
+                                    "Export", value=PERSONAL_REMOVE_FILE
+                                )
+                            personal_status = gr.Markdown("", visible=True)
+                        with gr.Column():
+                            gr.Markdown("**Favorites List**")
+                            favorites_dropdown = gr.Dropdown(
+                                choices=favorite_choices,
+                                value=[],
+                                multiselect=True,
+                                label="Select favorites to remove",
+                                allow_custom_value=False,
+                            )
+                            favorites_display = gr.Textbox(
+                                label=f"Favorites list ({len(favorite_choices)})",
+                                value=", ".join(favorite_choices),
+                                interactive=False,
+                                lines=3,
+                            )
+                            favorites_input = gr.Textbox(
+                                label="Add favorites", placeholder="comma or newline separated"
+                            )
+                            with gr.Row():
+                                favorites_add_btn = gr.Button("Add", variant="primary")
+                                favorites_remove_btn = gr.Button("Remove Selected")
+                                favorites_dedupe_btn = gr.Button("De-duplicate")
+                            with gr.Row():
+                                favorites_import_file = gr.File(
+                                    label="Import CSV/TXT",
+                                    file_types=[".txt", ".csv"],
+                                    visible=True,
+                                )
+                                favorites_export_btn = gr.DownloadButton(
+                                    "Export", value=FAVORITES_FILE
+                                )
+                            favorites_status = gr.Markdown("", visible=True)
+                self._ui_personal_dropdown = personal_remove_dropdown
+                self._ui_favorites_dropdown = favorites_dropdown
+
+                (
+                    use_search_txt,
+                    use_remove_txt,
+                    choose_search_txt,
+                    choose_remove_txt,
+                    search_refresh_btn,
+                    remove_refresh_btn,
+                ) = self._build_personal_lists_ui_section()
+
+                with gr.Accordion("Tag Catalog", open=False):
+                    use_tag_catalog, catalog_path = self._build_catalog_ui_section()
+
+            with gr.Accordion("Img2Img / ControlNet", open=False):
+                use_img2img = gr.Checkbox(label="Use Image for Img2Img", value=False)
+                use_ip = gr.Checkbox(label="Use Image for ControlNet (Unit 0)", value=False)
+                denoising = gr.Slider(
+                    value=0.75,
+                    label="Img2Img Denoising / CN Weight",
+                    minimum=0.0,
+                    maximum=1.0,
+                    step=0.05,
+                )
+                use_last_img = gr.Checkbox(label="Use same image for batch", value=False)
+                crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
+                enable_adetailer_support = gr.Checkbox(
+                    label="Enable RanbooruX ADetailer support",
+                    value=False,
+                    info="Run RanbooruX's manual ADetailer integration after img2img when enabled.",
+                )
+
+            with gr.Accordion("Extra Prompt Modes", open=False):
+                with gr.Box():
+                    mix_prompt = gr.Checkbox(label="Mix tags from multiple posts", value=False)
+                    mix_amount = gr.Slider(
+                        value=2, label="Posts to mix", minimum=2, maximum=10, step=1
+                    )
+                with gr.Box():
+                    chaos_mode = gr.Radio(
+                        ["None", "Shuffle All", "Shuffle Negative"],
+                        label="Tag Shuffling (Chaos)",
+                        value="None",
+                    )
+                    chaos_amount = gr.Slider(
+                        value=0.5, label="Chaos Amount %", minimum=0.1, maximum=1.0, step=0.05
+                    )
+
+            with gr.Accordion("Run Options", open=False):
+                use_same_seed = gr.Checkbox(label="Use same seed for batch", value=False)
+                reuse_cached_posts = gr.Checkbox(
+                    label="Reuse cached booru posts",
+                    value=False,
+                    info="Leave disabled to fetch fresh images every generation. Enable when you want RanbooruX to reuse the previously cached posts.",
+                )
+                use_cache = gr.Checkbox(label="Cache Booru API requests", value=True)
+                log_prompt_sources = gr.Checkbox(
+                    label="Log image sources/prompts to txt",
+                    value=False,
+                    info="When enabled, RanbooruX appends a log entry mapping seeds and prompts to the source posts.",
+                )
+                anima_auto_detect = gr.Checkbox(
+                    label="Auto-detect Anima model",
+                    value=True,
+                    info="Automatically enable space-separated tags when an Anima model is loaded",
+                )
+                anima_tune_img2img = gr.Checkbox(
+                    label="Auto-tune Img2Img parameters for Anima",
+                    value=True,
+                    info="Automatically optimize steps, CFG scale, and denoising for Anima flow-matching",
+                )
+
             booru.change(get_available_ratings, [booru, mature_rating], mature_rating)
             booru.change(show_fringe_benefits, booru, fringe_benefits)
             booru.change(
@@ -2736,64 +2795,6 @@ class Script(scripts.Script):
                 ],
                 queue=False,
             )
-
-            gr.Markdown("""\n---\n""")
-            with gr.Group():
-                with gr.Accordion("Img2Img / ControlNet", open=False):
-                    use_img2img = gr.Checkbox(label="Use Image for Img2Img", value=False)
-                    use_ip = gr.Checkbox(label="Use Image for ControlNet (Unit 0)", value=False)
-                    denoising = gr.Slider(
-                        value=0.75,
-                        label="Img2Img Denoising / CN Weight",
-                        minimum=0.0,
-                        maximum=1.0,
-                        step=0.05,
-                    )
-                    use_last_img = gr.Checkbox(label="Use same image for batch", value=False)
-                    crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
-                    enable_adetailer_support = gr.Checkbox(
-                        label="Enable RanbooruX ADetailer support",
-                        value=False,
-                        info="Run RanbooruX's manual ADetailer integration after img2img when enabled.",
-                    )
-                    reuse_cached_posts = gr.Checkbox(
-                        label="Reuse cached booru posts",
-                        value=False,
-                        info="Leave disabled to fetch fresh images every generation. Enable when you want RanbooruX to reuse the previously cached posts.",
-                    )
-            with gr.Group():
-                (
-                    use_search_txt,
-                    use_remove_txt,
-                    choose_search_txt,
-                    choose_remove_txt,
-                    search_refresh_btn,
-                    remove_refresh_btn,
-                ) = self._build_personal_lists_ui_section()
-            with gr.Group():
-                with gr.Accordion("Extra Prompt Modes", open=False):
-                    with gr.Box():
-                        mix_prompt = gr.Checkbox(label="Mix tags from multiple posts", value=False)
-                        mix_amount = gr.Slider(
-                            value=2, label="Posts to mix", minimum=2, maximum=10, step=1
-                        )
-                    with gr.Box():
-                        chaos_mode = gr.Radio(
-                            ["None", "Shuffle All", "Shuffle Negative"],
-                            label="Tag Shuffling (Chaos)",
-                            value="None",
-                        )
-                        chaos_amount = gr.Slider(
-                            value=0.5, label="Chaos Amount %", minimum=0.1, maximum=1.0, step=0.05
-                        )
-                    with gr.Box():
-                        use_same_seed = gr.Checkbox(label="Use same seed for batch", value=False)
-                        use_cache = gr.Checkbox(label="Cache Booru API requests", value=True)
-                        log_prompt_sources = gr.Checkbox(
-                            label="Log image sources/prompts to txt",
-                            value=False,
-                            info="When enabled, RanbooruX appends a log entry mapping seeds and prompts to the source posts.",
-                        )
         (
             lora_enabled,
             lora_folder,
