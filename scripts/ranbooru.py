@@ -123,6 +123,17 @@ CONTROLNET_IMG2IMG_FAILED_NOTE = (
 )
 
 
+IMG2IMG_NO_SOURCE_NOTE = (
+    "RanbooruX: Img2Img skipped - the booru image could not be downloaded. "
+    "Generated from the booru prompt only."
+)
+
+
+def _post_has_image_url(post: Any) -> bool:
+    url = post.get("file_url") if isinstance(post, dict) else None
+    return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+
 def _controlnet_unit_copy(unit: Any, **fields: Any) -> Any:
     """Copy a ControlNet unit (dict or object) with `fields` changed; the original is untouched."""
     if isinstance(unit, dict):
@@ -4915,6 +4926,17 @@ class Script(scripts.Script):
                     self._strict_img2img_rejections = []
                     self._last_rejections = []
 
+                if (use_img2img or use_ip) and not post_id:
+                    # Some posts carry no file URL (e.g. restricted on Danbooru); picking one
+                    # would leave Img2Img/ControlNet without a source image.
+                    downloadable = [post for post in filtered_posts if _post_has_image_url(post)]
+                    if downloadable and len(downloadable) < len(filtered_posts):
+                        print(
+                            f"[R] Ignoring {len(filtered_posts) - len(downloadable)} post(s) "
+                            "with no downloadable image."
+                        )
+                        filtered_posts = downloadable
+
                 all_posts = filtered_posts
                 selected_posts = self._select_posts(
                     filtered_posts, sorting_order, num_images_needed, post_id, same_prompt
@@ -5187,7 +5209,12 @@ class Script(scripts.Script):
                         setattr(p, "resize_mode", 1)
                     print("[R Before] ControlNet script not found; p.resize_mode safeguard set.")
 
-            self._prepare_img2img_pass(p, use_img2img, use_ip)
+            has_source_image = any(img is not None for img in (self.last_img or []))
+            if use_img2img and not has_source_image:
+                # Without a source image the placeholder pass would be the only output.
+                print("[R Before] Img2Img skipped: no source image; running a normal generation.")
+                _record_processing_comment(p, IMG2IMG_NO_SOURCE_NOTE)
+            self._prepare_img2img_pass(p, use_img2img and has_source_image, use_ip)
 
             # The bundled catalog still classifies tags when the custom-catalog toggle is off.
             uses_custom_catalog = bool(

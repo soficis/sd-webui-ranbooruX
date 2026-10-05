@@ -186,6 +186,23 @@ def _restore_runner_callback_map(
     setattr(runner, "callback_map", dict(original_callback_map))
 
 
+def _restore_guarded_script_list(runner: object, list_attr: str, saved: List[Any]) -> None:
+    """Put back the pre-call script list, keeping ADetailer scripts reattached during the call.
+
+    RanbooruX reattaches ADetailer from inside the guarded postprocess; restoring the
+    saved list verbatim would drop it from the runner for every later generation.
+    """
+    if not hasattr(runner, list_attr):
+        return
+    current = list(getattr(runner, list_attr, []) or [])
+    reattached = [
+        item
+        for item in current
+        if _is_adetailer_script(item) and not any(item is kept for kept in saved)
+    ]
+    setattr(runner, list_attr, list(saved) + reattached)
+
+
 def install_runner_guard(
     runner: object,
     block_flag_fn: Callable[[], bool],
@@ -223,10 +240,8 @@ def install_runner_guard(
                     expected_callback_map = {}
                 return postprocess(*args, **kwargs)
             finally:
-                if hasattr(runner, "alwayson_scripts"):
-                    setattr(runner, "alwayson_scripts", saved_alwayson)
-                if hasattr(runner, "scripts"):
-                    setattr(runner, "scripts", saved_scripts)
+                _restore_guarded_script_list(runner, "alwayson_scripts", saved_alwayson)
+                _restore_guarded_script_list(runner, "scripts", saved_scripts)
                 if expected_callback_map is not None:
                     _restore_runner_callback_map(
                         runner,
@@ -267,10 +282,8 @@ def install_runner_guard(
                     expected_callback_map = {}
                 return postprocess_image(*args, **kwargs)
             finally:
-                if hasattr(runner, "alwayson_scripts"):
-                    setattr(runner, "alwayson_scripts", saved_alwayson)
-                if hasattr(runner, "scripts"):
-                    setattr(runner, "scripts", saved_scripts)
+                _restore_guarded_script_list(runner, "alwayson_scripts", saved_alwayson)
+                _restore_guarded_script_list(runner, "scripts", saved_scripts)
                 if expected_callback_map is not None:
                     _restore_runner_callback_map(
                         runner,

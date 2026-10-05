@@ -391,3 +391,54 @@ def test_note_run_failure_handles_empty_reason(stub_modules):
         "RanbooruX: unexpected error.",
         "RanbooruX: boom. Generated with your prompt unchanged.",
     ]
+
+
+def _img2img_run(monkeypatch, posts, fetched):
+    import scripts.ranbooru as ranbooru
+
+    script = ranbooru.Script()
+    p = _processing()
+    p.comments = []
+    steps_before = p.steps
+
+    class FakeApi:
+        booru_name = "Danbooru"
+        headers = {}
+
+        def get_posts(self, **_kwargs):
+            return posts
+
+    seen = []
+
+    def fake_fetch(selected_posts, *_args, **_kwargs):
+        seen.extend(selected_posts)
+        return list(fetched)
+
+    monkeypatch.setattr(script, "_get_booru_api", lambda *_args, **_kwargs: FakeApi())
+    monkeypatch.setattr(script, "_fetch_images", fake_fetch)
+    monkeypatch.setattr(script, "_install_preview_guard", lambda: None)
+    monkeypatch.setattr(script, "_set_preview_guard", lambda *_args, **_kwargs: None)
+
+    script.before_process(p, *_args(enabled=True, use_img2img=True, use_ip=False))
+    return ranbooru, script, p, steps_before, seen
+
+
+def test_img2img_without_source_image_runs_normal_generation(monkeypatch, stub_modules):
+    posts = [{"id": 1, "tags": "1girl blonde_hair"}]
+    ranbooru, script, p, steps_before, _ = _img2img_run(monkeypatch, posts, fetched=[])
+
+    # A one-step placeholder pass must not become the user's only output.
+    assert script.run_img2img_pass is False
+    assert p.steps == steps_before
+    assert ranbooru.IMG2IMG_NO_SOURCE_NOTE in p.comments
+
+
+def test_img2img_ignores_posts_without_downloadable_image(monkeypatch, stub_modules):
+    posts = [
+        {"id": 1, "tags": "1girl blonde_hair"},
+        {"id": 2, "tags": "1girl red_hair", "file_url": "https://img.test/b.png"},
+    ]
+    _, script, _, _, seen = _img2img_run(monkeypatch, posts, fetched=[object()])
+
+    assert [post["id"] for post in seen] == [2]
+    assert script.run_img2img_pass is True
