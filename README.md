@@ -268,6 +268,34 @@ Controls:
 - `Detected LoRAs (toggle enabled)`
 - `LoRAnado blacklist`
 
+## Upgrade Notes
+
+In the panel UX update, several component labels and button texts were renamed for clarity and to ensure all interactive controls have unique identifiers. In WebUI, saved defaults in `ui-config.json` are keyed by component label. Because of these renames, any custom UI defaults previously saved for these controls will reset once to their code defaults; subsequent customizations will be saved under the new labels.
+
+### Renamed Controls & Buttons
+
+| Control Type | Old Label / Text | New Label / Text | Note |
+|---|---|---|---|
+| Textbox | `Tags to Search (Pre)` | `Search tags` | Search input |
+| Textbox | `Tags to Remove (Post)` | `Always remove tags` | Removal input |
+| Radio | `Tag Shuffling (Chaos)` | `Shuffle tags (chaos)` | Chaos mode selector |
+| Slider | `Img2Img Denoising / CN Weight` | `Img2Img denoising / ControlNet weight` | Info text explains dual role |
+| Textbox | `Tag Catalog Path` | `Custom catalog path` | Custom CSV catalog path |
+| Button | `Remove Text-like Tags` | *(Removed)* | Covered by `Reset to defaults` |
+| Button | *(New)* | `Reset to defaults` | Preset resetting to bad + text tags |
+| Button | `Add` (removal) | `Add to removal list` | Unique button identifier |
+| Button | `Remove Selected` (removal) | `Remove selected (removal)` | Unique button identifier |
+| Button | `De-duplicate` (removal) | `De-duplicate removal list` | Unique button identifier |
+| DownloadButton | `Export` (removal) | `Export removal list` | Unique button identifier |
+| Button | `Add` (favorites) | `Add to favorites` | Unique button identifier |
+| Button | `Remove Selected` (favorites) | `Remove selected (favorites)` | Unique button identifier |
+| Button | `De-duplicate` (favorites) | `De-duplicate favorites` | Unique button identifier |
+| DownloadButton | `Export` (favorites) | `Export favorites` | Unique button identifier |
+| Button | `Refresh` (search file) | `Refresh search files` | Unique button identifier |
+| Button | `Refresh` (remove file) | `Refresh remove files` | Unique button identifier |
+| File | `Import CSV/TXT` (removal) | `Import removal list (CSV/TXT)` | Unique file upload identifier |
+| File | `Import CSV/TXT` (favorites) | `Import favorites (CSV/TXT)` | Unique file upload identifier |
+
 ## Credits
 
 - Original Ranbooru by Inzaniak

@@ -1618,6 +1618,14 @@ class Script(scripts.Script):
         self._gelbooru_compat_base_url = sanitized
         return _gr_component_update(gr.Textbox, value=self._gelbooru_compat_base_url)
 
+    def _ui_update_post_id_dependencies(self, post_id_val: Optional[str]):
+        is_empty = not bool((post_id_val or "").strip())
+        return (
+            _gr_component_update(gr.Textbox, interactive=is_empty),
+            _gr_component_update(gr.Slider, interactive=is_empty),
+            _gr_component_update(gr.Radio, interactive=is_empty),
+        )
+
     def _extract_color_tags(self, text: str) -> tuple[set[str], set[str]]:
         hair_tags: set[str] = set()
         eye_tags: set[str] = set()
@@ -2343,9 +2351,10 @@ class Script(scripts.Script):
 
         with gr.Row():
             preset_strip_series = gr.Button("Strip Series/Character")
-            preset_remove_text = gr.Button("Remove Text-like Tags")
             preset_preserve_colors = gr.Button("Preserve Base Colors")
             preset_quick_strip = gr.Button("Quick Strip")
+            preset_reset_defaults = gr.Button("Reset to defaults")
+        preset_status = gr.Markdown("", visible=True)
         with gr.Group():
             gr.Markdown("**Metadata**")
             remove_bad_tags = gr.Checkbox(
@@ -2408,47 +2417,47 @@ class Script(scripts.Script):
                 info="Keep your prompt's hair/eye colors while removing conflicting imports.",
             )
 
+        filter_checkboxes = [
+            remove_bad_tags,
+            remove_text_tags,
+            remove_artist_tags,
+            remove_character_tags,
+            remove_series_tags,
+            remove_clothing_tags,
+            remove_furry_tags,
+            remove_headwear_tags,
+            remove_girl_suffix_tags,
+            preserve_hair_eye_colors,
+            restrict_subject_tags,
+        ]
+
+        def _apply_preset(name: str):
+            values, status_text = rb_ui_helpers.get_filter_preset_values(name)
+            updates = tuple(_gr_component_update(gr.Checkbox, value=v) for v in values)
+            return (*updates, _gr_component_update(gr.Markdown, value=status_text))
+
         preset_strip_series.click(
-            fn=lambda: (
-                _gr_component_update(gr.Checkbox, value=True),
-                _gr_component_update(gr.Checkbox, value=True),
-                _gr_component_update(gr.Checkbox, value=True),
-            ),
+            fn=lambda: _apply_preset("Strip Series/Character"),
             inputs=[],
-            outputs=[remove_series_tags, remove_character_tags, remove_artist_tags],
-            queue=False,
-        )
-        preset_remove_text.click(
-            fn=lambda: (
-                _gr_component_update(gr.Checkbox, value=True),
-                _gr_component_update(gr.Checkbox, value=True),
-            ),
-            inputs=[],
-            outputs=[remove_text_tags, remove_bad_tags],
+            outputs=[*filter_checkboxes, preset_status],
             queue=False,
         )
         preset_preserve_colors.click(
-            fn=lambda: _gr_component_update(gr.Checkbox, value=True),
+            fn=lambda: _apply_preset("Preserve Base Colors"),
             inputs=[],
-            outputs=[preserve_hair_eye_colors],
+            outputs=[*filter_checkboxes, preset_status],
             queue=False,
         )
         preset_quick_strip.click(
-            fn=lambda: tuple(_gr_component_update(gr.Checkbox, value=True) for _ in range(11)),
+            fn=lambda: _apply_preset("Quick Strip"),
             inputs=[],
-            outputs=[
-                remove_bad_tags,
-                remove_text_tags,
-                remove_artist_tags,
-                remove_character_tags,
-                remove_series_tags,
-                remove_clothing_tags,
-                remove_furry_tags,
-                remove_headwear_tags,
-                remove_girl_suffix_tags,
-                preserve_hair_eye_colors,
-                restrict_subject_tags,
-            ],
+            outputs=[*filter_checkboxes, preset_status],
+            queue=False,
+        )
+        preset_reset_defaults.click(
+            fn=lambda: _apply_preset("Reset to defaults"),
+            inputs=[],
+            outputs=[*filter_checkboxes, preset_status],
             queue=False,
         )
 
@@ -2481,7 +2490,7 @@ class Script(scripts.Script):
                 value="",
                 info=f"in '{USER_SEARCH_DIR}'",
             )
-            search_refresh_btn = gr.Button("Refresh")
+            search_refresh_btn = gr.Button("Refresh search files")
             use_remove_txt = gr.Checkbox(label="Add tags from Remove File", value=False)
             choose_remove_txt = gr.Dropdown(
                 self.get_files(USER_REMOVE_DIR),
@@ -2489,7 +2498,7 @@ class Script(scripts.Script):
                 value="",
                 info=f"in '{USER_REMOVE_DIR}'",
             )
-            remove_refresh_btn = gr.Button("Refresh")
+            remove_refresh_btn = gr.Button("Refresh remove files")
 
         search_refresh_btn.click(fn=self.refresh_ser, inputs=[], outputs=[choose_search_txt])
         remove_refresh_btn.click(fn=self.refresh_rem, inputs=[], outputs=[choose_remove_txt])
@@ -2538,7 +2547,10 @@ class Script(scripts.Script):
                     value=self._gelbooru_compat_base_url,
                 )
             fringe_benefits = gr.Checkbox(
-                label="Gelbooru: Fringe Benefits", value=True, visible=False
+                label="Gelbooru: Fringe Benefits",
+                value=True,
+                visible=False,
+                info="Legacy option for Gelbooru API compatibility.",
             )
             mature_rating = gr.Radio(
                 list(RATINGS.get("gelbooru", RATING_TYPES["none"])),
@@ -2547,7 +2559,7 @@ class Script(scripts.Script):
             )
 
             gr.Markdown("**Search**")
-            tags = gr.Textbox(lines=1, label="Tags to Search (Pre)")
+            tags = gr.Textbox(lines=1, label="Search tags")
             post_id = gr.Textbox(lines=1, label="Post ID (Overrides tags/pages)")
             max_pages = gr.Slider(
                 label="Max Pages (tag search)", minimum=1, maximum=100, value=10, step=1
@@ -2562,10 +2574,20 @@ class Script(scripts.Script):
             shuffle_tags = gr.Checkbox(label="Shuffle tags", value=True)
             change_dash = gr.Checkbox(label='Convert "_" to spaces', value=False)
             limit_tags = gr.Slider(
-                value=1.0, label="Limit tags by %", minimum=0.05, maximum=1.0, step=0.05
+                value=1.0,
+                label="Limit tags by %",
+                minimum=0.05,
+                maximum=1.0,
+                step=0.05,
+                info="Reduces tags by percentage first before Max tags is applied.",
             )
             max_tags = gr.Slider(
-                value=0, label="Max tags (0=disabled)", minimum=0, maximum=300, step=1
+                value=0,
+                label="Max tags (0=disabled)",
+                minimum=0,
+                maximum=300,
+                step=1,
+                info="Hard cap on total tags; applied after Limit %.",
             )
             change_background = gr.Radio(
                 ["Don't Change", "Add Detail", "Force Simple", "Force Transparent/White"],
@@ -2593,7 +2615,7 @@ class Script(scripts.Script):
                     preserve_hair_eye_colors,
                     restrict_subject_tags,
                 ) = self._build_filter_ui_section()
-                remove_tags = gr.Textbox(lines=1, label="Tags to Remove (Post)")
+                remove_tags = gr.Textbox(lines=1, label="Always remove tags")
                 if not os.path.exists(PERSONAL_REMOVE_FILE):
                     self._write_list_file(PERSONAL_REMOVE_FILE, [])
                 if not os.path.exists(FAVORITES_FILE):
@@ -2621,17 +2643,19 @@ class Script(scripts.Script):
                                 label="Add tags", placeholder="comma or newline separated"
                             )
                             with gr.Row():
-                                personal_add_btn = gr.Button("Add", variant="primary")
-                                personal_remove_btn = gr.Button("Remove Selected")
-                                personal_dedupe_btn = gr.Button("De-duplicate")
+                                personal_add_btn = gr.Button(
+                                    "Add to removal list", variant="primary"
+                                )
+                                personal_remove_btn = gr.Button("Remove selected (removal)")
+                                personal_dedupe_btn = gr.Button("De-duplicate removal list")
                             with gr.Row():
                                 personal_import_file = gr.File(
-                                    label="Import CSV/TXT",
+                                    label="Import removal list (CSV/TXT)",
                                     file_types=[".txt", ".csv"],
                                     visible=True,
                                 )
                                 personal_export_btn = gr.DownloadButton(
-                                    "Export", value=PERSONAL_REMOVE_FILE
+                                    "Export removal list", value=PERSONAL_REMOVE_FILE
                                 )
                             personal_status = gr.Markdown("", visible=True)
                         with gr.Column():
@@ -2653,17 +2677,17 @@ class Script(scripts.Script):
                                 label="Add favorites", placeholder="comma or newline separated"
                             )
                             with gr.Row():
-                                favorites_add_btn = gr.Button("Add", variant="primary")
-                                favorites_remove_btn = gr.Button("Remove Selected")
-                                favorites_dedupe_btn = gr.Button("De-duplicate")
+                                favorites_add_btn = gr.Button("Add to favorites", variant="primary")
+                                favorites_remove_btn = gr.Button("Remove selected (favorites)")
+                                favorites_dedupe_btn = gr.Button("De-duplicate favorites")
                             with gr.Row():
                                 favorites_import_file = gr.File(
-                                    label="Import CSV/TXT",
+                                    label="Import favorites (CSV/TXT)",
                                     file_types=[".txt", ".csv"],
                                     visible=True,
                                 )
                                 favorites_export_btn = gr.DownloadButton(
-                                    "Export", value=FAVORITES_FILE
+                                    "Export favorites", value=FAVORITES_FILE
                                 )
                             favorites_status = gr.Markdown("", visible=True)
                 self._ui_personal_dropdown = personal_remove_dropdown
@@ -2686,10 +2710,11 @@ class Script(scripts.Script):
                 use_ip = gr.Checkbox(label="Use Image for ControlNet (Unit 0)", value=False)
                 denoising = gr.Slider(
                     value=0.75,
-                    label="Img2Img Denoising / CN Weight",
+                    label="Img2Img denoising / ControlNet weight",
                     minimum=0.0,
                     maximum=1.0,
                     step=0.05,
+                    info="Controls Img2Img denoising strength or ControlNet weight depending on which is enabled.",
                 )
                 use_last_img = gr.Checkbox(label="Use same image for batch", value=False)
                 crop_center = gr.Checkbox(label="Crop image to fit target", value=False)
@@ -2703,16 +2728,26 @@ class Script(scripts.Script):
                 with gr.Box():
                     mix_prompt = gr.Checkbox(label="Mix tags from multiple posts", value=False)
                     mix_amount = gr.Slider(
-                        value=2, label="Posts to mix", minimum=2, maximum=10, step=1
+                        value=2,
+                        label="Posts to mix",
+                        minimum=2,
+                        maximum=10,
+                        step=1,
+                        visible=False,
                     )
                 with gr.Box():
                     chaos_mode = gr.Radio(
                         ["None", "Shuffle All", "Shuffle Negative"],
-                        label="Tag Shuffling (Chaos)",
+                        label="Shuffle tags (chaos)",
                         value="None",
                     )
                     chaos_amount = gr.Slider(
-                        value=0.5, label="Chaos Amount %", minimum=0.1, maximum=1.0, step=0.05
+                        value=0.5,
+                        label="Chaos Amount %",
+                        minimum=0.1,
+                        maximum=1.0,
+                        step=0.05,
+                        visible=False,
                     )
 
             with gr.Accordion("Run Options", open=False):
@@ -2793,6 +2828,30 @@ class Script(scripts.Script):
                     gelbooru_api_key,
                     gelbooru_user_id,
                 ],
+                queue=False,
+            )
+            post_id.blur(
+                fn=self._ui_update_post_id_dependencies,
+                inputs=[post_id],
+                outputs=[tags, max_pages, sorting_order],
+                queue=False,
+            )
+            post_id.submit(
+                fn=self._ui_update_post_id_dependencies,
+                inputs=[post_id],
+                outputs=[tags, max_pages, sorting_order],
+                queue=False,
+            )
+            mix_prompt.change(
+                fn=lambda enabled: _gr_component_update(gr.Slider, visible=bool(enabled)),
+                inputs=[mix_prompt],
+                outputs=[mix_amount],
+                queue=False,
+            )
+            chaos_mode.change(
+                fn=lambda mode: _gr_component_update(gr.Slider, visible=(mode != "None")),
+                inputs=[chaos_mode],
+                outputs=[chaos_amount],
                 queue=False,
             )
         (

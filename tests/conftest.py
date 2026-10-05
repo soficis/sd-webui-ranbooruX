@@ -140,7 +140,7 @@ def stub_modules(tmp_path, request):
         "DownloadButton",
         "State",
     ):
-        setattr(gradio_mod, _name, DummyComponent)
+        setattr(gradio_mod, _name, type(_name, (DummyComponent,), {}))
     for _name in ("Group", "Row", "Column", "Accordion", "Box"):
         setattr(gradio_mod, _name, DummyContext)
 

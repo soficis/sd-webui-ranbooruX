@@ -140,3 +140,31 @@ def test_format_list_status():
     assert (
         format_list_status("import", error="File too large") == "Failed to import: File too large"
     )
+
+
+def test_filter_presets():
+    from ranboorux.ui_helpers import get_filter_preset_values
+
+    # Reset to defaults
+    values, msg = get_filter_preset_values("Reset to defaults")
+    assert len(values) == 11
+    assert values == (True, True, False, False, False, False, False, False, False, False, False)
+    assert msg == "Applied preset: Reset to defaults, 2 filters on"
+
+    # Quick Strip
+    values, msg = get_filter_preset_values("Quick Strip")
+    assert len(values) == 11
+    assert all(values)
+    assert msg == "Applied preset: Quick Strip, 11 filters on"
+
+    # Strip Series/Character
+    values, msg = get_filter_preset_values("Strip Series/Character")
+    assert len(values) == 11
+    assert values == (True, True, True, True, True, False, False, False, False, False, False)
+    assert msg == "Applied preset: Strip Series/Character, 5 filters on"
+
+    # Preserve Base Colors
+    values, msg = get_filter_preset_values("Preserve Base Colors")
+    assert len(values) == 11
+    assert values == (True, True, False, False, False, False, False, False, False, True, False)
+    assert msg == "Applied preset: Preserve Base Colors, 3 filters on"

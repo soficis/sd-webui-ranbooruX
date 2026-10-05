@@ -100,3 +100,28 @@ def format_list_status(
             return f"No new tags imported from {fn} ({skipped} already present)."
         return f"No tags found to import from {fn}."
     return ""
+
+
+def get_filter_preset_values(preset_name: str) -> Tuple[Tuple[bool, ...], str]:
+    """Returns an 11-tuple of booleans and a status message for filter presets.
+
+    The 11 booleans correspond in order to:
+    (remove_bad_tags, remove_text_tags, remove_artist_tags, remove_character_tags,
+     remove_series_tags, remove_clothing_tags, remove_furry_tags, remove_headwear_tags,
+     remove_girl_suffix_tags, preserve_hair_eye_colors, restrict_subject_tags)
+    """
+    if preset_name == "Quick Strip":
+        values = (True,) * 11
+    elif preset_name == "Strip Series/Character":
+        values = (True, True, True, True, True, False, False, False, False, False, False)
+    elif preset_name == "Preserve Base Colors":
+        values = (True, True, False, False, False, False, False, False, False, True, False)
+    elif preset_name == "Reset to defaults":
+        values = (True, True, False, False, False, False, False, False, False, False, False)
+    else:
+        values = (False,) * 11
+
+    count = sum(1 for v in values if v)
+    noun = "filter" if count == 1 else "filters"
+    msg = f"Applied preset: {preset_name}, {count} {noun} on"
+    return values, msg
